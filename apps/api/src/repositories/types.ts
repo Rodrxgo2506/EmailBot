@@ -2,9 +2,14 @@ import type {
   AuditAction,
   AuditLogEntry,
   Bot,
+  BotCustomerAssignment,
   BotStatus,
   Category,
+  Customer,
+  CustomerIdentifier,
+  CustomerIdentifierType,
   CustomerResolution,
+  CustomerStatus,
   EmailAccount,
   EmailAccountStatus,
   EmailAttachment,
@@ -21,7 +26,7 @@ import type {
   Paginated,
   PortalSettings
 } from "@emailbot/types";
-import type { EmailListQuery, RuleAction, RuleCondition } from "@emailbot/validation";
+import type { CustomerListQuery, EmailListQuery, RuleAction, RuleCondition } from "@emailbot/validation";
 
 /*
  * Data-access contracts.
@@ -112,6 +117,54 @@ export interface BotRepository {
   remove(organizationId: string, id: string): Promise<boolean>;
   /** Whether any processed email was routed to the bot (history that a delete would orphan). */
   hasEmails(organizationId: string, id: string): Promise<boolean>;
+  /** Whether customers are assigned to the bot or identifiers are scoped to it (the database blocks the delete). */
+  hasCustomerLinks(organizationId: string, id: string): Promise<boolean>;
+}
+
+export interface CustomerWrite {
+  displayName?: string;
+  status?: CustomerStatus;
+  externalRef?: string | null;
+  notes?: string | null;
+}
+
+/** Customers are suspended, never deleted, by members (no delete method). */
+export interface CustomerRepository {
+  /** Scoped to the organization; search matches name, external ref or a normalized identifier. */
+  list(organizationId: string, query: CustomerListQuery): Promise<Paginated<Customer>>;
+  get(organizationId: string, id: string): Promise<Customer | null>;
+  create(organizationId: string, userId: string, input: CustomerWrite & { displayName: string }): Promise<Customer>;
+  update(organizationId: string, id: string, patch: CustomerWrite): Promise<Customer | null>;
+}
+
+export interface CustomerIdentifierWrite {
+  value?: string;
+  normalizedValue?: string;
+  botId?: string | null;
+  active?: boolean;
+}
+
+export interface CustomerIdentifierRepository {
+  list(organizationId: string, customerId: string): Promise<CustomerIdentifier[]>;
+  get(organizationId: string, customerId: string, id: string): Promise<CustomerIdentifier | null>;
+  create(
+    organizationId: string,
+    customerId: string,
+    input: { type: CustomerIdentifierType; value: string; normalizedValue: string; botId: string | null; active: boolean }
+  ): Promise<CustomerIdentifier>;
+  update(organizationId: string, customerId: string, id: string, patch: CustomerIdentifierWrite): Promise<CustomerIdentifier | null>;
+  remove(organizationId: string, customerId: string, id: string): Promise<boolean>;
+}
+
+export interface BotCustomerAssignmentRepository {
+  /** With the customer summary embedded. */
+  listForBot(organizationId: string, botId: string): Promise<BotCustomerAssignment[]>;
+  /** With the bot summary embedded. */
+  listForCustomer(organizationId: string, customerId: string): Promise<BotCustomerAssignment[]>;
+  get(organizationId: string, botId: string, customerId: string): Promise<BotCustomerAssignment | null>;
+  create(organizationId: string, userId: string, botId: string, customerId: string, active: boolean): Promise<BotCustomerAssignment>;
+  update(organizationId: string, botId: string, customerId: string, active: boolean): Promise<BotCustomerAssignment | null>;
+  remove(organizationId: string, botId: string, customerId: string): Promise<boolean>;
 }
 
 export interface RuleWrite {
@@ -184,6 +237,9 @@ export interface Repositories {
   emailAccounts: EmailAccountRepository;
   categories: CategoryRepository;
   bots: BotRepository;
+  customers: CustomerRepository;
+  customerIdentifiers: CustomerIdentifierRepository;
+  botCustomers: BotCustomerAssignmentRepository;
   rules: RuleRepository;
   emails: EmailRepository;
   attachments: AttachmentRepository;

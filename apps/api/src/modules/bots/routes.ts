@@ -107,6 +107,10 @@ export async function botRoutes(app: FastifyInstance) {
     if (await repos.bots.hasEmails(organizationId, id)) {
       throw conflict("This bot already has processed emails; pause it to keep its history", "BOT_HAS_EMAILS");
     }
+    // The database blocks it too (NO ACTION foreign keys): nothing is deleted or widened silently.
+    if (await repos.bots.hasCustomerLinks(organizationId, id)) {
+      throw conflict("Remove the bot's customers and bot-scoped identifiers before deleting it", "BOT_IN_USE");
+    }
 
     await repos.bots.remove(organizationId, id);
     await app.audit(request, { action: "DELETE", entityType: "bot", entityId: id, metadata: { event: "bot.deleted", name: bot.name } });

@@ -68,6 +68,14 @@ export function botRepository(db: SupabaseClient): BotRepository {
         await db.from("emails").select("id").eq("organization_id", organizationId).eq("bot_id", id).limit(1)
       ) as Row[];
       return rows.length > 0;
+    },
+
+    async hasCustomerLinks(organizationId, id) {
+      const [assignments, identifiers] = await Promise.all([
+        db.from("bot_customer_assignments").select("bot_id").eq("organization_id", organizationId).eq("bot_id", id).limit(1),
+        db.from("customer_identifiers").select("id").eq("organization_id", organizationId).eq("bot_id", id).limit(1)
+      ]);
+      return (unwrap(assignments) as Row[]).length > 0 || (unwrap(identifiers) as Row[]).length > 0;
     }
   };
 }

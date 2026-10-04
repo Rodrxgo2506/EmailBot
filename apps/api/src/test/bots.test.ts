@@ -153,6 +153,7 @@ describe("bots API: create, update, delete", () => {
     const { app, repos, privileged } = await createTestApp({ users: [owner] });
     repos.bots.get.mockResolvedValue(storedBot());
     repos.bots.hasEmails.mockResolvedValue(false);
+    repos.bots.hasCustomerLinks.mockResolvedValue(false);
     repos.bots.remove.mockResolvedValue(true);
 
     const response = await app.inject({ method: "DELETE", url: `/api/bots/${BOT_ID}`, headers: authHeaders(owner, ORG_A) });

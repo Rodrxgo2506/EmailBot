@@ -1,7 +1,10 @@
 import type {
   AuditLogEntry,
   Bot,
+  BotCustomerAssignment,
   Category,
+  Customer,
+  CustomerIdentifier,
   EmailAccount,
   EmailAttachment,
   EmailDetail,
@@ -126,6 +129,62 @@ export function toBot(row: Row): Bot {
     updatedBy: row.updated_by,
     createdAt: row.created_at,
     updatedAt: row.updated_at
+  };
+}
+
+export const CUSTOMER_COLUMNS = "id,organization_id,display_name,status,external_ref,notes,created_by,created_at,updated_at";
+
+export function toCustomer(row: Row): Customer {
+  return {
+    id: row.id,
+    organizationId: row.organization_id,
+    displayName: row.display_name,
+    status: row.status,
+    externalRef: row.external_ref,
+    notes: row.notes,
+    createdBy: row.created_by,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+export const IDENTIFIER_COLUMNS = "id,organization_id,customer_id,type,value,normalized_value,bot_id,active,created_at,updated_at";
+
+export function toCustomerIdentifier(row: Row): CustomerIdentifier {
+  return {
+    id: row.id,
+    organizationId: row.organization_id,
+    customerId: row.customer_id,
+    type: row.type,
+    value: row.value,
+    normalizedValue: row.normalized_value,
+    botId: row.bot_id,
+    active: row.active,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+export const ASSIGNMENT_COLUMNS = "organization_id,bot_id,customer_id,active,created_by,created_at,updated_at";
+
+/** Many-to-one embeds may come back as an object or a one-element array. */
+const single = (value: unknown): Row | null => (Array.isArray(value) ? (value[0] ?? null) : ((value as Row | null) ?? null));
+
+export function toAssignment(row: Row): BotCustomerAssignment {
+  const bot = single(row.bot);
+  const customer = single(row.customer);
+  return {
+    organizationId: row.organization_id,
+    botId: row.bot_id,
+    customerId: row.customer_id,
+    active: row.active,
+    createdBy: row.created_by,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    ...(bot ? { bot: { id: bot.id, name: bot.name, slug: bot.slug, status: bot.status } } : {}),
+    ...(customer
+      ? { customer: { id: customer.id, displayName: customer.display_name, status: customer.status, externalRef: customer.external_ref } }
+      : {})
   };
 }
 

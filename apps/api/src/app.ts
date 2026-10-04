@@ -10,6 +10,7 @@ import { createResilientRateLimitStore } from "./infrastructure/rate-limit-store
 import { auditRoutes } from "./modules/audit/routes.js";
 import { registerAuditRecorder } from "./modules/audit/recorder.js";
 import { botRoutes } from "./modules/bots/routes.js";
+import { customerRoutes } from "./modules/customers/routes.js";
 import { categoryRoutes } from "./modules/categories/routes.js";
 import { emailAccountRoutes } from "./modules/email-accounts/routes.js";
 import { emailRoutes } from "./modules/emails/routes.js";
@@ -117,6 +118,7 @@ export async function buildApp(deps: AppDeps, options: BuildAppOptions = {}) {
       await api.register(emailAccountRoutes(deps));
       await api.register(categoryRoutes);
       await api.register(botRoutes);
+      await api.register(customerRoutes);
       await api.register(ruleRoutes);
       await api.register(emailRoutes(deps));
       await api.register(auditRoutes);
