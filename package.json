@@ -1,15 +1,21 @@
 {
-  "name": "EmailBot",
-  "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
-  "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+  "name": "emailbot",
+  "private": true,
+  "version": "0.1.0",
+  "packageManager": "pnpm@12.8.1",
+  "engines": {
+    "node": ">=22"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
+  "scripts": {
+    "dev": "turbo dev",
+    "build": "turbo build",
+    "typecheck": "turbo typecheck",
+    "lint": "turbo lint",
+    "test": "turbo test",
+    "supabase": "supabase"
+  },
   "devDependencies": {
-    "supabase": "^2.119.0"
+    "supabase": "^2.119.0",
+    "turbo": "^2.5.8"
   }
 }

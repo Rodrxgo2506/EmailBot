@@ -16,3 +16,12 @@ build/
 # OS
 .DS_Store
 Thumbs.db
+
+# Turborepo
+.turbo/
+
+# Test / coverage output
+coverage/
+
+# Vite
+*.local

@@ -1,0 +1,29 @@
+packages:
+  - "apps/*"
+  - "packages/*"
+
+# Shared versions for tooling used by several workspace packages.
+catalog:
+  "@types/node": ^24.7.2
+  typescript: ^5.9.3
+  vitest: ^5.0.3
+  zod: ^4.1.12
+
+allowBuilds:
+  esbuild: true
+  # Downloads the Supabase CLI binary on install.
+  supabase: true
+  # Optional native accelerator used by BullMQ (msgpackr); prebuilt binaries
+  # or the pure JS fallback are used, so no install script is needed.
+  msgpackr-extract: false
+
+minimumReleaseAgeExclude:
+  - "@sentry/bundler-plugins@11.4.0"
+  - "@sentry/core@11.4.0"
+  - "@sentry/node@11.4.0"
+  - "@sentry/opentelemetry@11.4.0"
+  - "@sentry/server-runtime-injection@11.4.0"
+  - "@sentry/server-utils@11.4.0"
+  - "@tanstack/query-core@5.104.1"
+  - "@tanstack/react-query@5.104.1"
+  - lucide-react@1.50.0

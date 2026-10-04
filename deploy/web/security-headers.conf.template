@@ -1,0 +1,11 @@
+# Generated into /etc/nginx/snippets/security-headers.conf at image build time.
+# __CSP__ is replaced by the policy computed from the VITE_* origins
+# (apps/web/src/lib/csp.ts). frame-ancestors only works as a header.
+add_header Content-Security-Policy "__CSP__; frame-ancestors 'none'" always;
+add_header X-Content-Type-Options "nosniff" always;
+add_header X-Frame-Options "DENY" always;
+add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+add_header Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=(), usb=(), interest-cohort=()" always;
+add_header Cross-Origin-Opener-Policy "same-origin" always;
+# Only honoured by browsers over HTTPS (TLS terminated in front of nginx).
+add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;

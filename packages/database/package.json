@@ -1,0 +1,18 @@
+{
+  "name": "@emailbot/database",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Database test harness: applies supabase/migrations to an embedded PostgreSQL (PGlite) and verifies RLS, RBAC and tenant isolation.",
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "lint": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "^0.5.8",
+    "@types/node": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}

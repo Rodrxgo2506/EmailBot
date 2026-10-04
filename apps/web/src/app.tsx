@@ -1,0 +1,101 @@
+import type { Permission } from "@emailbot/types";
+import { QueryClientProvider } from "@tanstack/react-query";
+import { lazy, Suspense, useState, type ComponentType, type ReactNode } from "react";
+import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
+import { Toaster } from "sonner";
+import { AppShell } from "@/components/layout/app-shell";
+import {
+  FullScreenLoader,
+  RedirectIfAuthenticated,
+  RequireAuth,
+  RequireOrganization,
+  RequirePermission
+} from "@/components/layout/guards";
+import { SkeletonRows } from "@/components/ui/feedback";
+import { createQueryClient } from "@/lib/query-client";
+import { AuthProvider } from "@/providers/auth-provider";
+import { OrganizationProvider } from "@/providers/organization-provider";
+
+/* Route-level code splitting: each page is loaded on demand. */
+const page = <K extends string>(loader: () => Promise<Record<K, ComponentType>>, name: K) =>
+  lazy(async () => ({ default: (await loader())[name] }));
+
+const LoginPage = page(() => import("@/features/auth/auth-pages"), "LoginPage");
+const RegisterPage = page(() => import("@/features/auth/auth-pages"), "RegisterPage");
+const ForgotPasswordPage = page(() => import("@/features/auth/auth-pages"), "ForgotPasswordPage");
+const ResetPasswordPage = page(() => import("@/features/auth/auth-pages"), "ResetPasswordPage");
+const OnboardingPage = page(() => import("@/features/onboarding/onboarding-page"), "OnboardingPage");
+const DashboardPage = page(() => import("@/features/dashboard/dashboard-page"), "DashboardPage");
+const InboxPage = page(() => import("@/features/inbox/inbox-page"), "InboxPage");
+const RulesPage = page(() => import("@/features/rules/rules-page"), "RulesPage");
+const RuleEditorPage = page(() => import("@/features/rules/rule-editor-page"), "RuleEditorPage");
+const CategoriesPage = page(() => import("@/features/categories/categories-page"), "CategoriesPage");
+const AccountsPage = page(() => import("@/features/accounts/accounts-page"), "AccountsPage");
+const MembersPage = page(() => import("@/features/organization/members-page"), "MembersPage");
+const SettingsPage = page(() => import("@/features/organization/settings-page"), "SettingsPage");
+const AuditPage = page(() => import("@/features/organization/audit-page"), "AuditPage");
+const ProfilePage = page(() => import("@/features/profile/profile-page"), "ProfilePage");
+
+function guarded(permission: Permission, element: ReactNode) {
+  return (
+    <RequirePermission permission={permission}>
+      <Suspense fallback={<SkeletonRows rows={6} />}>{element}</Suspense>
+    </RequirePermission>
+  );
+}
+
+export function App() {
+  const [queryClient] = useState(createQueryClient);
+
+  return (
+    <QueryClientProvider client={queryClient}>
+      <BrowserRouter>
+        <AuthProvider>
+          <OrganizationProvider>
+            <Suspense fallback={<FullScreenLoader />}>
+              <Routes>
+                <Route element={<RedirectIfAuthenticated />}>
+                  <Route path="/login" element={<LoginPage />} />
+                  <Route path="/register" element={<RegisterPage />} />
+                  <Route path="/forgot-password" element={<ForgotPasswordPage />} />
+                </Route>
+                {/* Reachable with the temporary recovery session from the email link. */}
+                <Route path="/reset-password" element={<ResetPasswordPage />} />
+
+                <Route element={<RequireAuth />}>
+                  <Route path="/onboarding" element={<OnboardingPage />} />
+                  <Route element={<RequireOrganization />}>
+                    <Route element={<AppShell />}>
+                      <Route index element={guarded("emails:read", <DashboardPage />)} />
+                      <Route path="inbox" element={guarded("emails:read", <InboxPage />)} />
+                      <Route path="inbox/:emailId" element={guarded("emails:read", <InboxPage />)} />
+                      <Route path="rules" element={guarded("rules:read", <RulesPage />)} />
+                      <Route path="rules/new" element={guarded("rules:manage", <RuleEditorPage />)} />
+                      <Route path="rules/:ruleId" element={guarded("rules:read", <RuleEditorPage />)} />
+                      <Route path="categories" element={guarded("categories:read", <CategoriesPage />)} />
+                      <Route path="accounts" element={guarded("email-accounts:read", <AccountsPage />)} />
+                      <Route path="members" element={guarded("members:read", <MembersPage />)} />
+                      <Route path="settings" element={guarded("organization:read", <SettingsPage />)} />
+                      <Route path="audit" element={guarded("audit:read", <AuditPage />)} />
+                      <Route
+                        path="profile"
+                        element={
+                          <Suspense fallback={<SkeletonRows rows={4} />}>
+                            <ProfilePage />
+                          </Suspense>
+                        }
+                      />
+                    </Route>
+                  </Route>
+                </Route>
+
+                <Route path="*" element={<Navigate to="/" replace />} />
+              </Routes>
+            </Suspense>
+          </OrganizationProvider>
+        </AuthProvider>
+      </BrowserRouter>
+      <Toaster richColors closeButton position="top-right" />
+    </QueryClientProvider>
+  );
+}

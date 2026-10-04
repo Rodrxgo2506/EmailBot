@@ -1,0 +1,15 @@
+# Never send dependencies, build outputs, git data or secrets to the build context.
+**/node_modules
+**/dist
+**/.turbo
+**/coverage
+**/*.log
+**/*.tsbuildinfo
+.git
+.github
+.claude
+.env
+.env.*
+!.env.example
+supabase/.temp
+supabase/.branches

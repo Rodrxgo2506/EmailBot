@@ -1,0 +1,38 @@
+{
+  "name": "@emailbot/api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc -p tsconfig.build.json",
+    "start": "node dist/server.js",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "lint": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@emailbot/rules-engine": "workspace:*",
+    "@emailbot/shared": "workspace:*",
+    "@emailbot/types": "workspace:*",
+    "@emailbot/validation": "workspace:*",
+    "@fastify/cors": "^11.1.0",
+    "@fastify/helmet": "^13.0.2",
+    "@fastify/rate-limit": "^11.2.0",
+    "@fastify/sensible": "^6.0.3",
+    "@sentry/node": "^11.4.0",
+    "@supabase/supabase-js": "^2.117.2",
+    "bullmq": "^5.81.5",
+    "dotenv": "^17.2.3",
+    "fastify": "^5.6.1",
+    "ioredis": "^5.11.1",
+    "socket.io": "^4.8.4",
+    "zod": "catalog:"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "tsx": "^4.20.6",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}

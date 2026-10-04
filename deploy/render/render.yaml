@@ -1,0 +1,163 @@
+# EmailBot - Render Blueprint (DRAFT, not active).
+#
+# Kept outside the repository root on purpose: Render only reads a Blueprint
+# when someone creates one in the Dashboard (default path ./render.yaml).
+# Nothing here is deployed automatically. See docs/render.md.
+#
+# - No secrets and no production values: every secret uses `sync: false`
+#   (Render prompts for it once, at Blueprint creation; later Blueprint syncs
+#   ignore `sync: false` variables, so new secrets go through the Dashboard).
+# - Supabase is external and is never created or modified by this file.
+# - API and worker build the single multi-target Dockerfile. Render cannot pass
+#   --target, so each service selects its stage with EMAILBOT_TARGET (Render
+#   turns environment variables into Docker build arguments).
+# - Plans are left at Render's defaults on purpose (cost decision pending):
+#   web service / worker 0.5c-512mb, Key Value 256mb. Set `plan` explicitly
+#   before creating the Blueprint.
+# - API, worker and Key Value must share the region (private network).
+
+services:
+  # ------------------------------------------------------------------ Redis (BullMQ, realtime, rate limit, OAuth nonces)
+  - type: keyvalue
+    name: emailbot-redis
+    region: oregon
+    # BullMQ requires noeviction: Render's default (allkeys-lru) can evict queue keys.
+    maxmemoryPolicy: noeviction
+    # Delayed jobs, retries and schedulers live only in Redis: keep persistence on.
+    # Not available on the free plan (do not use `plan: free`).
+    persistenceMode: journal-snapshot
+    # No public access: only services on the same private network can connect.
+    ipAllowList: []
+
+  # ------------------------------------------------------------------ API (web service, Dockerfile stage `api`)
+  - type: web
+    name: emailbot-api
+    runtime: docker
+    region: oregon
+    dockerfilePath: ./Dockerfile
+    # Liveness only: /health/ready would pull the API out of rotation and
+    # restart it during a Redis outage without fixing anything.
+    healthCheckPath: /health
+    autoDeployTrigger: "off"
+    envVars:
+      - key: EMAILBOT_TARGET # build argument: final Dockerfile stage
+        value: api
+      - key: NODE_ENV
+        value: production
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: emailbot-redis
+          property: connectionString
+      - key: API_PUBLIC_URL
+        sync: false
+      - key: WEB_APP_URL
+        sync: false
+      - key: CORS_ORIGINS
+        sync: false
+      # Proxy hop count; to be verified on Render (never "true"). See docs/render.md.
+      - key: TRUST_PROXY
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      # Must be identical in the worker. Entered manually (no generateValue:
+      # it would generate a different value per service). Keep a copy outside Render.
+      - key: TOKEN_ENCRYPTION_KEY
+        sync: false
+      - key: OAUTH_STATE_SECRET
+        sync: false
+      - key: SENTRY_DSN
+        sync: false
+
+  # ------------------------------------------------------------------ Worker (background worker, Dockerfile stage `worker`)
+  - type: worker
+    name: emailbot-worker
+    runtime: docker
+    region: oregon
+    dockerfilePath: ./Dockerfile
+    autoDeployTrigger: "off"
+    # Let active jobs finish on deploys / restarts (default 30 s).
+    maxShutdownDelaySeconds: 120
+    envVars:
+      - key: EMAILBOT_TARGET # build argument: final Dockerfile stage
+        value: worker
+      - key: NODE_ENV
+        value: production
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: emailbot-redis
+          property: connectionString
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      # Same value as the API (compare tokenEncryptionKeyFingerprint in both logs).
+      - key: TOKEN_ENCRYPTION_KEY
+        sync: false
+      - key: SENTRY_DSN
+        sync: false
+
+  # ------------------------------------------------------------------ Web (static site; no Docker)
+  # Architecture decision: Render Static Site. The Dockerfile stage `web`
+  # (nginx) stays available (EMAILBOT_TARGET=web) for a Docker web service,
+  # which would be a different, billed service type (see docs/render.md).
+  - type: web
+    name: emailbot-web
+    runtime: static
+    # NODE_ENV=production only for the build step (strict VITE_* checks + CSP);
+    # the install keeps devDependencies (tsc, vite).
+    buildCommand: pnpm install --frozen-lockfile --filter "@emailbot/web..." && NODE_ENV=production pnpm --filter "@emailbot/web..." run build
+    staticPublishPath: ./apps/web/dist
+    autoDeployTrigger: "off"
+    buildFilter:
+      paths:
+        - apps/web/**
+        - packages/types/**
+        - packages/validation/**
+        - pnpm-lock.yaml
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      # Public values (embedded in the bundle), entered at creation.
+      - key: VITE_SUPABASE_URL
+        sync: false
+      - key: VITE_SUPABASE_ANON_KEY
+        sync: false
+      - key: VITE_API_URL
+        sync: false
+    routes:
+      # SPA fallback (existing files such as /assets/* are served first).
+      - type: rewrite
+        source: /*
+        destination: /index.html
+    headers:
+      # The full CSP travels in index.html (<meta>); frame-ancestors only works as a header.
+      - path: /*
+        name: Content-Security-Policy
+        value: "frame-ancestors 'none'"
+      - path: /*
+        name: X-Frame-Options
+        value: DENY
+      - path: /*
+        name: X-Content-Type-Options
+        value: nosniff
+      - path: /*
+        name: Referrer-Policy
+        value: strict-origin-when-cross-origin
+      - path: /*
+        name: Permissions-Policy
+        value: camera=(), microphone=(), geolocation=(), payment=(), usb=(), interest-cohort=()
+      - path: /*
+        name: Cross-Origin-Opener-Policy
+        value: same-origin
+      - path: /*
+        name: Strict-Transport-Security
+        value: max-age=31536000; includeSubDomains
+      - path: /assets/*
+        name: Cache-Control
+        value: public, max-age=31536000, immutable
