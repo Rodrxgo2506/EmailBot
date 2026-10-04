@@ -15,6 +15,10 @@ export interface EmailRuleRow {
   stop_processing: boolean;
   match_mode: RuleMatchMode;
   category_id: string | null;
+  /** EmailBot V2 (absent in V1 rows / queries). */
+  bot_id?: string | null;
+  /** Embedded bots(status) of bot_id. */
+  bot?: { status: string } | null;
   conditions: unknown;
   actions: unknown;
   created_at?: string;
@@ -49,6 +53,9 @@ export function parseRuleRow(row: EmailRuleRow): RuleParseResult {
       stopProcessing: row.stop_processing,
       matchMode: row.match_mode,
       categoryId: row.category_id,
+      botId: row.bot_id ?? null,
+      // A bot rule whose bot cannot be confirmed ACTIVE is treated as paused (fail closed).
+      botActive: !row.bot_id || row.bot?.status === "ACTIVE",
       conditions: conditions.data.conditions,
       actions: actions.data.actions,
       createdAt: row.created_at

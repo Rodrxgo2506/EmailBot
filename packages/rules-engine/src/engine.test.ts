@@ -302,3 +302,121 @@ describe("helpers", () => {
     expect(htmlToText("<div>a&nbsp;&amp;&#39;b&#x41;</div>")).toBe("a &'bA");
   });
 });
+
+describe("bot selection (EmailBot V2)", () => {
+  const email = makeEmail();
+  const match = { conditions: [senderCondition] };
+  const miss = { conditions: [nonMatchingCondition] };
+  const NETFLIX = "bot-netflix";
+  const YAPE = "bot-yape";
+
+  it("general rules (no bot) classify but select no bot", () => {
+    const result = evaluateRules(email, [makeRule({ ...match, categoryId: "cat", actions: [{ type: "MARK_IMPORTANT" }] })]);
+    expect(result).toMatchObject({ matched: true, categoryId: "cat", markImportant: true, botId: null, botSelection: "NONE", botCandidateIds: [] });
+  });
+
+  it("the bot of the matching bot rule with the highest priority wins", () => {
+    const result = evaluateRules(email, [
+      makeRule({ id: "general", ...match, priority: 1 }),
+      makeRule({ id: "yape", ...match, priority: 20, botId: YAPE }),
+      makeRule({ id: "netflix", ...match, priority: 10, botId: NETFLIX }),
+      makeRule({ id: "netflix-miss", ...miss, priority: 5, botId: YAPE })
+    ]);
+    expect(result).toMatchObject({ botId: NETFLIX, botSelection: "SELECTED", botCandidateIds: [] });
+  });
+
+  it("two rules of the same bot tied at the top priority still select that bot", () => {
+    const result = evaluateRules(email, [
+      makeRule({ id: "a", ...match, priority: 10, botId: NETFLIX }),
+      makeRule({ id: "b", ...match, priority: 10, botId: NETFLIX })
+    ]);
+    expect(result).toMatchObject({ botId: NETFLIX, botSelection: "SELECTED" });
+  });
+
+  it("different bots tied at the top priority are AMBIGUOUS whatever the creation order", () => {
+    const older = { createdAt: "2026-01-01T00:00:00.000Z" };
+    const newer = { createdAt: "2026-06-01T00:00:00.000Z" };
+    for (const [netflixDate, yapeDate] of [
+      [older, newer],
+      [newer, older]
+    ] as const) {
+      const result = evaluateRules(email, [
+        makeRule({ id: "n", ...match, priority: 10, botId: NETFLIX, ...netflixDate }),
+        makeRule({ id: "y", ...match, priority: 10, botId: YAPE, ...yapeDate }),
+        makeRule({ id: "low", ...match, priority: 50, botId: NETFLIX })
+      ]);
+      expect(result).toMatchObject({ botId: null, botSelection: "AMBIGUOUS", botCandidateIds: [NETFLIX, YAPE].sort() });
+      // The rules still matched and their actions/classification keep working.
+      expect(result.matched).toBe(true);
+    }
+  });
+
+  it("a stop_processing rule cannot hide a same-priority rule of another bot (no creation-order effect)", () => {
+    for (const stopperDate of ["2026-01-01T00:00:00.000Z", "2026-12-01T00:00:00.000Z"]) {
+      const result = evaluateRules(email, [
+        makeRule({ id: "n", ...match, priority: 10, botId: NETFLIX, stopProcessing: true, createdAt: stopperDate, actions: [{ type: "MARK_READ" }] }),
+        makeRule({ id: "y", ...match, priority: 10, botId: YAPE, createdAt: "2026-06-01T00:00:00.000Z", actions: [{ type: "ARCHIVE" }] })
+      ]);
+      expect(result).toMatchObject({ botId: null, botSelection: "AMBIGUOUS", botCandidateIds: [NETFLIX, YAPE].sort() });
+    }
+  });
+
+  it("stop_processing keeps V1 semantics for actions: rules evaluated only for the bot check apply nothing", () => {
+    const result = evaluateRules(email, [
+      makeRule({ id: "stop", ...match, priority: 10, botId: NETFLIX, stopProcessing: true, createdAt: "2026-01-01T00:00:00.000Z" }),
+      makeRule({ id: "late", ...match, priority: 10, botId: YAPE, createdAt: "2026-06-01T00:00:00.000Z", actions: [{ type: "ARCHIVE" }] }),
+      makeRule({ id: "lower", ...match, priority: 20, botId: YAPE, actions: [{ type: "MARK_IMPORTANT" }] })
+    ]);
+    expect(result.archive).toBe(false);
+    expect(result.markImportant).toBe(false);
+    expect(result.matchedRules.map((rule) => rule.id)).toEqual(["stop"]);
+    expect(result.stoppedByRuleId).toBe("stop");
+  });
+
+  it("a higher-priority stop_processing rule still prevents lower-priority bot rules (V1 semantics)", () => {
+    const result = evaluateRules(email, [
+      makeRule({ id: "general-stop", ...match, priority: 1, stopProcessing: true }),
+      makeRule({ id: "netflix", ...match, priority: 10, botId: NETFLIX })
+    ]);
+    expect(result).toMatchObject({ botId: null, botSelection: "NONE", stoppedByRuleId: "general-stop" });
+  });
+
+  it("rules of a PAUSED bot are not evaluated at all (no actions, no bot)", () => {
+    const paused = makeRule({ id: "paused", ...match, priority: 1, botId: NETFLIX, botActive: false, actions: [{ type: "MARK_IMPORTANT" }] });
+    expect(evaluateRules(email, [paused])).toMatchObject({ matched: false, markImportant: false, botId: null, botSelection: "NONE" });
+
+    // A paused bot cannot create an ambiguity either.
+    const result = evaluateRules(email, [paused, makeRule({ id: "yape", ...match, priority: 1, botId: YAPE })]);
+    expect(result).toMatchObject({ botId: YAPE, botSelection: "SELECTED" });
+  });
+
+  it("extractors keep working on bot rules", () => {
+    const result = evaluateRules(email, [
+      makeRule({ ...match, botId: NETFLIX, actions: [{ type: "EXTRACT", name: "code", preset: "verification_code", source: "any" }] })
+    ]);
+    expect(result).toMatchObject({ botId: NETFLIX, extracted: { code: "4821" } });
+  });
+
+  it("parseRuleRow reads bot_id and treats a bot that is not confirmed ACTIVE as paused (fail closed)", () => {
+    const row = {
+      id: "r",
+      name: "r",
+      enabled: true,
+      priority: 1,
+      stop_processing: false,
+      match_mode: "AND" as const,
+      category_id: null,
+      conditions: { conditions: [senderCondition] },
+      actions: { actions: [] }
+    };
+    const parse = (extra: object) => {
+      const parsed = parseRuleRow({ ...row, ...extra });
+      if (!parsed.ok) throw new Error(parsed.reason);
+      return parsed.rule;
+    };
+    expect(parse({})).toMatchObject({ botId: null, botActive: true });
+    expect(parse({ bot_id: NETFLIX, bot: { status: "ACTIVE" } })).toMatchObject({ botId: NETFLIX, botActive: true });
+    expect(parse({ bot_id: NETFLIX, bot: { status: "PAUSED" } })).toMatchObject({ botId: NETFLIX, botActive: false });
+    expect(parse({ bot_id: NETFLIX, bot: null })).toMatchObject({ botId: NETFLIX, botActive: false });
+  });
+});

@@ -11,11 +11,24 @@ export interface EngineRule {
   stopProcessing: boolean;
   matchMode: RuleMatchMode;
   categoryId: string | null;
+  /** Bot the rule belongs to (EmailBot V2); null/undefined = general rule. */
+  botId?: string | null | undefined;
+  /** false = the rule's bot is PAUSED: the rule is not evaluated at all. Default true. */
+  botActive?: boolean | undefined;
   conditions: RuleCondition[];
   actions: RuleAction[];
-  /** Tie-breaker for rules with the same priority (older first). */
+  /** Tie-breaker for rules with the same priority (older first). Never decides the bot. */
   createdAt?: string | undefined;
 }
+
+/**
+ * How the bot of an email was decided:
+ *  - NONE: no matching rule belongs to a bot;
+ *  - SELECTED: the matching bot rules with the highest priority all belong to one bot;
+ *  - AMBIGUOUS: different bots tie at that priority. No bot is chosen
+ *    (creation order must never route an email to a customer).
+ */
+export type BotSelection = "NONE" | "SELECTED" | "AMBIGUOUS";
 
 export interface MatchedRuleSummary {
   id: string;
@@ -44,6 +57,11 @@ export interface RuleEvaluationResult {
   extracted: Record<string, string>;
   /** Rule whose stop_processing flag halted evaluation, if any. */
   stoppedByRuleId: string | null;
+  /** Selected bot (stored as emails.bot_id); null when NONE or AMBIGUOUS. */
+  botId: string | null;
+  botSelection: BotSelection;
+  /** AMBIGUOUS only: the tied bots, sorted (diagnostics). */
+  botCandidateIds: string[];
   /** A user regex hit its timeout or the evaluation budget (treated as no match). */
   regexTimedOut: boolean;
 }
