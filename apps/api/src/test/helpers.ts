@@ -1,6 +1,6 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { SecretBox } from "@emailbot/shared";
-import type { OrganizationRole } from "@emailbot/types";
+import type { OrganizationRole, OrganizationStatus } from "@emailbot/types";
 import { vi } from "vitest";
 import { buildApp } from "../app.js";
 import type { ApiConfig } from "../config/env.js";
@@ -50,11 +50,12 @@ function unexpected(name: string) {
 /** Repositories whose methods fail loudly unless a test overrides them. */
 export function createFakeRepositories(): DeepMock<Repositories> {
   const groups: Record<string, string[]> = {
-    memberships: ["listForUser", "findRole"],
+    memberships: ["listForUser", "findRole", "findAccess"],
     organizations: ["create", "get", "update", "getSettings", "updateSettings", "transferOwnership"],
     members: ["list", "get", "add", "updateRole", "remove"],
     emailAccounts: ["list", "get", "update", "remove"],
     categories: ["list", "get", "create", "update", "remove"],
+    bots: ["list", "get", "create", "update", "remove", "hasEmails"],
     rules: ["list", "get", "create", "update", "remove"],
     emails: ["list", "get", "update", "remove"],
     attachments: ["get", "listStoredObjects"],
@@ -98,7 +99,14 @@ export function makeUser(roles: Record<string, OrganizationRole>): TestUser {
  * are answered from the users' `roles` maps, like RLS would.
  */
 export async function createTestApp(
-  options: { users?: TestUser[]; config?: Partial<ApiConfig>; fetch?: typeof fetch; rateLimitRedis?: RateLimitRedis } = {}
+  options: {
+    users?: TestUser[];
+    config?: Partial<ApiConfig>;
+    fetch?: typeof fetch;
+    rateLimitRedis?: RateLimitRedis;
+    /** organizations.status per organization id (default ACTIVE). */
+    organizationStatuses?: Record<string, OrganizationStatus>;
+  } = {}
 ) {
   const users = options.users ?? [];
   const repos = createFakeRepositories();
@@ -106,8 +114,13 @@ export async function createTestApp(
   const queue = { enqueueEmailEvent: vi.fn(async () => undefined), close: vi.fn(async () => undefined) };
   const config = testConfig(options.config);
 
+  const statusOf = (organizationId: string): OrganizationStatus => options.organizationStatuses?.[organizationId] ?? "ACTIVE";
   repos.memberships.findRole.mockImplementation(async (userId: string, organizationId: string) => {
     return users.find((user) => user.id === userId)?.roles[organizationId] ?? null;
+  });
+  repos.memberships.findAccess.mockImplementation(async (userId: string, organizationId: string) => {
+    const role = users.find((user) => user.id === userId)?.roles[organizationId];
+    return role ? { role, organizationStatus: statusOf(organizationId) } : null;
   });
   repos.memberships.listForUser.mockImplementation(async (userId: string) => {
     const user = users.find((candidate) => candidate.id === userId);
@@ -118,7 +131,7 @@ export async function createTestApp(
         name: `Org ${organizationId.slice(0, 4)}`,
         slug: `org-${organizationId.slice(0, 4)}`,
         plan: "FREE",
-        status: "ACTIVE",
+        status: statusOf(organizationId),
         createdAt: "2026-10-01T00:00:00.000Z",
         updatedAt: "2026-10-01T00:00:00.000Z"
       }

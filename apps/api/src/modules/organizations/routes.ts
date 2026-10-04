@@ -59,7 +59,8 @@ export async function organizationRoutes(app: FastifyInstance) {
 
   const memberGuards = { preHandler: [app.authenticate, app.requireOrganization] };
 
-  app.get("/organizations/current", memberGuards, async (request) => {
+  // Readable while SUSPENDED / CANCELLED, so the web app can show why it is blocked.
+  app.get("/organizations/current", { ...memberGuards, config: { allowInactiveOrganization: true } }, async (request) => {
     const auth = getAuth(request);
     const organization = getOrganization(request);
     const [details, settings] = await Promise.all([

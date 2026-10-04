@@ -1,4 +1,4 @@
-import { hasPermission, type OrganizationRole, type Permission } from "@emailbot/types";
+import { hasPermission, type OrganizationRole, type OrganizationStatus, type Permission } from "@emailbot/types";
 import { idSchema } from "@emailbot/validation";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { badRequest, forbidden } from "../lib/errors.js";
@@ -7,11 +7,19 @@ import { getAuth } from "./auth.js";
 export interface OrganizationContext {
   id: string;
   role: OrganizationRole;
+  status: OrganizationStatus;
 }
 
 declare module "fastify" {
   interface FastifyRequest {
     organization: OrganizationContext | null;
+  }
+  interface FastifyContextConfig {
+    /**
+     * Route usable while the organization is SUSPENDED / CANCELLED (read its
+     * status). Every other organization route answers 403 ORGANIZATION_INACTIVE.
+     */
+    allowInactiveOrganization?: boolean;
   }
   interface FastifyInstance {
     requireOrganization(request: FastifyRequest): Promise<void>;
@@ -39,10 +47,10 @@ export function registerOrganizationContext(app: FastifyInstance): void {
       const parsed = idSchema.safeParse(header);
       if (!parsed.success) throw badRequest("Invalid X-Organization-Id header", "INVALID_ORGANIZATION_ID");
 
-      const role = await auth.repos.memberships.findRole(auth.user.id, parsed.data);
-      if (!role) throw forbidden("You are not a member of this organization", "NOT_A_MEMBER");
+      const access = await auth.repos.memberships.findAccess(auth.user.id, parsed.data);
+      if (!access) throw forbidden("You are not a member of this organization", "NOT_A_MEMBER");
 
-      request.organization = { id: parsed.data, role };
+      request.organization = { id: parsed.data, role: access.role, status: access.organizationStatus };
     } else {
       const memberships = await auth.repos.memberships.listForUser(auth.user.id);
       const only = memberships.length === 1 ? memberships[0] : undefined;
@@ -53,7 +61,12 @@ export function registerOrganizationContext(app: FastifyInstance): void {
       if (!only) {
         throw badRequest("Select an organization with the X-Organization-Id header", "ORGANIZATION_REQUIRED");
       }
-      request.organization = { id: only.organization.id, role: only.role };
+      request.organization = { id: only.organization.id, role: only.role, status: only.organization.status };
+    }
+
+    // EmailBot V2: a SUSPENDED / CANCELLED organization keeps its data but cannot be operated.
+    if (request.organization.status !== "ACTIVE" && request.routeOptions.config.allowInactiveOrganization !== true) {
+      throw forbidden("This organization is not active", "ORGANIZATION_INACTIVE");
     }
 
     request.log = request.log.child({ organizationId: request.organization.id });

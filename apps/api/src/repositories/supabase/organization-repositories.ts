@@ -39,6 +39,22 @@ export function membershipRepository(db: SupabaseClient): MembershipRepository {
       ) as Row | null;
 
       return (row?.role as OrganizationRole | undefined) ?? null;
+    },
+
+    async findAccess(userId, organizationId) {
+      const row = unwrap(
+        await db
+          .from("organization_members")
+          .select("role, organization:organizations(status)")
+          .eq("user_id", userId)
+          .eq("organization_id", organizationId)
+          .maybeSingle()
+      ) as Row | null;
+
+      if (!row) return null;
+      // Fail closed: a membership whose organization status cannot be read is treated as inactive.
+      const organization = Array.isArray(row.organization) ? row.organization[0] : row.organization;
+      return { role: row.role as OrganizationRole, organizationStatus: organization?.status ?? "SUSPENDED" };
     }
   };
 }

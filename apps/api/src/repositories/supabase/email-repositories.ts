@@ -35,6 +35,7 @@ export function emailRepository(db: SupabaseClient): EmailRepository {
 
       if (query.hasAttachments === false) request = request.is("email_attachments", null);
       if (query.accountId) request = request.eq("email_account_id", query.accountId);
+      if (query.botId) request = request.eq("bot_id", query.botId);
       if (query.categoryId === "none") request = request.is("category_id", null);
       else if (query.categoryId) request = request.eq("category_id", query.categoryId);
       if (query.status) request = request.eq("processing_status", query.status);

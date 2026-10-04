@@ -121,6 +121,7 @@ function toRuleColumns(input: RuleWrite): Record<string, unknown> {
   if (input.stopProcessing !== undefined) columns.stop_processing = input.stopProcessing;
   if (input.matchMode !== undefined) columns.match_mode = input.matchMode;
   if (input.categoryId !== undefined) columns.category_id = input.categoryId;
+  if (input.botId !== undefined) columns.bot_id = input.botId;
   // JSONB documents keep the shape defined by migration 2.
   if (input.conditions !== undefined) columns.conditions = { conditions: input.conditions };
   if (input.actions !== undefined) columns.actions = { actions: input.actions };
@@ -129,14 +130,12 @@ function toRuleColumns(input: RuleWrite): Record<string, unknown> {
 
 export function ruleRepository(db: SupabaseClient): RuleRepository {
   return {
-    async list(organizationId) {
+    async list(organizationId, filter = {}) {
+      let request = db.from("email_rules").select(RULE_COLUMNS).eq("organization_id", organizationId);
+      if (filter.botId === null) request = request.is("bot_id", null);
+      else if (filter.botId) request = request.eq("bot_id", filter.botId);
       const rows = unwrap(
-        await db
-          .from("email_rules")
-          .select(RULE_COLUMNS)
-          .eq("organization_id", organizationId)
-          .order("priority", { ascending: true })
-          .order("created_at", { ascending: true })
+        await request.order("priority", { ascending: true }).order("created_at", { ascending: true })
       ) as Row[];
       return rows.map(toRule);
     },

@@ -1,5 +1,6 @@
 import type {
   AuditLogEntry,
+  Bot,
   Category,
   EmailAccount,
   EmailAttachment,
@@ -108,8 +109,28 @@ export function toCategory(row: Row): Category {
   };
 }
 
+export const BOT_COLUMNS =
+  "id,organization_id,name,slug,description,status,customer_resolution,portal_settings,created_by,updated_by,created_at,updated_at";
+
+export function toBot(row: Row): Bot {
+  return {
+    id: row.id,
+    organizationId: row.organization_id,
+    name: row.name,
+    slug: row.slug,
+    description: row.description,
+    status: row.status,
+    customerResolution: row.customer_resolution,
+    portalSettings: row.portal_settings,
+    createdBy: row.created_by,
+    updatedBy: row.updated_by,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
 export const RULE_COLUMNS =
-  "id,organization_id,category_id,name,description,enabled,priority,stop_processing,match_mode,conditions,actions,created_by,updated_by,created_at,updated_at";
+  "id,organization_id,category_id,bot_id,name,description,enabled,priority,stop_processing,match_mode,conditions,actions,created_by,updated_by,created_at,updated_at";
 
 export function toRule(row: Row): EmailRule {
   // Invalid JSON documents (e.g. edited by hand) are exposed as empty lists;
@@ -121,6 +142,7 @@ export function toRule(row: Row): EmailRule {
     id: row.id,
     organizationId: row.organization_id,
     categoryId: row.category_id,
+    botId: row.bot_id ?? null,
     name: row.name,
     description: row.description,
     enabled: row.enabled,
@@ -137,7 +159,7 @@ export function toRule(row: Row): EmailRule {
 }
 
 export const EMAIL_SUMMARY_COLUMNS =
-  "id,organization_id,email_account_id,category_id,matched_rule_id,direction,processing_status,sender_email,sender_name,to_emails,subject,snippet,received_at,extracted_data,is_read,is_important,is_archived,created_at,attachment_count:email_attachments(count)";
+  "id,organization_id,email_account_id,category_id,matched_rule_id,bot_id,direction,processing_status,sender_email,sender_name,to_emails,subject,snippet,received_at,extracted_data,is_read,is_important,is_archived,created_at,attachment_count:email_attachments(count)";
 
 export const ATTACHMENT_COLUMNS = "id,email_id,filename,content_type,file_size,is_inline,storage_uploaded,created_at";
 
@@ -150,6 +172,7 @@ export function toEmailSummary(row: Row): EmailSummary {
     emailAccountId: row.email_account_id,
     categoryId: row.category_id,
     matchedRuleId: row.matched_rule_id,
+    botId: row.bot_id ?? null,
     direction: row.direction,
     processingStatus: row.processing_status,
     senderEmail: row.sender_email,

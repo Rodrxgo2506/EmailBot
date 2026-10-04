@@ -7,6 +7,7 @@ import {
 } from "@emailbot/rules-engine";
 import {
   idParamsSchema,
+  idSchema,
   ruleCreateSchema,
   ruleDraftTestRequestSchema,
   ruleTestRequestSchema,
@@ -14,6 +15,7 @@ import {
   type RuleTestEmail
 } from "@emailbot/validation";
 import type { FastifyInstance, FastifyRequest } from "fastify";
+import { z } from "zod";
 import { notFound, unprocessable } from "../../lib/errors.js";
 import { RATE_LIMITS } from "../../lib/rate-limits.js";
 import { compact, parseWith } from "../../lib/validation.js";
@@ -27,6 +29,16 @@ async function assertCategoryInOrganization(request: FastifyRequest, categoryId:
   const category = await getAuth(request).repos.categories.get(getOrganization(request).id, categoryId);
   if (!category) throw unprocessable("Category not found in this organization", "INVALID_CATEGORY");
 }
+
+/** A rule may only belong to a bot of the same organization (the composite FK enforces it too). */
+async function assertBotInOrganization(request: FastifyRequest, botId: string | null | undefined) {
+  if (!botId) return;
+  const bot = await getAuth(request).repos.bots.get(getOrganization(request).id, botId);
+  if (!bot) throw unprocessable("Bot not found in this organization", "INVALID_BOT");
+}
+
+/** ?botId=<uuid> rules of a bot, ?botId=none general rules only. */
+const ruleListQuerySchema = z.object({ botId: z.union([idSchema, z.literal("none")]).optional() });
 
 function runTest(rule: EngineRule, sample: RuleTestEmail) {
   const email = sampleToNormalizedEmail(sample);
@@ -67,6 +79,7 @@ function toEngineRule(rule: EmailRule): EngineRule {
     stopProcessing: rule.stopProcessing,
     matchMode: rule.matchMode,
     categoryId: rule.categoryId,
+    botId: rule.botId,
     conditions: rule.conditions,
     actions: rule.actions,
     createdAt: rule.createdAt
@@ -79,7 +92,9 @@ export async function ruleRoutes(app: FastifyInstance) {
   const manage = { preHandler: [app.authenticate, app.requireOrganization, requirePermission("rules:manage")] };
 
   app.get("/rules", read, async (request) => {
-    return { items: await getAuth(request).repos.rules.list(getOrganization(request).id) };
+    const { botId } = parseWith(ruleListQuerySchema, request.query, "query");
+    const filter = botId === undefined ? {} : { botId: botId === "none" ? null : botId };
+    return { items: await getAuth(request).repos.rules.list(getOrganization(request).id, filter) };
   });
 
   app.get("/rules/:id", read, async (request) => {
@@ -93,6 +108,7 @@ export async function ruleRoutes(app: FastifyInstance) {
     const auth = getAuth(request);
     const input = parseWith(ruleCreateSchema, request.body);
     await assertCategoryInOrganization(request, input.categoryId);
+    await assertBotInOrganization(request, input.botId);
 
     const rule = await auth.repos.rules.create(getOrganization(request).id, auth.user.id, compact(input) as RuleWrite & {
       name: string;
@@ -102,7 +118,7 @@ export async function ruleRoutes(app: FastifyInstance) {
       action: "CREATE",
       entityType: "email_rule",
       entityId: rule.id,
-      metadata: { name: rule.name, enabled: rule.enabled, priority: rule.priority }
+      metadata: { name: rule.name, enabled: rule.enabled, priority: rule.priority, botId: rule.botId }
     });
     return reply.status(201).send({ rule });
   });
@@ -113,6 +129,7 @@ export async function ruleRoutes(app: FastifyInstance) {
     const { id } = parseWith(idParamsSchema, request.params, "params");
     const patch = compact(parseWith(ruleUpdateSchema, request.body)) as RuleWrite;
     await assertCategoryInOrganization(request, patch.categoryId);
+    await assertBotInOrganization(request, patch.botId);
 
     const rule = await auth.repos.rules.update(getOrganization(request).id, id, auth.user.id, patch);
     if (!rule) throw notFound("Rule");
@@ -124,7 +141,8 @@ export async function ruleRoutes(app: FastifyInstance) {
       metadata: {
         fields: Object.keys(patch),
         ...(patch.enabled !== undefined ? { enabled: patch.enabled } : {}),
-        ...(patch.priority !== undefined ? { priority: patch.priority } : {})
+        ...(patch.priority !== undefined ? { priority: patch.priority } : {}),
+        ...(patch.botId !== undefined ? { botId: patch.botId } : {})
       }
     });
     return { rule };

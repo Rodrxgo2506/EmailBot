@@ -1,7 +1,10 @@
 import type {
   AuditAction,
   AuditLogEntry,
+  Bot,
+  BotStatus,
   Category,
+  CustomerResolution,
   EmailAccount,
   EmailAccountStatus,
   EmailAttachment,
@@ -14,7 +17,9 @@ import type {
   OrganizationMembership,
   OrganizationRole,
   OrganizationSettings,
-  Paginated
+  OrganizationStatus,
+  Paginated,
+  PortalSettings
 } from "@emailbot/types";
 import type { EmailListQuery, RuleAction, RuleCondition } from "@emailbot/validation";
 
@@ -38,6 +43,11 @@ export type EmailRule = EmailRuleRecord<RuleCondition, RuleAction>;
 export interface MembershipRepository {
   listForUser(userId: string): Promise<OrganizationMembership[]>;
   findRole(userId: string, organizationId: string): Promise<OrganizationRole | null>;
+  /** Role and organization status in one query (organization context of every request). */
+  findAccess(
+    userId: string,
+    organizationId: string
+  ): Promise<{ role: OrganizationRole; organizationStatus: OrganizationStatus } | null>;
 }
 
 export interface OrganizationRepository {
@@ -85,6 +95,25 @@ export interface CategoryRepository {
   remove(organizationId: string, id: string): Promise<boolean>;
 }
 
+export interface BotWrite {
+  name?: string;
+  slug?: string;
+  description?: string | null;
+  status?: BotStatus;
+  customerResolution?: CustomerResolution;
+  portalSettings?: PortalSettings;
+}
+
+export interface BotRepository {
+  list(organizationId: string): Promise<Bot[]>;
+  get(organizationId: string, id: string): Promise<Bot | null>;
+  create(organizationId: string, userId: string, input: BotWrite & { name: string; slug: string }): Promise<Bot>;
+  update(organizationId: string, id: string, userId: string, patch: BotWrite): Promise<Bot | null>;
+  remove(organizationId: string, id: string): Promise<boolean>;
+  /** Whether any processed email was routed to the bot (history that a delete would orphan). */
+  hasEmails(organizationId: string, id: string): Promise<boolean>;
+}
+
 export interface RuleWrite {
   name?: string;
   description?: string | null;
@@ -93,12 +122,14 @@ export interface RuleWrite {
   stopProcessing?: boolean;
   matchMode?: "AND" | "OR";
   categoryId?: string | null;
+  botId?: string | null;
   conditions?: RuleCondition[];
   actions?: RuleAction[];
 }
 
 export interface RuleRepository {
-  list(organizationId: string): Promise<EmailRule[]>;
+  /** filter.botId: rules of one bot; null = general rules only; omitted = all. */
+  list(organizationId: string, filter?: { botId?: string | null }): Promise<EmailRule[]>;
   get(organizationId: string, id: string): Promise<EmailRule | null>;
   create(organizationId: string, userId: string, input: RuleWrite & { name: string }): Promise<EmailRule>;
   update(organizationId: string, id: string, userId: string, patch: RuleWrite): Promise<EmailRule | null>;
@@ -152,6 +183,7 @@ export interface Repositories {
   members: MemberRepository;
   emailAccounts: EmailAccountRepository;
   categories: CategoryRepository;
+  bots: BotRepository;
   rules: RuleRepository;
   emails: EmailRepository;
   attachments: AttachmentRepository;

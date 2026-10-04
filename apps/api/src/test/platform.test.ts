@@ -129,7 +129,7 @@ describe("organization context", () => {
     await app.inject({ method: "GET", url: "/api/rules", headers: authHeaders(user, ORG_A) });
     await app.inject({ method: "GET", url: "/api/rules", headers: authHeaders(user, ORG_B) });
 
-    expect(repos.rules.list.mock.calls).toEqual([[ORG_A], [ORG_B]]);
+    expect(repos.rules.list.mock.calls.map(([organizationId]) => organizationId)).toEqual([ORG_A, ORG_B]);
   });
 
   it("uses the role of the selected organization, not the highest one", async () => {
