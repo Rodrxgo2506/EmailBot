@@ -14,6 +14,7 @@ const MIGRATION_7 = "20261003130000";
 
 const TABLES = [
   "audit_logs",
+  "bots",
   "categories",
   "email_accounts",
   "email_attachments",
@@ -31,6 +32,8 @@ type Privilege = (typeof PRIVILEGES)[number];
 /** Exactly what apps/api (privileged.ts) and apps/worker (supabase-stores.ts) need. */
 const SERVICE_ROLE_EXPECTED: Record<(typeof TABLES)[number], Privilege[]> = {
   audit_logs: ["INSERT"],
+  // V2 phase 1: column SELECT (id, organization_id, status) only, checked below.
+  bots: [],
   categories: [],
   email_accounts: ["SELECT", "INSERT", "UPDATE"],
   email_attachments: ["SELECT", "INSERT", "UPDATE"],
@@ -42,9 +45,12 @@ const SERVICE_ROLE_EXPECTED: Record<(typeof TABLES)[number], Privilege[]> = {
   profiles: ["SELECT"]
 };
 
-async function privilegeMatrix(tx: Tx, role: string): Promise<Record<string, Privilege[]>> {
+/** Tables that existed before migration 7 (V2 tables are created later). */
+const V1_TABLES = TABLES.filter((table) => table !== "bots");
+
+async function privilegeMatrix(tx: Tx, role: string, tables: readonly string[] = TABLES): Promise<Record<string, Privilege[]>> {
   const matrix: Record<string, Privilege[]> = {};
-  for (const table of TABLES) {
+  for (const table of tables) {
     matrix[table] = [];
     for (const privilege of PRIVILEGES) {
       const row = await one<{ granted: boolean }>(tx, "select has_table_privilege($1, $2, $3) as granted", [
@@ -82,7 +88,7 @@ describe("BEFORE migration 7, with production default privileges", () => {
   afterAll(async () => t?.close());
 
   it("service_role lacks every privilege the backend needs", async () => {
-    const matrix = await t.asAdmin((tx) => privilegeMatrix(tx, "service_role"));
+    const matrix = await t.asAdmin((tx) => privilegeMatrix(tx, "service_role", V1_TABLES));
     for (const [table, required] of Object.entries(SERVICE_ROLE_EXPECTED)) {
       for (const privilege of required) {
         expect(matrix[table], `${table} ${privilege}`).not.toContain(privilege);
@@ -181,11 +187,26 @@ describe.each<DefaultPrivilegesProfile>(["production", "local"])("AFTER migratio
     ["DELETE emails", "delete from public.emails"],
     ["SELECT audit_logs", "select 1 from public.audit_logs"],
     ["INSERT categories", "insert into public.categories (organization_id, name, slug) values (gen_random_uuid(), 'x', 'x')"],
-    ["SELECT organizations", "select 1 from public.organizations"],
+    ["SELECT organizations.name", "select name from public.organizations"],
+    ["SELECT organizations.*", "select * from public.organizations"],
+    ["SELECT bots.name", "select name from public.bots"],
+    ["INSERT bots", "insert into public.bots (organization_id, name, slug) values (gen_random_uuid(), 'x', 'x')"],
     ["UPDATE organization_members", "update public.organization_members set role = 'VIEWER'"],
     ["TRUNCATE emails", "truncate public.emails"]
   ])("service_role cannot %s", async (_label, sql) => {
     await expect(t.asService((tx) => tx.query(sql))).rejects.toThrow(/permission denied/);
+  });
+
+  it("service_role reads only the columns the worker needs: organizations (id, status), bots (id, organization_id, status)", async () => {
+    await t.asService(async (tx) => {
+      const org = await one<{ status: string }>(tx, "select id, status from public.organizations where id = $1", [f.a.orgId]);
+      expect(org.status).toBe("ACTIVE");
+      await tx.query(
+        `select a.id, o.status from public.email_accounts a join public.organizations o on o.id = a.organization_id where a.id = $1`,
+        [f.a.accountId]
+      );
+      await tx.query("select id, organization_id, status from public.bots");
+    });
   });
 
   it("anon has no privilege on any table and cannot execute SECURITY DEFINER functions", async () => {

@@ -241,7 +241,8 @@ describe("AFTER migration 9", () => {
       expect(
         await count(tx, "select 1 from pg_class c join pg_namespace n on n.oid = c.relnamespace where n.nspname = 'public' and c.relkind = 'r' and not c.relrowsecurity")
       ).toBe(0);
-      expect(await count(tx, "select 1 from pg_policies where schemaname = 'public'")).toBe(31);
+      // The 10 V1 tables (later V2 tables add their own policies; see v1-compatibility.test.ts).
+      expect(await count(tx, "select 1 from pg_policies where schemaname = 'public' and tablename <> all($1)", [["bots"]])).toBe(31);
     });
   });
 });
