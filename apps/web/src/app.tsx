@@ -35,6 +35,8 @@ const MembersPage = page(() => import("@/features/organization/members-page"), "
 const SettingsPage = page(() => import("@/features/organization/settings-page"), "SettingsPage");
 const AuditPage = page(() => import("@/features/organization/audit-page"), "AuditPage");
 const ProfilePage = page(() => import("@/features/profile/profile-page"), "ProfilePage");
+const PrivacyPage = page(() => import("@/features/legal/privacy-page"), "PrivacyPage");
+const TermsPage = page(() => import("@/features/legal/terms-page"), "TermsPage");
 
 function guarded(permission: Permission, element: ReactNode) {
   return (
@@ -44,58 +46,75 @@ function guarded(permission: Permission, element: ReactNode) {
   );
 }
 
+/** Public page outside the session/organization providers (no auth, no organization). */
+function publicPage(element: ReactNode) {
+  return <Suspense fallback={<FullScreenLoader />}>{element}</Suspense>;
+}
+
 export function App() {
   const [queryClient] = useState(createQueryClient);
 
   return (
     <QueryClientProvider client={queryClient}>
       <BrowserRouter>
-        <AuthProvider>
-          <OrganizationProvider>
-            <Suspense fallback={<FullScreenLoader />}>
-              <Routes>
-                <Route element={<RedirectIfAuthenticated />}>
-                  <Route path="/login" element={<LoginPage />} />
-                  <Route path="/register" element={<RegisterPage />} />
-                  <Route path="/forgot-password" element={<ForgotPasswordPage />} />
-                </Route>
-                {/* Reachable with the temporary recovery session from the email link. */}
-                <Route path="/reset-password" element={<ResetPasswordPage />} />
-
-                <Route element={<RequireAuth />}>
-                  <Route path="/onboarding" element={<OnboardingPage />} />
-                  <Route element={<RequireOrganization />}>
-                    <Route element={<AppShell />}>
-                      <Route index element={guarded("emails:read", <DashboardPage />)} />
-                      <Route path="inbox" element={guarded("emails:read", <InboxPage />)} />
-                      <Route path="inbox/:emailId" element={guarded("emails:read", <InboxPage />)} />
-                      <Route path="rules" element={guarded("rules:read", <RulesPage />)} />
-                      <Route path="rules/new" element={guarded("rules:manage", <RuleEditorPage />)} />
-                      <Route path="rules/:ruleId" element={guarded("rules:read", <RuleEditorPage />)} />
-                      <Route path="categories" element={guarded("categories:read", <CategoriesPage />)} />
-                      <Route path="accounts" element={guarded("email-accounts:read", <AccountsPage />)} />
-                      <Route path="members" element={guarded("members:read", <MembersPage />)} />
-                      <Route path="settings" element={guarded("organization:read", <SettingsPage />)} />
-                      <Route path="audit" element={guarded("audit:read", <AuditPage />)} />
-                      <Route
-                        path="profile"
-                        element={
-                          <Suspense fallback={<SkeletonRows rows={4} />}>
-                            <ProfilePage />
-                          </Suspense>
-                        }
-                      />
-                    </Route>
-                  </Route>
-                </Route>
-
-                <Route path="*" element={<Navigate to="/" replace />} />
-              </Routes>
-            </Suspense>
-          </OrganizationProvider>
-        </AuthProvider>
+        <Routes>
+          {/* Public legal pages (linked from the Google OAuth consent screen). */}
+          <Route path="/privacy" element={publicPage(<PrivacyPage />)} />
+          <Route path="/terms" element={publicPage(<TermsPage />)} />
+          <Route path="*" element={<SessionRoutes />} />
+        </Routes>
       </BrowserRouter>
       <Toaster richColors closeButton position="top-right" />
     </QueryClientProvider>
+  );
+}
+
+/** Everything that depends on the Supabase session and the active organization. */
+function SessionRoutes() {
+  return (
+    <AuthProvider>
+      <OrganizationProvider>
+        <Suspense fallback={<FullScreenLoader />}>
+          <Routes>
+            <Route element={<RedirectIfAuthenticated />}>
+              <Route path="/login" element={<LoginPage />} />
+              <Route path="/register" element={<RegisterPage />} />
+              <Route path="/forgot-password" element={<ForgotPasswordPage />} />
+            </Route>
+            {/* Reachable with the temporary recovery session from the email link. */}
+            <Route path="/reset-password" element={<ResetPasswordPage />} />
+
+            <Route element={<RequireAuth />}>
+              <Route path="/onboarding" element={<OnboardingPage />} />
+              <Route element={<RequireOrganization />}>
+                <Route element={<AppShell />}>
+                  <Route index element={guarded("emails:read", <DashboardPage />)} />
+                  <Route path="inbox" element={guarded("emails:read", <InboxPage />)} />
+                  <Route path="inbox/:emailId" element={guarded("emails:read", <InboxPage />)} />
+                  <Route path="rules" element={guarded("rules:read", <RulesPage />)} />
+                  <Route path="rules/new" element={guarded("rules:manage", <RuleEditorPage />)} />
+                  <Route path="rules/:ruleId" element={guarded("rules:read", <RuleEditorPage />)} />
+                  <Route path="categories" element={guarded("categories:read", <CategoriesPage />)} />
+                  <Route path="accounts" element={guarded("email-accounts:read", <AccountsPage />)} />
+                  <Route path="members" element={guarded("members:read", <MembersPage />)} />
+                  <Route path="settings" element={guarded("organization:read", <SettingsPage />)} />
+                  <Route path="audit" element={guarded("audit:read", <AuditPage />)} />
+                  <Route
+                    path="profile"
+                    element={
+                      <Suspense fallback={<SkeletonRows rows={4} />}>
+                        <ProfilePage />
+                      </Suspense>
+                    }
+                  />
+                </Route>
+              </Route>
+            </Route>
+
+            <Route path="*" element={<Navigate to="/" replace />} />
+          </Routes>
+        </Suspense>
+      </OrganizationProvider>
+    </AuthProvider>
   );
 }

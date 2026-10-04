@@ -1,6 +1,7 @@
 import { Mail } from "lucide-react";
 import type { ReactNode } from "react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/display";
+import { LegalLinks } from "@/features/legal/legal-layout";
 
 export function AuthLayout({
   title,
@@ -29,6 +30,7 @@ export function AuthLayout({
         <CardContent>{children}</CardContent>
       </Card>
       {footer ? <div className="text-sm text-muted-foreground">{footer}</div> : null}
+      <LegalLinks className="text-xs" />
     </div>
   );
 }
