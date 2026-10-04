@@ -11,6 +11,8 @@ export const queryKeys = {
     ["org", organizationId, "emails", "list", params] as const,
   email: (organizationId: string, id: string) => ["org", organizationId, "emails", "detail", id] as const,
   categories: (organizationId: string) => ["org", organizationId, "categories"] as const,
+  bots: (organizationId: string) => ["org", organizationId, "bots"] as const,
+  bot: (organizationId: string, id: string) => ["org", organizationId, "bots", id] as const,
   rules: (organizationId: string) => ["org", organizationId, "rules"] as const,
   rule: (organizationId: string, id: string) => ["org", organizationId, "rules", id] as const,
   accounts: (organizationId: string) => ["org", organizationId, "email-accounts"] as const,

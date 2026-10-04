@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { EmptyState, ErrorMessage, Spinner } from "@/components/ui/display";
 import { Pagination, SkeletonRows } from "@/components/ui/feedback";
 import { useEmailAccounts } from "@/features/accounts/api";
+import { useBots } from "@/features/bots/api";
 import { useCategories } from "@/features/categories/api";
 import { useCurrentOrganization } from "@/features/organization/api";
 import { getErrorMessage } from "@/lib/errors";
@@ -26,6 +27,7 @@ export function InboxPage() {
   const { can } = useOrganization();
   const current = useCurrentOrganization();
   const categories = useCategories();
+  const bots = useBots();
   const accounts = useEmailAccounts();
 
   const filters = useMemo(
@@ -53,6 +55,7 @@ export function InboxPage() {
           filters={filters}
           categories={categories.data ?? []}
           accounts={accounts.data ?? []}
+          bots={bots.data ?? []}
           onChange={updateFilters}
         />
 
@@ -69,7 +72,7 @@ export function InboxPage() {
                 icon={<Inbox />}
                 title="No hay correos en esta vista"
                 description={
-                  filters.search || filters.categoryId || filters.accountId
+                  filters.search || filters.categoryId || filters.accountId || filters.botId
                     ? "Prueba con otros filtros o busca otro término."
                     : "EmailBot solo guarda los correos que coinciden con tus reglas activas."
                 }

@@ -1,9 +1,11 @@
 import type { Permission } from "@emailbot/types";
-import { ShieldAlert } from "lucide-react";
+import { Ban, ShieldAlert } from "lucide-react";
 import type { ReactNode } from "react";
 import { Navigate, Outlet, useLocation } from "react-router-dom";
+import { Button } from "@/components/ui/button";
 import { EmptyState, ErrorMessage, Spinner } from "@/components/ui/display";
 import { getErrorMessage } from "@/lib/errors";
+import { ORGANIZATION_STATUS_LABELS } from "@/lib/labels";
 import { useAuth } from "@/providers/auth-provider";
 import { useOrganization } from "@/providers/organization-provider";
 
@@ -32,6 +34,41 @@ export function RedirectIfAuthenticated() {
   return <Outlet />;
 }
 
+/**
+ * SUSPENDED / CANCELLED organization: its data is kept but the API refuses
+ * every operation (ORGANIZATION_INACTIVE), so the panel is not shown.
+ */
+function InactiveOrganization() {
+  const { organization, memberships, switchOrganization } = useOrganization();
+  const { signOut } = useAuth();
+  const others = memberships.filter(
+    (membership) => membership.organization.id !== organization?.id && membership.organization.status === "ACTIVE"
+  );
+
+  return (
+    <div className="mx-auto mt-24 grid max-w-md gap-4 p-4">
+      <EmptyState
+        icon={<Ban />}
+        title={`${organization?.name ?? "Organización"}: ${organization ? ORGANIZATION_STATUS_LABELS[organization.status].toLowerCase() : ""}`}
+        description="Esta organización no está activa. Sus datos se conservan, pero no se puede operar mientras siga en este estado."
+      />
+      {others.length > 0 ? (
+        <div className="grid gap-2">
+          <p className="text-sm text-muted-foreground">Cambiar a otra organización:</p>
+          {others.map((membership) => (
+            <Button key={membership.organization.id} variant="outline" onClick={() => switchOrganization(membership.organization.id)}>
+              {membership.organization.name}
+            </Button>
+          ))}
+        </div>
+      ) : null}
+      <Button variant="ghost" onClick={() => void signOut()}>
+        Cerrar sesión
+      </Button>
+    </div>
+  );
+}
+
 /** Active organization required; users without one are sent to onboarding. */
 export function RequireOrganization() {
   const { loading, organization, error } = useOrganization();
@@ -44,6 +81,7 @@ export function RequireOrganization() {
     );
   }
   if (!organization) return <Navigate to="/onboarding" replace />;
+  if (organization.status !== "ACTIVE") return <InactiveOrganization />;
   return <Outlet />;
 }
 

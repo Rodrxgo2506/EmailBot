@@ -41,6 +41,7 @@ describe("rule form model", () => {
       stopProcessing: true,
       matchMode: "AND",
       categoryId: CATEGORY,
+      botId: null,
       conditions: [
         { field: "sender", operator: "contains", value: "streaming.example" },
         { field: "subject", operator: "contains", value: "código temporal" },
@@ -52,6 +53,14 @@ describe("rule form model", () => {
         { type: "NOTIFY", channel: "in_app" }
       ]
     });
+  });
+
+  it("sends the bot of the rule and loads it back (empty = general rule)", () => {
+    const BOT = "88888888-8888-4888-8888-888888888888";
+    expect(toRulePayload({ ...codesRule(), botId: BOT }).botId).toBe(BOT);
+    expect(toRulePayload({ ...codesRule(), botId: "" }).botId).toBeNull();
+    const result = validateRulePayload({ ...codesRule(), botId: BOT });
+    expect(result.ok && result.payload.botId).toBe(BOT);
   });
 
   it("passes the backend schema and the JSONB document schemas", () => {
@@ -75,6 +84,7 @@ describe("rule form model", () => {
       id: "r1",
       organizationId: "o1",
       categoryId: payload.categoryId ?? null,
+      botId: payload.botId ?? null,
       name: payload.name,
       description: null,
       enabled: payload.enabled,

@@ -1,5 +1,6 @@
 import type {
   AuditAction,
+  BotStatus,
   EmailAccountStatus,
   EmailProvider,
   OrganizationRole,
@@ -60,6 +61,7 @@ export const ENTITY_LABELS: Record<string, string> = {
   organization_member: "Miembro",
   email_account: "Cuenta de correo",
   category: "Categoría",
+  bot: "Bot",
   email_rule: "Regla",
   email: "Correo",
   user: "Usuario"
@@ -73,6 +75,11 @@ export const ACCOUNT_ERROR_LABELS: Record<string, string> = {
   PROVIDER_NOT_CONFIGURED: "El proveedor no está configurado en el servidor.",
   IMAP_SYNC_NOT_IMPLEMENTED: "La sincronización IMAP aún no está disponible. Las credenciales se guardaron cifradas.",
   PROVIDER_NOT_IMPLEMENTED: "Esta integración todavía no está disponible."
+};
+
+export const BOT_STATUS_LABELS: Record<BotStatus, string> = {
+  ACTIVE: "Activo",
+  PAUSED: "Pausado"
 };
 
 export const ORGANIZATION_STATUS_LABELS: Record<OrganizationStatus, string> = {

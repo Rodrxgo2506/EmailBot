@@ -30,6 +30,8 @@ const InboxPage = page(() => import("@/features/inbox/inbox-page"), "InboxPage")
 const RulesPage = page(() => import("@/features/rules/rules-page"), "RulesPage");
 const RuleEditorPage = page(() => import("@/features/rules/rule-editor-page"), "RuleEditorPage");
 const CategoriesPage = page(() => import("@/features/categories/categories-page"), "CategoriesPage");
+const BotsPage = page(() => import("@/features/bots/bots-page"), "BotsPage");
+const BotDetailPage = page(() => import("@/features/bots/bot-detail-page"), "BotDetailPage");
 const AccountsPage = page(() => import("@/features/accounts/accounts-page"), "AccountsPage");
 const MembersPage = page(() => import("@/features/organization/members-page"), "MembersPage");
 const SettingsPage = page(() => import("@/features/organization/settings-page"), "SettingsPage");
@@ -95,6 +97,8 @@ function SessionRoutes() {
                   <Route path="rules/new" element={guarded("rules:manage", <RuleEditorPage />)} />
                   <Route path="rules/:ruleId" element={guarded("rules:read", <RuleEditorPage />)} />
                   <Route path="categories" element={guarded("categories:read", <CategoriesPage />)} />
+                  <Route path="bots" element={guarded("bots:read", <BotsPage />)} />
+                  <Route path="bots/:botId" element={guarded("bots:read", <BotDetailPage />)} />
                   <Route path="accounts" element={guarded("email-accounts:read", <AccountsPage />)} />
                   <Route path="members" element={guarded("members:read", <MembersPage />)} />
                   <Route path="settings" element={guarded("organization:read", <SettingsPage />)} />

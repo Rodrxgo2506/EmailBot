@@ -1,4 +1,4 @@
-import type { Category, EmailAccount } from "@emailbot/types";
+import type { Bot, Category, EmailAccount } from "@emailbot/types";
 import { Search, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
@@ -18,11 +18,13 @@ export function InboxToolbar({
   filters,
   categories,
   accounts,
+  bots,
   onChange
 }: {
   filters: InboxFilters;
   categories: Category[];
   accounts: EmailAccount[];
+  bots: Bot[];
   onChange(patch: Partial<InboxFilters>): void;
 }) {
   const [search, setSearch] = useState(filters.search);
@@ -36,7 +38,7 @@ export function InboxToolbar({
     return () => clearTimeout(timer);
   }, [search, filters.search, onChange]);
 
-  const hasExtraFilters = Boolean(filters.categoryId || filters.accountId || filters.search);
+  const hasExtraFilters = Boolean(filters.categoryId || filters.accountId || filters.botId || filters.search);
 
   return (
     <div className="space-y-3 border-b p-3">
@@ -92,6 +94,26 @@ export function InboxToolbar({
             </option>
           ))}
         </Select>
+        {bots.length > 0 ? (
+          <>
+            <label htmlFor="inbox-bot" className="sr-only">
+              Bot
+            </label>
+            <Select
+              id="inbox-bot"
+              className="h-8 w-auto min-w-36 flex-1 text-xs"
+              value={filters.botId ?? ""}
+              onChange={(event) => onChange({ botId: event.target.value || null, page: 1 })}
+            >
+              <option value="">Todos los bots</option>
+              {bots.map((bot) => (
+                <option key={bot.id} value={bot.id}>
+                  {bot.name}
+                </option>
+              ))}
+            </Select>
+          </>
+        ) : null}
         <label htmlFor="inbox-account" className="sr-only">
           Cuenta
         </label>
@@ -114,7 +136,7 @@ export function InboxToolbar({
             size="sm"
             onClick={() => {
               setSearch("");
-              onChange({ categoryId: null, accountId: null, search: "", page: 1 });
+              onChange({ categoryId: null, accountId: null, botId: null, search: "", page: 1 });
             }}
           >
             <X /> Limpiar

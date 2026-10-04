@@ -4,6 +4,7 @@ import { buildQuery } from "@/lib/api-client";
 import { defaultView, parseInboxFilters, serializeInboxFilters, toEmailQuery } from "./filters";
 
 const CATEGORY = "77777777-7777-4777-8777-777777777777";
+const BOT = "88888888-8888-4888-8888-888888888888";
 
 describe("inbox filters", () => {
   it("parses URL params with safe defaults", () => {
@@ -11,6 +12,7 @@ describe("inbox filters", () => {
       view: "all",
       categoryId: null,
       accountId: null,
+      botId: null,
       search: "",
       page: 1
     });
@@ -18,8 +20,16 @@ describe("inbox filters", () => {
   });
 
   it("round-trips through the URL", () => {
-    const filters = { view: "important" as const, categoryId: CATEGORY, accountId: null, search: "código", page: 3 };
+    const filters = { view: "important" as const, categoryId: CATEGORY, accountId: null, botId: BOT, search: "código", page: 3 };
     expect(parseInboxFilters(serializeInboxFilters(filters))).toEqual(filters);
+    expect(serializeInboxFilters(filters).get("bot")).toBe(BOT);
+  });
+
+  it("sends the bot filter to the API (accepted by the API schema)", () => {
+    const query = toEmailQuery({ view: "all", categoryId: null, accountId: null, botId: BOT, search: "", page: 1 });
+    expect(query.botId).toBe(BOT);
+    const params = Object.fromEntries(new URLSearchParams(buildQuery(query).slice(1)));
+    expect(emailListQuerySchema.safeParse(params).success).toBe(true);
   });
 
   it("maps views to the API query and the API schema accepts it", () => {

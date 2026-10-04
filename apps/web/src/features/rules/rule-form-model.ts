@@ -87,6 +87,8 @@ export const ruleFormSchema = z.object({
   stopProcessing: z.boolean(),
   matchMode: z.enum(["AND", "OR"]),
   categoryId: z.string(),
+  /** "" = general rule (no bot). */
+  botId: z.string(),
   conditions: z.array(conditionFormSchema).min(1, "Agrega al menos una condición").max(25),
   markImportant: z.boolean(),
   markRead: z.boolean(),
@@ -124,6 +126,7 @@ export function defaultRuleFormValues(): RuleFormValues {
     stopProcessing: false,
     matchMode: "AND",
     categoryId: "",
+    botId: "",
     conditions: [emptyCondition()],
     markImportant: false,
     markRead: false,
@@ -170,6 +173,7 @@ export function toRulePayload(values: RuleFormValues): RuleCreateInput {
     stopProcessing: values.stopProcessing,
     matchMode: values.matchMode,
     categoryId: values.categoryId || null,
+    botId: values.botId || null,
     conditions: values.conditions.map(toCondition),
     actions: toActions(values)
   };
@@ -199,6 +203,7 @@ export function fromRule(rule: EmailRule): RuleFormValues {
   values.stopProcessing = rule.stopProcessing;
   values.matchMode = rule.matchMode;
   values.categoryId = rule.categoryId ?? "";
+  values.botId = rule.botId ?? "";
   values.conditions = rule.conditions.map((condition) => ({
     field: condition.field,
     operator: condition.operator,

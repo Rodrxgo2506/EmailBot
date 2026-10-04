@@ -2,13 +2,14 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { ArrowLeft, Plus } from "lucide-react";
 import { useEffect, useState } from "react";
 import { FormProvider, useFieldArray, useForm } from "react-hook-form";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle, ErrorMessage, PageHeader } from "@/components/ui/display";
 import { SkeletonRows } from "@/components/ui/feedback";
 import { Field } from "@/components/ui/field";
 import { CheckboxCard, Input, Label, Select, Switch, Textarea } from "@/components/ui/form-controls";
+import { useBots } from "@/features/bots/api";
 import { useCategories } from "@/features/categories/api";
 import { ApiError } from "@/lib/api-client";
 import { getErrorMessage } from "@/lib/errors";
@@ -36,10 +37,16 @@ export function RuleEditorPage() {
   const isNew = !ruleId;
   const rule = useRule(ruleId);
   const categories = useCategories();
+  const bots = useBots();
+  const [searchParams] = useSearchParams();
   const { create, update, testDraft } = useRuleMutations();
   const [payloadIssues, setPayloadIssues] = useState<Array<{ path: string; message: string }>>([]);
 
-  const form = useForm<RuleFormValues>({ resolver: zodResolver(ruleFormSchema), defaultValues: defaultRuleFormValues() });
+  // New rule opened from a bot page (/rules/new?botId=...): preselect that bot.
+  const form = useForm<RuleFormValues>({
+    resolver: zodResolver(ruleFormSchema),
+    defaultValues: { ...defaultRuleFormValues(), botId: isNew ? (searchParams.get("botId") ?? "") : "" }
+  });
   const conditions = useFieldArray({ control: form.control, name: "conditions" });
   const extractors = useFieldArray({ control: form.control, name: "extractors" });
 
@@ -111,6 +118,22 @@ export function RuleEditorPage() {
                   </Field>
                   <Field label="Descripción" htmlFor="rule-description" className="sm:col-span-2">
                     <Textarea id="rule-description" rows={2} {...form.register("description")} />
+                  </Field>
+                  <Field
+                    label="Bot"
+                    htmlFor="rule-bot"
+                    hint="Sin bot, la regla solo clasifica. Si dos bots empatan en la prioridad más alta, el correo queda sin bot."
+                    className="sm:col-span-2"
+                  >
+                    <Select id="rule-bot" {...form.register("botId")}>
+                      <option value="">Regla general (sin bot)</option>
+                      {(bots.data ?? []).map((bot) => (
+                        <option key={bot.id} value={bot.id}>
+                          {bot.name}
+                          {bot.status === "PAUSED" ? " (pausado)" : ""}
+                        </option>
+                      ))}
+                    </Select>
                   </Field>
                   <Field
                     label="Prioridad"

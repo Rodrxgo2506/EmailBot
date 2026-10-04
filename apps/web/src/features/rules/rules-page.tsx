@@ -1,4 +1,4 @@
-import { OctagonX, Pencil, Plus, Trash2, Workflow } from "lucide-react";
+import { Bot as BotIcon, OctagonX, Pencil, Plus, Trash2, Workflow } from "lucide-react";
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import { toast } from "sonner";
@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Badge, Card, EmptyState, ErrorMessage, PageHeader } from "@/components/ui/display";
 import { ConfirmDialog, SkeletonRows } from "@/components/ui/feedback";
 import { Switch } from "@/components/ui/form-controls";
+import { useBots } from "@/features/bots/api";
 import { useCategories } from "@/features/categories/api";
 import { CategoryBadge } from "@/features/categories/category-badge";
 import { getErrorMessage } from "@/lib/errors";
@@ -24,7 +25,9 @@ const ACTION_LABELS: Record<string, string> = {
 function RuleCard({ rule, canManage, onDelete }: { rule: EmailRule; canManage: boolean; onDelete(): void }) {
   const { update } = useRuleMutations();
   const { data: categories } = useCategories();
+  const { data: bots } = useBots();
   const category = categories?.find((candidate) => candidate.id === rule.categoryId);
+  const bot = rule.botId ? bots?.find((candidate) => candidate.id === rule.botId) : undefined;
 
   return (
     <Card className={rule.enabled ? "p-4" : "p-4 opacity-70"}>
@@ -55,6 +58,13 @@ function RuleCard({ rule, canManage, onDelete }: { rule: EmailRule; canManage: b
             ))}
           </p>
           <div className="mt-2 flex flex-wrap items-center gap-1.5">
+            {bot ? (
+              <Link to={`/bots/${bot.id}`} title="Bot de la regla">
+                <Badge variant="outline">
+                  <BotIcon className="size-3" /> {bot.name}
+                </Badge>
+              </Link>
+            ) : null}
             {category ? <CategoryBadge category={category} /> : null}
             {rule.actions.map((action, index) => (
               <Badge key={index} variant="default">
