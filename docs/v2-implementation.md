@@ -9,7 +9,7 @@ Producción no se modifica sin autorización explícita por fase.
 |---|---|---|
 | 0 | Preparación y compatibilidad | completada |
 | 1 | Bots (tabla, `bot_id` en reglas y correos, motor de reglas) + `organizations.status` | completada |
-| 2 | Customers, identificadores, asignaciones | pendiente |
+| 2 | Customers, identificadores, asignaciones | completada |
 | 3 | Routing: Customer Resolver + `email_deliveries` | pendiente |
 | 4 | Customer Access ID + sesiones | pendiente |
 | 5 | API del portal | pendiente |
@@ -104,6 +104,81 @@ efectiva (`corsOrigins`). Base para el portal (fase 5), que usará `credentials:
 
 `email_rules.bot_id`: INSERT/UPDATE por columna para `authenticated` (RLS existente: OWNER/ADMIN).
 `emails.bot_id`: lo escribe el worker; sin UPDATE para `authenticated` (re-enrutado: fase 3).
+
+## Fase 2: decisiones implementadas
+
+### Customers
+
+- Pertenecen a una organización; no son usuarios de Supabase Auth.
+- **Sin borrado**: `authenticated` no tiene DELETE (ni grant ni política) y la API no expone DELETE. Un cliente
+  sale con `status = SUSPENDED`, que conserva historial, identificadores y asignaciones. Solo borrar la
+  organización entera los elimina (cascada).
+- Permisos (`@emailbot/types`): `customers:read` todos los roles; `customers:manage` OWNER/ADMIN/OPERATOR
+  (incluye identificadores y asignaciones bot ↔ cliente). Las políticas RLS replican la misma matriz.
+- `external_ref` único por organización (opcional).
+
+### Normalización de identificadores
+
+Una sola implementación: `normalizeIdentifier` en `@emailbot/validation` (API al escribir, web para la vista
+previa, worker al buscar en la fase 3). Todos los tipos: Unicode NFC + trim.
+
+| Tipo | Regla |
+|---|---|
+| EMAIL | minúsculas; **se conservan** puntos y `+alias` (`john.smith@` ≠ `johnsmith@`, `john+netflix@` ≠ `john@`) |
+| PHONE | dígitos, conservando un `+` inicial; se quitan espacios, guiones, puntos, paréntesis y `/`; 6-15 dígitos; letras rechazadas; no se deduce el código de país |
+| USERNAME / EXTERNAL_ID / CUSTOM | minúsculas |
+
+La base de datos solo comprueba invariantes de la salida (`customer_identifiers_normalized_format`), sin
+duplicar la lógica.
+
+### Unicidad de identificadores
+
+`UNIQUE NULLS NOT DISTINCT (customer_id, type, normalized_value, bot_id)`:
+
+- impide duplicados exactos del mismo cliente y alcance (incluido el alcance NULL);
+- **permite** el mismo valor en varios clientes (cuentas compartidas): la política `onMultipleMatches` del bot
+  decide en la fase 3 (DELIVER_ALL o LEAVE_UNASSIGNED);
+- el mismo valor con alcance distinto (todos los bots / un bot concreto) es otra relación.
+
+Búsqueda del resolver: índice `(organization_id, type, normalized_value) where active`.
+
+### Integridad entre organizaciones
+
+FK compuestas sobre `(organization_id, ...)`: identificador → cliente y bot de su organización; asignación →
+bot y cliente de su organización. Lo impide la base de datos para cualquier rol (también service role y
+owner). Las referencias a `bots` son NO ACTION: un bot con clientes asociados o identificadores propios no se
+puede borrar (la API responde `409 BOT_IN_USE`); nada se borra ni se amplía en silencio. Borrar la organización
+elimina todo en cascada.
+
+### Estados
+
+Cliente SUSPENDED y bot PAUSED conservan identificadores y asignaciones; una asignación con `active = false`
+se conserva. La fase 3 debe considerar elegibles solo: cliente ACTIVE, asignación activa, bot ACTIVE e
+identificador activo.
+
+### API y auditoría
+
+- `organizationId` siempre de la organización activa y el actor del JWT; cuerpos estrictos.
+- Todo id de la ruta se resuelve dentro de la organización activa (404 si no): ids de otro tenant son
+  indistinguibles de inexistentes (IDOR).
+- Búsqueda solo en la organización activa (nombre, referencia externa, identificador normalizado); el término
+  se sanea para que no pueda añadir filtros PostgREST ni comodines.
+- Eventos: `customer.created/updated/suspended/reactivated`, `identifier.created/updated/deleted`,
+  `customer.bot.assigned/unassigned/activated/deactivated`. Los **valores** de los identificadores son datos
+  personales y nunca se escriben en auditoría (solo tipo y alcance).
+
+### RLS (plantilla)
+
+| Pregunta | customers | customer_identifiers | bot_customer_assignments |
+|---|---|---|---|
+| SELECT | miembros | miembros | miembros |
+| INSERT | OWNER/ADMIN/OPERATOR; `created_by` propio o NULL | OWNER/ADMIN/OPERATOR | OWNER/ADMIN/OPERATOR; `created_by` propio o NULL |
+| UPDATE | nombre, estado, referencia, notas | valor, valor normalizado, alcance, activo | solo `active` |
+| DELETE | nadie | OWNER/ADMIN/OPERATOR | OWNER/ADMIN/OPERATOR |
+| ¿Cruza organización? | no (RLS + FK compuestas) | no | no |
+| ¿Customer (portal)? | no | no | no |
+| ¿Super Admin? | sin excepción RLS | sin excepción RLS | sin excepción RLS |
+| service_role | sin acceso (fase 3) | sin acceso (fase 3) | sin acceso (fase 3) |
 
 ## Decisiones pendientes
 
