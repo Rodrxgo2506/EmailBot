@@ -52,6 +52,8 @@ export function buildEmailRow(
     email_account_id: account.id,
     category_id: result.categoryId,
     matched_rule_id: result.primaryRuleId,
+    // EmailBot V2: NULL when no bot rule matched or when bots tied (AMBIGUOUS, see below).
+    bot_id: result.botId,
     direction: email.direction,
     // Completed by the worker once every step is done (migration 9).
     processing_status: "RECEIVED",
@@ -73,6 +75,7 @@ export function buildEmailRow(
     headers,
     provider_metadata: {
       matchedRuleIds: result.matchedRules.map((rule) => rule.id),
+      ...(result.botSelection === "AMBIGUOUS" ? { botSelection: "AMBIGUOUS", botCandidateIds: result.botCandidateIds } : {}),
       ...(senderValid ? {} : { originalSender: email.sender.address.slice(0, 320) })
     },
     extracted_data: result.extracted,

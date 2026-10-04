@@ -629,28 +629,28 @@ describe("processing completion (migration 9)", () => {
   });
 });
 
-describe("handleEmailEvent", () => {
-  function eventSetup(accounts: WorkerAccount[], adapter = makeAdapter()) {
-    const store = makeAccountStore(accounts);
-    const producer = makeProducer();
-    const enqueueSync = vi.fn(async () => undefined);
-    return {
-      store,
+function eventSetup(accounts: WorkerAccount[], adapter = makeAdapter()) {
+  const store = makeAccountStore(accounts);
+  const producer = makeProducer();
+  const enqueueSync = vi.fn(async () => undefined);
+  return {
+    store,
+    producer,
+    adapter,
+    enqueueSync,
+    deps: {
+      accounts: store,
+      emails: new MemoryEmailStore(),
       producer,
-      adapter,
+      providers: makeRegistry(adapter),
+      createContext: (account: WorkerAccount) => ({ account, getAccessToken: async () => "t" }),
       enqueueSync,
-      deps: {
-        accounts: store,
-        emails: new MemoryEmailStore(),
-        producer,
-        providers: makeRegistry(adapter),
-        createContext: (account: WorkerAccount) => ({ account, getAccessToken: async () => "t" }),
-        enqueueSync,
-        logger: silentLogger
-      }
-    };
-  }
+      logger: silentLogger
+    }
+  };
+}
 
+describe("handleEmailEvent", () => {
   it("Gmail notification syncs every active account with that address (one per organization)", async () => {
     const adapter = makeAdapter({ listNewMessageIds: vi.fn(async () => ({ messageIds: ["m1", "m2"], nextCursor: "200" })) });
     const { deps, producer, store } = eventSetup(
@@ -741,5 +741,96 @@ describe("notifications", () => {
     expect(await deliverNotification({ ...base, channel: "email" }, { emails, realtime, logger: silentLogger })).toBe(
       "skipped_not_implemented"
     );
+  });
+});
+
+describe("EmailBot V2 phase 1: bots and organization status", () => {
+  const NETFLIX = "bot-netflix";
+  const YAPE = "bot-yape";
+  const botRule = (id: string, botId: string, overrides: Parameters<typeof makeRuleRow>[0] = {}) =>
+    makeRuleRow({ id, bot_id: botId, bot: { status: "ACTIVE" }, ...overrides });
+
+  it("stores the bot selected by the highest-priority bot rule (and announces it)", async () => {
+    const { deps, job, emails, realtime } = setup();
+    emails.rules = [botRule("netflix", NETFLIX, { priority: 5 }), botRule("yape", YAPE, { priority: 50 })];
+
+    expect((await processEmail(job, deps)).status).toBe("processed");
+    expect(emails.rows[0]).toMatchObject({ bot_id: NETFLIX, matched_rule_id: "netflix" });
+    expect(emails.rows[0]?.provider_metadata).not.toHaveProperty("botSelection");
+    expect(realtime.events[0]).toMatchObject({ type: "email.processed", botId: NETFLIX });
+  });
+
+  it("a general rule (bot_id null) still stores the email without a bot", async () => {
+    const { deps, job, emails } = setup();
+    expect((await processEmail(job, deps)).status).toBe("processed");
+    expect(emails.rows[0]).toMatchObject({ bot_id: null });
+  });
+
+  it("an ambiguous tie between bots stores the email without a bot and records the candidates", async () => {
+    const { deps, job, emails } = setup();
+    const warn = vi.fn();
+    deps.logger = { ...silentLogger, warn };
+    emails.rules = [botRule("netflix", NETFLIX, { priority: 10 }), botRule("yape", YAPE, { priority: 10 })];
+
+    expect((await processEmail(job, deps)).status).toBe("processed");
+    expect(emails.rows[0]).toMatchObject({
+      bot_id: null,
+      provider_metadata: expect.objectContaining({ botSelection: "AMBIGUOUS", botCandidateIds: [NETFLIX, YAPE] })
+    });
+    expect(warn).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "bot.selection.ambiguous", organizationId: ORG, botCandidateIds: [NETFLIX, YAPE] }),
+      expect.any(String)
+    );
+  });
+
+  it("rules of a PAUSED bot are ignored: the email is not stored", async () => {
+    const { deps, job, emails } = setup();
+    emails.rules = [botRule("netflix", NETFLIX, { bot: { status: "PAUSED" } })];
+
+    expect(await processEmail(job, deps)).toEqual({ status: "skipped", reason: "no_matching_rule" });
+    expect(emails.rows).toHaveLength(0);
+  });
+
+  it("a bot rule whose bot status is unknown is treated as paused (fail closed)", async () => {
+    const { deps, job, emails } = setup();
+    emails.rules = [botRule("netflix", NETFLIX, { bot: null })];
+    expect(await processEmail(job, deps)).toEqual({ status: "skipped", reason: "no_matching_rule" });
+  });
+
+  it.each(["SUSPENDED", "CANCELLED"] as const)("a %s organization gets nothing processed and nothing fetched", async (status) => {
+    const { deps, job, emails, adapter, realtime } = setup({ account: makeAccount({ organizationStatus: status }) });
+    expect(await processEmail(job, deps)).toEqual({ status: "skipped", reason: "organization_inactive" });
+    expect(adapter.fetchMessage).not.toHaveBeenCalled();
+    expect(emails.rows).toHaveLength(0);
+    expect(realtime.events).toHaveLength(0);
+  });
+
+  it("an incomplete email of a suspended organization is left untouched (history kept, not retried)", async () => {
+    const { deps, job, emails } = setup({ account: makeAccount({ organizationStatus: "SUSPENDED" }) });
+    emails.rows.push({
+      organization_id: ORG,
+      email_account_id: "account-1",
+      provider_message_id: "msg-1",
+      processing_status: "PROCESSING",
+      processing_attempts: 1
+    });
+    expect(await processEmail(job, deps)).toEqual({ status: "skipped", reason: "organization_inactive" });
+    expect(emails.rows[0]).toMatchObject({ processing_status: "PROCESSING", processing_attempts: 1 });
+    expect(emails.updateProcessingState).not.toHaveBeenCalled();
+  });
+
+  it("SYNC_ACCOUNT of a suspended organization lists nothing and keeps the cursor", async () => {
+    const { deps, adapter, store } = eventSetup([makeAccount({ id: "acc-s", organizationStatus: "SUSPENDED" })]);
+    const outcome = await handleEmailEvent({ type: "SYNC_ACCOUNT", emailAccountId: "acc-s", organizationId: ORG, requestedBy: null }, deps);
+    expect(outcome).toEqual({ accounts: 1, enqueued: 0 });
+    expect(adapter.listNewMessageIds).not.toHaveBeenCalled();
+    expect(store.updateSyncState).not.toHaveBeenCalled();
+  });
+
+  it("POLL_ACCOUNTS skips accounts of suspended organizations", async () => {
+    const { deps, enqueueSync } = eventSetup([makeAccount({ id: "ok" }), makeAccount({ id: "suspended", organizationStatus: "SUSPENDED" })]);
+    await handleEmailEvent({ type: "POLL_ACCOUNTS" }, deps);
+    expect(enqueueSync).toHaveBeenCalledTimes(1);
+    expect(enqueueSync).toHaveBeenCalledWith(expect.objectContaining({ id: "ok" }));
   });
 });

@@ -1,9 +1,11 @@
-import type { EmailAccountStatus, EmailProvider, NormalizedEmail } from "@emailbot/types";
+import type { EmailAccountStatus, EmailProvider, NormalizedEmail, OrganizationStatus } from "@emailbot/types";
 
 /** Account as seen by the worker (service role; includes encrypted credentials). */
 export interface WorkerAccount {
   id: string;
   organizationId: string;
+  /** organizations.status: only ACTIVE organizations get mail processed (EmailBot V2). */
+  organizationStatus: OrganizationStatus;
   provider: EmailProvider;
   status: EmailAccountStatus;
   emailAddress: string;

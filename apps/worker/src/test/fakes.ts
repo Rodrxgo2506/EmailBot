@@ -24,6 +24,7 @@ export function makeAccount(overrides: Partial<WorkerAccount> = {}): WorkerAccou
   return {
     id: "account-1",
     organizationId: ORG,
+    organizationStatus: "ACTIVE",
     provider: "GMAIL",
     status: "ACTIVE",
     emailAddress: "me@gmail.com",
@@ -221,7 +222,9 @@ export function makeAccountStore(accounts: WorkerAccount[]): AccountStore & Reco
       accounts.find((account) => account.providerMetadata.subscriptionId === subscriptionId) ?? null
     ),
     listActiveOAuthAccounts: vi.fn(async () =>
-      accounts.filter((a) => a.status === "ACTIVE" && a.provider !== "IMAP").map((a) => ({ id: a.id, organizationId: a.organizationId }))
+      accounts
+        .filter((a) => a.status === "ACTIVE" && a.organizationStatus === "ACTIVE" && a.provider !== "IMAP")
+        .map((a) => ({ id: a.id, organizationId: a.organizationId }))
     ),
     updateSyncState: vi.fn(async () => undefined),
     saveTokens: vi.fn(async () => undefined),

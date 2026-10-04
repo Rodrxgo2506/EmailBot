@@ -36,7 +36,8 @@ export const MAX_PROCESSING_ATTEMPTS = 25;
  * cursor. Messages are NOT fetched here.
  */
 export async function syncAccount(account: WorkerAccount, deps: HandleEventDeps): Promise<number> {
-  if (account.status !== "ACTIVE") return 0;
+  // Inactive organization: nothing is listed and the cursor does not move, so no mail is lost or processed.
+  if (account.status !== "ACTIVE" || account.organizationStatus !== "ACTIVE") return 0;
 
   const changes = await deps.providers[account.provider].listNewMessageIds(deps.createContext(account));
 

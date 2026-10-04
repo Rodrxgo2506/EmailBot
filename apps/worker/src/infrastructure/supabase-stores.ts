@@ -21,8 +21,9 @@ import type { WorkerAccount } from "../providers/types.js";
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Row = Record<string, any>;
 
+// organizations(status): column grant of migration organization_status_worker_access (no other organization column).
 const ACCOUNT_COLUMNS =
-  "id,organization_id,provider,status,email_address,sync_cursor,provider_metadata,access_token_encrypted,refresh_token_encrypted,token_expires_at";
+  "id,organization_id,provider,status,email_address,sync_cursor,provider_metadata,access_token_encrypted,refresh_token_encrypted,token_expires_at,organizations!inner(status)";
 
 function check<T>(result: { data: T; error: { message: string; code?: string } | null }, operation: string): T {
   if (result.error) {
@@ -37,6 +38,8 @@ function toAccount(row: Row): WorkerAccount {
   return {
     id: row.id,
     organizationId: row.organization_id,
+    // Fail closed: an account whose organization status cannot be read is not processed.
+    organizationStatus: row.organizations?.status ?? "SUSPENDED",
     provider: row.provider,
     status: row.status,
     emailAddress: row.email_address,
@@ -85,8 +88,9 @@ export function createAccountStore(db: SupabaseClient): AccountStore {
       const rows = check(
         await db
           .from("email_accounts")
-          .select("id,organization_id")
+          .select("id,organization_id,organizations!inner(status)")
           .eq("status", "ACTIVE")
+          .eq("organizations.status", "ACTIVE")
           .in("provider", ["GMAIL", "MICROSOFT"])
           .order("last_synced_at", { ascending: true, nullsFirst: true })
           .limit(limit),
@@ -170,10 +174,14 @@ export function createEmailStore(db: SupabaseClient): EmailStore {
       const rows = check(
         await db
           .from("emails")
-          .select("id,organization_id,email_account_id,provider_message_id,processing_attempts,email_accounts!inner(provider,status)")
+          .select(
+            "id,organization_id,email_account_id,provider_message_id,processing_attempts,email_accounts!inner(provider,status),organizations!inner(status)"
+          )
           .in("processing_status", ["RECEIVED", "PROCESSING"])
           .lt("processing_started_at", startedBefore)
           .eq("email_accounts.status", "ACTIVE")
+          // Suspended organizations keep their incomplete emails untouched (not retried towards FAILED).
+          .eq("organizations.status", "ACTIVE")
           .order("processing_started_at", { ascending: true })
           .limit(limit),
         "listIncompleteEmails"
@@ -189,16 +197,19 @@ export function createEmailStore(db: SupabaseClient): EmailStore {
     },
 
     async loadEnabledRules(organizationId) {
-      return check(
+      const rows = check(
         await db
           .from("email_rules")
-          .select("id,name,enabled,priority,stop_processing,match_mode,category_id,conditions,actions,created_at")
+          // bot:bots(status): rules of PAUSED bots are not evaluated (rules-engine parseRuleRow).
+          .select("id,name,enabled,priority,stop_processing,match_mode,category_id,bot_id,bot:bots(status),conditions,actions,created_at")
           .eq("organization_id", organizationId)
           .eq("enabled", true)
           .order("priority", { ascending: true })
           .order("created_at", { ascending: true }),
         "loadEnabledRules"
-      ) as EmailRuleRow[];
+      ) as unknown as Array<Omit<EmailRuleRow, "bot"> & { bot: EmailRuleRow["bot"] | Array<{ status: string }> }>;
+      // Many-to-one embeds come back as an object; accept a one-element array too (untyped client).
+      return rows.map((row) => ({ ...row, bot: (Array.isArray(row.bot) ? row.bot[0] : row.bot) ?? null }));
     },
 
     async loadSettings(organizationId): Promise<OrganizationProcessingSettings> {

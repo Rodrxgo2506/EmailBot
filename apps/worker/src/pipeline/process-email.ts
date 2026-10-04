@@ -39,6 +39,7 @@ export type ProcessEmailOutcome =
       status: "skipped";
       reason:
         | "account_not_found"
+        | "organization_inactive"
         | "account_inactive"
         | "auto_processing_disabled"
         | "duplicate"
@@ -97,6 +98,8 @@ export async function processEmail(
   if (!account || account.organizationId !== job.organizationId) {
     return { status: "skipped", reason: "account_not_found" };
   }
+  // SUSPENDED / CANCELLED: data is kept, nothing new is processed or delivered (incomplete emails stay as they are).
+  if (account.organizationStatus !== "ACTIVE") return { status: "skipped", reason: "organization_inactive" };
   if (account.status !== "ACTIVE") return { status: "skipped", reason: "account_inactive" };
 
   const settings = await deps.emails.loadSettings(account.organizationId);
@@ -119,6 +122,14 @@ export async function processEmail(
   }
 
   if (!result.matched) return { status: "skipped", reason: "no_matching_rule" };
+
+  if (result.botSelection === "AMBIGUOUS") {
+    // Stored without a bot (and therefore never routed to customers); visible in provider_metadata.
+    log.warn(
+      { event: "bot.selection.ambiguous", organizationId: account.organizationId, botCandidateIds: result.botCandidateIds },
+      "email matched rules of different bots with the same priority; no bot selected"
+    );
+  }
 
   const inserted = await deps.emails.insertEmail(buildEmailRow(email, account, result, { startedAt, attempts: Math.max(1, meta.attempt) }));
   if (!inserted) {
@@ -229,6 +240,7 @@ async function announce(
     emailAccountId: account.id,
     categoryId: result.categoryId,
     matchedRuleId: result.primaryRuleId,
+    botId: result.botId,
     subject: email.subject.slice(0, 200),
     important: result.markImportant
   });
