@@ -13,6 +13,14 @@ describe("hasPermission", () => {
     expect(hasPermission("VIEWER", "audit:read")).toBe(false);
   });
 
+  it("bots: every member reads, only OWNER/ADMIN manage (same as the bots RLS policies)", () => {
+    expect(hasPermission("VIEWER", "bots:read")).toBe(true);
+    expect(hasPermission("OPERATOR", "bots:manage")).toBe(false);
+    expect(hasPermission("VIEWER", "bots:manage")).toBe(false);
+    expect(hasPermission("ADMIN", "bots:manage")).toBe(true);
+    expect(hasPermission("OWNER", "bots:manage")).toBe(true);
+  });
+
   it("denies when there is no role", () => {
     expect(hasPermission(null, "emails:read")).toBe(false);
     expect(hasPermission(undefined, "emails:read")).toBe(false);

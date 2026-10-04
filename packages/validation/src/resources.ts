@@ -75,6 +75,8 @@ export const categoryUpdateSchema = z
 
 export const emailListQuerySchema = paginationQuerySchema.extend({
   accountId: idSchema.optional(),
+  /** Emails routed to this bot (EmailBot V2). */
+  botId: idSchema.optional(),
   /** A category id, or "none" for uncategorized emails. */
   categoryId: z.union([idSchema, z.literal("none")]).optional(),
   status: z.enum(EMAIL_PROCESSING_STATUSES).optional(),

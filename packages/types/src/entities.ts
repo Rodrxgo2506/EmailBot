@@ -1,11 +1,15 @@
 import type {
   AuditAction,
   AuditActorType,
+  BotStatus,
+  CustomerIdentifierType,
+  CustomerResolutionSource,
   EmailAccountStatus,
   EmailDirection,
   EmailProcessingStatus,
   EmailProvider,
   InboxFilter,
+  MultipleMatchPolicy,
   OrganizationPlan,
   OrganizationRole,
   OrganizationStatus,
@@ -73,6 +77,43 @@ export interface EmailAccount {
   updatedAt: string;
 }
 
+export interface CustomerResolution {
+  source: CustomerResolutionSource;
+  /** Identifier type looked up in customer_identifiers (EMAIL for RECIPIENT / SENDER). */
+  identifierType?: CustomerIdentifierType | undefined;
+  /** EXTRACTED_FIELD only: name of an EXTRACT action of the bot's rules. */
+  field?: string | undefined;
+  onMultipleMatches: MultipleMatchPolicy;
+}
+
+export interface PortalField {
+  /** Key of emails.extracted_data (an EXTRACT action name). */
+  key: string;
+  label: string;
+}
+
+export interface PortalSettings {
+  showBody: boolean;
+  showAttachments: boolean;
+  fields: PortalField[];
+}
+
+/** Organization-scoped email service (EmailBot V2). */
+export interface Bot {
+  id: string;
+  organizationId: string;
+  name: string;
+  slug: string;
+  description: string | null;
+  status: BotStatus;
+  customerResolution: CustomerResolution;
+  portalSettings: PortalSettings;
+  createdBy: string | null;
+  updatedBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface Category {
   id: string;
   organizationId: string;
@@ -91,6 +132,8 @@ export interface EmailRuleRecord<TCondition = unknown, TAction = unknown> {
   id: string;
   organizationId: string;
   categoryId: string | null;
+  /** Bot the rule belongs to; null = general rule (classifies, never routes). */
+  botId: string | null;
   name: string;
   description: string | null;
   enabled: boolean;
@@ -111,6 +154,8 @@ export interface EmailSummary {
   emailAccountId: string;
   categoryId: string | null;
   matchedRuleId: string | null;
+  /** Bot selected when processed; null = none or an ambiguous tie between bots. */
+  botId: string | null;
   direction: EmailDirection;
   processingStatus: EmailProcessingStatus;
   senderEmail: string;

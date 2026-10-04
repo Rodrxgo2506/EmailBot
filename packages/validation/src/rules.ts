@@ -149,6 +149,8 @@ const ruleFields = {
   stopProcessing: z.boolean(),
   matchMode: z.enum(RULE_MATCH_MODES),
   categoryId: idSchema.nullable(),
+  /** Bot the rule belongs to (EmailBot V2); null = general rule. */
+  botId: idSchema.nullable(),
   conditions: z.array(ruleConditionSchema).min(1).max(MAX_RULE_CONDITIONS),
   actions: z.array(ruleActionSchema).max(MAX_RULE_ACTIONS)
 };
@@ -161,6 +163,7 @@ export const ruleCreateSchema = z.object({
   stopProcessing: ruleFields.stopProcessing.default(false),
   matchMode: ruleFields.matchMode.default("AND"),
   categoryId: ruleFields.categoryId.optional(),
+  botId: ruleFields.botId.optional(),
   actions: ruleFields.actions.default([])
 });
 

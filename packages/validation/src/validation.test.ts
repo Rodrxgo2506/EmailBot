@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  botCreateSchema,
+  botUpdateSchema,
   categoryUpdateSchema,
+  customerResolutionSchema,
+  portalSettingsSchema,
   isLocalHostname,
   looksLikeSupabaseSecretKey,
   productionUrlProblem,
@@ -181,5 +185,65 @@ describe("deployment URL checks", () => {
     expect(looksLikeSupabaseSecretKey("sb_secret_abc")).toBe(true);
     expect(looksLikeSupabaseSecretKey("sb_publishable_abc")).toBe(false);
     expect(looksLikeSupabaseSecretKey("not-a-jwt")).toBe(false);
+  });
+});
+
+describe("bots (EmailBot V2)", () => {
+  const BOT = "11111111-1111-4111-8111-111111111111";
+
+  it("creates with safe defaults and rejects unknown keys such as organizationId", () => {
+    expect(botCreateSchema.parse({ name: " Netflix " })).toEqual({ name: "Netflix", status: "ACTIVE" });
+    expect(botCreateSchema.safeParse({ name: "Netflix", organizationId: BOT }).success).toBe(false);
+    expect(botCreateSchema.safeParse({ name: "" }).success).toBe(false);
+    expect(botCreateSchema.safeParse({ name: "x", slug: "Bad Slug" }).success).toBe(false);
+    expect(botCreateSchema.safeParse({ name: "x", status: "DELETED" }).success).toBe(false);
+  });
+
+  it("update requires at least one known field", () => {
+    expect(botUpdateSchema.safeParse({}).success).toBe(false);
+    expect(botUpdateSchema.safeParse({ status: "PAUSED" }).success).toBe(true);
+    expect(botUpdateSchema.safeParse({ owner: "x" }).success).toBe(false);
+  });
+
+  it("customer resolution: NONE takes no extra settings", () => {
+    expect(customerResolutionSchema.parse({ source: "NONE" })).toEqual({ source: "NONE", onMultipleMatches: "LEAVE_UNASSIGNED" });
+    expect(customerResolutionSchema.safeParse({ source: "NONE", field: "code" }).success).toBe(false);
+  });
+
+  it("customer resolution: RECIPIENT/SENDER always match EMAIL identifiers", () => {
+    expect(customerResolutionSchema.parse({ source: "RECIPIENT" })).toEqual({
+      source: "RECIPIENT",
+      identifierType: "EMAIL",
+      onMultipleMatches: "LEAVE_UNASSIGNED"
+    });
+    expect(customerResolutionSchema.safeParse({ source: "SENDER", identifierType: "PHONE" }).success).toBe(false);
+    expect(customerResolutionSchema.safeParse({ source: "RECIPIENT", field: "account" }).success).toBe(false);
+  });
+
+  it("customer resolution: EXTRACTED_FIELD needs a field name and an identifier type", () => {
+    expect(customerResolutionSchema.safeParse({ source: "EXTRACTED_FIELD", identifierType: "USERNAME" }).success).toBe(false);
+    expect(customerResolutionSchema.safeParse({ source: "EXTRACTED_FIELD", field: "account_email" }).success).toBe(false);
+    expect(customerResolutionSchema.safeParse({ source: "EXTRACTED_FIELD", field: "Bad Name", identifierType: "CUSTOM" }).success).toBe(false);
+    expect(
+      customerResolutionSchema.parse({ source: "EXTRACTED_FIELD", field: "account_email", identifierType: "EMAIL", onMultipleMatches: "DELIVER_ALL" })
+    ).toEqual({ source: "EXTRACTED_FIELD", field: "account_email", identifierType: "EMAIL", onMultipleMatches: "DELIVER_ALL" });
+    expect(customerResolutionSchema.safeParse({ source: "RECIPIENT", onMultipleMatches: "FIRST" }).success).toBe(false);
+  });
+
+  it("portal settings: closed by default, unique keys, bounded labels and count", () => {
+    expect(portalSettingsSchema.parse({})).toEqual({ showBody: false, showAttachments: false, fields: [] });
+    const field = (key: string) => ({ key, label: "Código" });
+    expect(portalSettingsSchema.safeParse({ fields: [field("code"), field("code")] }).success).toBe(false);
+    expect(portalSettingsSchema.safeParse({ fields: [{ key: "code", label: "" }] }).success).toBe(false);
+    expect(portalSettingsSchema.safeParse({ fields: Array.from({ length: 11 }, (_, i) => field(`f${i}`)) }).success).toBe(false);
+    expect(portalSettingsSchema.safeParse({ showBody: true, extra: 1 }).success).toBe(false);
+  });
+
+  it("rules accept an optional bot id (null = general rule)", () => {
+    const base = { name: "r", conditions: [{ field: "subject", operator: "contains", value: "code" }] };
+    expect(ruleCreateSchema.parse({ ...base, botId: BOT }).botId).toBe(BOT);
+    expect(ruleCreateSchema.parse({ ...base, botId: null }).botId).toBeNull();
+    expect(ruleCreateSchema.safeParse({ ...base, botId: "netflix" }).success).toBe(false);
+    expect(ruleUpdateSchema.safeParse({ botId: null }).success).toBe(true);
   });
 });

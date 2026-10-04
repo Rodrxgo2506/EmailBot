@@ -7,6 +7,8 @@ export type RealtimeEvent =
       emailAccountId: string;
       categoryId: string | null;
       matchedRuleId: string | null;
+      /** Bot selected by the rule engine (null = none or ambiguous). */
+      botId: string | null;
       subject: string | null;
       important: boolean;
     }

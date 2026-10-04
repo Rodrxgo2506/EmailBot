@@ -19,6 +19,8 @@ export const PERMISSIONS = {
   "email-accounts:sync": ["OWNER", "ADMIN", "OPERATOR"],
   "categories:read": ["OWNER", "ADMIN", "OPERATOR", "VIEWER"],
   "categories:manage": ["OWNER", "ADMIN"],
+  "bots:read": ["OWNER", "ADMIN", "OPERATOR", "VIEWER"],
+  "bots:manage": ["OWNER", "ADMIN"],
   "rules:read": ["OWNER", "ADMIN", "OPERATOR", "VIEWER"],
   "rules:manage": ["OWNER", "ADMIN"],
   "emails:read": ["OWNER", "ADMIN", "OPERATOR", "VIEWER"],

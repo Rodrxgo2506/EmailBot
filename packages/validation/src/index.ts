@@ -4,3 +4,4 @@ export * from "./regex-safety.js";
 export * from "./rules.js";
 export * from "./organizations.js";
 export * from "./resources.js";
+export * from "./bots.js";

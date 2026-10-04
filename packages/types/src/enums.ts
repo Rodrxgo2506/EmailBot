@@ -18,6 +18,23 @@ export type EmailProvider = (typeof EMAIL_PROVIDERS)[number];
 export const EMAIL_ACCOUNT_STATUSES = ["ACTIVE", "PAUSED", "ERROR", "DISCONNECTED"] as const;
 export type EmailAccountStatus = (typeof EMAIL_ACCOUNT_STATUSES)[number];
 
+export const BOT_STATUSES = ["ACTIVE", "PAUSED"] as const;
+export type BotStatus = (typeof BOT_STATUSES)[number];
+
+/*
+ * Customer routing configuration of a bot (EmailBot V2). Stored in
+ * bots.customer_resolution (JSONB, validated by @emailbot/validation); the
+ * identifier types become a PostgreSQL enum with customer_identifiers.
+ */
+export const CUSTOMER_RESOLUTION_SOURCES = ["NONE", "RECIPIENT", "SENDER", "EXTRACTED_FIELD"] as const;
+export type CustomerResolutionSource = (typeof CUSTOMER_RESOLUTION_SOURCES)[number];
+
+export const CUSTOMER_IDENTIFIER_TYPES = ["EMAIL", "PHONE", "USERNAME", "EXTERNAL_ID", "CUSTOM"] as const;
+export type CustomerIdentifierType = (typeof CUSTOMER_IDENTIFIER_TYPES)[number];
+
+export const MULTIPLE_MATCH_POLICIES = ["LEAVE_UNASSIGNED", "DELIVER_ALL"] as const;
+export type MultipleMatchPolicy = (typeof MULTIPLE_MATCH_POLICIES)[number];
+
 export const RULE_MATCH_MODES = ["AND", "OR"] as const;
 export type RuleMatchMode = (typeof RULE_MATCH_MODES)[number];
 
