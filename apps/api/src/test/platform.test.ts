@@ -48,6 +48,38 @@ describe("CORS", () => {
     expect(denied.headers["access-control-allow-origin"]).toBeUndefined();
     expect(allowed.headers["access-control-allow-credentials"]).toBeUndefined();
   });
+
+  it("answers the browser preflight with Allow-Origin for an origin configured with a trailing slash/uppercase", async () => {
+    const config = loadConfig({
+      SUPABASE_URL: "https://project.supabase.co",
+      SUPABASE_ANON_KEY: "anon-key",
+      SUPABASE_SERVICE_ROLE_KEY: "service-role-secret-value",
+      TOKEN_ENCRYPTION_KEY: randomBytes(32).toString("base64"),
+      OAUTH_STATE_SECRET: "x".repeat(40),
+      NODE_ENV: "production",
+      API_PUBLIC_URL: "https://api.emailbot.app",
+      WEB_APP_URL: "https://emailbot.app",
+      REDIS_URL: "redis://red-abc123:6379",
+      CORS_ORIGINS: "https://EmailBot.app/"
+    });
+    expect(config.corsOrigins).toEqual(["https://emailbot.app"]);
+    const { app } = await createTestApp({ config: { corsOrigins: config.corsOrigins } });
+    const preflight = (origin: string) =>
+      app.inject({
+        method: "OPTIONS",
+        url: "/api/me",
+        headers: { origin, "access-control-request-method": "GET", "access-control-request-headers": "authorization" }
+      });
+
+    const allowed = await preflight("https://emailbot.app");
+    expect(allowed.statusCode).toBe(204);
+    expect(allowed.headers["access-control-allow-origin"]).toBe("https://emailbot.app");
+    expect(String(allowed.headers.vary)).toMatch(/Origin/i);
+
+    const denied = await preflight("https://www.emailbot.app");
+    expect(denied.statusCode).toBe(204);
+    expect(denied.headers["access-control-allow-origin"]).toBeUndefined();
+  });
 });
 
 describe("authentication", () => {
@@ -185,6 +217,17 @@ describe("environment validation", () => {
     expect(() => loadConfig(production)).toThrow(/CORS_ORIGINS/);
     const config = loadConfig({ ...production, CORS_ORIGINS: "https://app.example.com, https://x.example.com" });
     expect(config.corsOrigins).toEqual(["https://app.example.com", "https://x.example.com"]);
+  });
+
+  it("normalizes and de-duplicates CORS origins in every environment, and rejects non-origins", () => {
+    const development = loadConfig({ ...base, NODE_ENV: "development", CORS_ORIGINS: "http://localhost:5173/, HTTP://LOCALHOST:5173" });
+    expect(development.corsOrigins).toEqual(["http://localhost:5173"]);
+    expect(() => loadConfig({ ...base, NODE_ENV: "development", CORS_ORIGINS: "http://localhost:5173/app" })).toThrow(
+      /CORS_ORIGINS: every origin must be an origin/
+    );
+    expect(() => loadConfig({ ...base, NODE_ENV: "development", CORS_ORIGINS: "http://user:pw-value@localhost:5173" })).toThrow(
+      /^(?![\s\S]*pw-value)[\s\S]*CORS_ORIGINS/
+    );
   });
 
   it("rejects weak secrets without echoing values", () => {

@@ -1,5 +1,5 @@
 import { csvEnv, encryptionKeyEnv, optionalEnv, parseEnv } from "@emailbot/shared";
-import { productionUrlProblem, PUBLIC_URL, REDIS_URL } from "@emailbot/validation";
+import { normalizeOrigin, productionUrlProblem, PUBLIC_URL, REDIS_URL } from "@emailbot/validation";
 import { z } from "zod";
 
 /*
@@ -68,8 +68,16 @@ const envSchema = z
     SENTRY_DSN: optionalEnv(z.url())
   })
   .superRefine((env, ctx) => {
-    if (env.NODE_ENV !== "production") return;
     const issue = (path: string, message: string) => ctx.addIssue({ code: "custom", path: [path], message });
+
+    // Every environment: CORS matches the Origin header by exact string, so
+    // each entry must be a pure origin (normalized in loadConfig).
+    for (const origin of env.CORS_ORIGINS) {
+      const result = normalizeOrigin(origin);
+      if (!result.ok) issue("CORS_ORIGINS", `every origin ${result.problem}`);
+    }
+
+    if (env.NODE_ENV !== "production") return;
 
     if (env.CORS_ORIGINS.length === 0) issue("CORS_ORIGINS", "must list the allowed origins in production");
     for (const origin of env.CORS_ORIGINS) {
@@ -169,6 +177,16 @@ function parseTrustProxy(value: string | undefined): ApiConfig["trustProxy"] {
     .filter((item) => item.length > 0);
 }
 
+/** Origins as browsers send them (validated by the schema), without duplicates. */
+function normalizedOrigins(origins: string[]): string[] {
+  const normalized = origins.map((origin) => {
+    const result = normalizeOrigin(origin);
+    if (!result.ok) throw new Error("CORS_ORIGINS was not validated");
+    return result.origin;
+  });
+  return [...new Set(normalized)];
+}
+
 export function loadConfig(source: NodeJS.ProcessEnv = process.env): ApiConfig {
   const env = parseEnv(envSchema, source);
 
@@ -182,7 +200,7 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): ApiConfig {
     webAppUrl: (env.WEB_APP_URL ?? "http://localhost:5173").replace(/\/+$/, ""),
     // Development without an explicit list reflects the request origin.
     // Production always requires an explicit allow-list (validated above).
-    corsOrigins: env.CORS_ORIGINS.length > 0 ? env.CORS_ORIGINS : env.NODE_ENV === "production" ? [] : true,
+    corsOrigins: env.CORS_ORIGINS.length > 0 ? normalizedOrigins(env.CORS_ORIGINS) : env.NODE_ENV === "production" ? [] : true,
     trustProxy: parseTrustProxy(env.TRUST_PROXY),
     rateLimitMax: env.RATE_LIMIT_MAX,
     supabase: {

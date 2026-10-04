@@ -42,6 +42,30 @@ export function productionUrlProblem(value: string | undefined, options: Product
   return null;
 }
 
+export type OriginResult = { ok: true; origin: string } | { ok: false; problem: string };
+
+/**
+ * Normalizes a browser origin as browsers serialize the Origin header
+ * (scheme://host[:port], lowercase host, no default port, no trailing slash).
+ * CORS compares origins by exact string, so a configured "https://app.example.com/"
+ * would otherwise never match. Values with a path, query, fragment or
+ * credentials are rejected. Problems never echo the value.
+ */
+export function normalizeOrigin(value: string): OriginResult {
+  let url: URL;
+  try {
+    url = new URL(value.trim());
+  } catch {
+    return { ok: false, problem: "must be a valid URL" };
+  }
+  if (url.protocol !== "https:" && url.protocol !== "http:") return { ok: false, problem: "must use http or https" };
+  if (url.username || url.password) return { ok: false, problem: "must not contain credentials" };
+  if (url.pathname !== "/" || url.search || url.hash) {
+    return { ok: false, problem: "must be an origin like https://app.example.com (no path, query or fragment)" };
+  }
+  return { ok: true, origin: url.origin };
+}
+
 /** Public browser-facing or third-party URLs: HTTPS only. */
 export const PUBLIC_URL = { protocols: ["https:"] } as const;
 

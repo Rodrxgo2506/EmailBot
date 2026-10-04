@@ -83,8 +83,13 @@ process.on("SIGTERM", () => void shutdown("SIGTERM"));
 try {
   await app.listen({ host: config.host, port: config.port });
   app.log.info(
-    // One-way identifier (not part of the key): must match the worker's.
-    { port: config.port, tokenEncryptionKeyFingerprint: encryptionKeyFingerprint(config.tokenEncryptionKey) },
+    {
+      port: config.port,
+      // Effective CORS allow-list (public values): a stale CORS_ORIGINS is visible at startup.
+      corsOrigins: config.corsOrigins === true ? "reflect-any (development)" : config.corsOrigins,
+      // One-way identifier (not part of the key): must match the worker's.
+      tokenEncryptionKeyFingerprint: encryptionKeyFingerprint(config.tokenEncryptionKey)
+    },
     `EmailBot API running on http://${config.host}:${config.port}`
   );
 } catch (error) {

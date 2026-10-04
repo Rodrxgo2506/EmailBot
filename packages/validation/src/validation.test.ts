@@ -9,6 +9,7 @@ import {
   emailListQuerySchema,
   memberAddSchema,
   memberUpdateSchema,
+  normalizeOrigin,
   ruleActionSchema,
   ruleConditionSchema,
   ruleCreateSchema,
@@ -150,6 +151,27 @@ describe("deployment URL checks", () => {
     // Internal: single-label host on Render's private network, no TLS. External: TLS with credentials.
     expect(productionUrlProblem("redis://red-abc123def456ghi789:6379", REDIS_URL)).toBeNull();
     expect(productionUrlProblem("rediss://red-abc123def456ghi789:secret@oregon-keyvalue.render.com:6379", REDIS_URL)).toBeNull();
+  });
+
+  it("normalizes CORS origins the way browsers serialize the Origin header", () => {
+    const ok = (value: string) => {
+      const result = normalizeOrigin(value);
+      return result.ok ? result.origin : `problem: ${result.problem}`;
+    };
+    expect(ok("https://emailbot.app")).toBe("https://emailbot.app");
+    expect(ok("https://emailbot.app/")).toBe("https://emailbot.app");
+    expect(ok("  https://EmailBot.App  ")).toBe("https://emailbot.app");
+    expect(ok("https://emailbot.app:443")).toBe("https://emailbot.app");
+    expect(ok("http://localhost:5173/")).toBe("http://localhost:5173");
+    expect(ok("https://emailbot.app:8443")).toBe("https://emailbot.app:8443");
+    expect(ok("https://emailbot.app/login")).toMatch(/no path/);
+    expect(ok("https://emailbot.app/?x=1")).toMatch(/no path/);
+    expect(ok("https://emailbot.app/#top")).toMatch(/no path/);
+    expect(ok("https://user:secret@emailbot.app")).toBe("problem: must not contain credentials");
+    expect(ok("ftp://emailbot.app")).toBe("problem: must use http or https");
+    expect(ok('"https://emailbot.app"')).toBe("problem: must be a valid URL");
+    // Problems never echo the configured value.
+    expect(ok("https://user:secret@emailbot.app")).not.toContain("secret");
   });
 
   it("detects Supabase secret keys", () => {
