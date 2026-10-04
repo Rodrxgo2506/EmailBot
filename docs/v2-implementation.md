@@ -8,7 +8,7 @@ Producción no se modifica sin autorización explícita por fase.
 | Fase | Contenido | Estado |
 |---|---|---|
 | 0 | Preparación y compatibilidad | completada |
-| 1 | Bots (tabla, `bot_id` en reglas y correos, motor de reglas) | pendiente |
+| 1 | Bots (tabla, `bot_id` en reglas y correos, motor de reglas) + `organizations.status` | completada |
 | 2 | Customers, identificadores, asignaciones | pendiente |
 | 3 | Routing: Customer Resolver + `email_deliveries` | pendiente |
 | 4 | Customer Access ID + sesiones | pendiente |
@@ -61,14 +61,51 @@ efectiva (`corsOrigins`). Base para el portal (fase 5), que usará `credentials:
 ¿Quién puede SELECT / INSERT / UPDATE / DELETE? ¿Puede cruzar `organization_id`? ¿Puede un Customer acceder?
 ¿Puede un Super Admin acceder? ¿Puede `service_role` acceder? La respuesta se documenta junto a la migración.
 
+## Fase 1: decisiones implementadas
+
+### Selección de bot (`packages/rules-engine/src/engine.ts`)
+
+1. Solo cuentan las reglas que pertenecen a un bot (`bot_id`); las reglas generales clasifican pero no
+   eligen bot.
+2. Gana el bot de la regla coincidente con **mayor prioridad** (menor número) si es el único bot en esa
+   prioridad.
+3. Bots distintos empatados en esa prioridad = **AMBIGUOUS**: `emails.bot_id = NULL`, sin entregas, y
+   `emails.provider_metadata` guarda `botSelection: "AMBIGUOUS"` y `botCandidateIds` (más un log
+   `bot.selection.ambiguous`). `created_at`/`id` siguen ordenando la evaluación pero **nunca** deciden el bot.
+4. `stop_processing` conserva su semántica V1 para las acciones. Para que el orden de creación no pueda
+   ocultar un empate, tras una parada se comprueban (solo condiciones, sin acciones) las reglas restantes
+   con la **misma** prioridad y otro bot.
+5. Reglas de un bot **PAUSED** no se evalúan (ni acciones ni bot). Un bot cuyo estado no se puede confirmar
+   como ACTIVE se trata como pausado.
+
+### Estado de la organización
+
+- API: `requireOrganization` responde `403 ORGANIZATION_INACTIVE` si la organización está SUSPENDED o
+  CANCELLED. Excepciones explícitas (`config.allowInactiveOrganization`): `GET /organizations/current`.
+  `/api/me` no exige organización y muestra el estado. Sin cambios en `private.is_organization_member`.
+- Worker: `processEmail` (`organization_inactive`) y `syncAccount` no procesan ni listan nada (el cursor no
+  avanza: no se pierde correo); el polling y el barrido de recuperación excluyen esas organizaciones (los
+  correos incompletos no se reintentan hacia FAILED). Nada se borra.
+- Grant mínimo: `service_role` solo `select (id, status)` sobre `organizations`.
+- Web: pantalla de organización inactiva (cambiar de organización o cerrar sesión).
+
+### RLS de `bots` (plantilla)
+
+| Pregunta | Respuesta |
+|---|---|
+| SELECT | miembros de la organización (todos los roles) |
+| INSERT | OWNER/ADMIN; `created_by`/`updated_by` = el propio usuario o NULL |
+| UPDATE | OWNER/ADMIN; `organization_id` no es actualizable (grants por columna) |
+| DELETE | OWNER/ADMIN (la API rechaza bots con correos: `BOT_HAS_EMAILS`) |
+| ¿Cruza `organization_id`? | No: RLS + FK compuestas `(organization_id, bot_id)` en `email_rules` y `emails` (también para service role y owner) |
+| ¿Customer? | No (portal: fases 4-5) |
+| ¿Super Admin? | Sin excepción RLS (fase 7: API + service role) |
+| service_role | `select (id, organization_id, status)` |
+
+`email_rules.bot_id`: INSERT/UPDATE por columna para `authenticated` (RLS existente: OWNER/ADMIN).
+`emails.bot_id`: lo escribe el worker; sin UPDATE para `authenticated` (re-enrutado: fase 3).
+
 ## Decisiones pendientes
 
-1. **Empate de bots** (misma prioridad, bots distintos). El motor ya ordena de forma estable (prioridad →
-   `created_at` → `id`). Recomendación: tratar ese empate como **ambiguo** (`bot_id = NULL`, sin entrega) en
-   lugar de elegir por antigüedad, porque entregar un código al cliente equivocado es un fallo de seguridad.
-2. **Estado de la organización en el worker**: el worker (service role) no puede leer `organizations` (sin
-   grant desde la migración 7). Aplicar `SUSPENDED` en el worker requiere un grant por columna
-   (`select (id, status)`), es decir, una migración. Recomendación: incluirlo en la primera migración de la
-   fase 1 junto con la comprobación en la API, en lugar de esperar a la fase 8.
-3. **Orden de migraciones**: el plan lista `platform_admins` primero, pero Super Admin es la fase 7. Se propone
-   crearla en la fase 7 (convención anterior).
+Ninguna abierta tras la fase 1 (las cuatro de la fase 0 se aprobaron: empate = AMBIGUOUS, estado de la
+organización en la fase 1, migraciones en la fase que las usa, rutas en la raíz).
