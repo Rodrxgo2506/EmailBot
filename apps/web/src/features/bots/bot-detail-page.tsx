@@ -10,6 +10,7 @@ import { getErrorMessage } from "@/lib/errors";
 import { BOT_STATUS_LABELS } from "@/lib/labels";
 import { useOrganization } from "@/providers/organization-provider";
 import { useBot, useBotMutations } from "./api";
+import { BotCustomersCard } from "./bot-customers-card";
 import { BotDialog } from "./bot-dialog";
 
 export function BotDetailPage() {
@@ -18,6 +19,7 @@ export function BotDetailPage() {
   const { can } = useOrganization();
   const canManage = can("bots:manage");
   const canManageRules = can("rules:manage");
+  const canManageCustomers = can("customers:manage");
   const bot = useBot(botId);
   const rules = useRules();
   const { update, remove } = useBotMutations();
@@ -120,12 +122,16 @@ export function BotDetailPage() {
         </Card>
       </div>
 
+      <div className="mt-6">
+        <BotCustomersCard botId={current.id} canManage={canManageCustomers} />
+      </div>
+
       <BotDialog open={editing} onOpenChange={setEditing} bot={current} />
       <ConfirmDialog
         open={deleting}
         onOpenChange={setDeleting}
         title={`Eliminar "${current.name}"`}
-        description="Sus reglas pasarán a ser reglas generales. Si el bot ya tiene correos procesados no se puede eliminar: páusalo para conservar el historial."
+        description="Sus reglas pasarán a ser reglas generales. No se puede eliminar si ya tiene correos procesados (páusalo para conservar el historial) ni mientras tenga clientes o identificadores asociados."
         confirmLabel="Eliminar"
         onConfirm={async () => {
           try {

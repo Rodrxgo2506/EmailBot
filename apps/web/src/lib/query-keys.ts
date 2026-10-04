@@ -13,6 +13,13 @@ export const queryKeys = {
   categories: (organizationId: string) => ["org", organizationId, "categories"] as const,
   bots: (organizationId: string) => ["org", organizationId, "bots"] as const,
   bot: (organizationId: string, id: string) => ["org", organizationId, "bots", id] as const,
+  botCustomers: (organizationId: string, botId: string) => ["org", organizationId, "bots", botId, "customers"] as const,
+  customers: (organizationId: string) => ["org", organizationId, "customers"] as const,
+  customerList: (organizationId: string, params: Record<string, unknown>) =>
+    ["org", organizationId, "customers", "list", params] as const,
+  customer: (organizationId: string, id: string) => ["org", organizationId, "customers", "detail", id] as const,
+  customerIdentifiers: (organizationId: string, id: string) => ["org", organizationId, "customers", "detail", id, "identifiers"] as const,
+  customerBots: (organizationId: string, id: string) => ["org", organizationId, "customers", "detail", id, "bots"] as const,
   rules: (organizationId: string) => ["org", organizationId, "rules"] as const,
   rule: (organizationId: string, id: string) => ["org", organizationId, "rules", id] as const,
   accounts: (organizationId: string) => ["org", organizationId, "email-accounts"] as const,

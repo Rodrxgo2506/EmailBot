@@ -2,6 +2,7 @@ import type { Permission } from "@emailbot/types";
 import {
   Bot,
   Building2,
+  Contact,
   FolderTree,
   History,
   Inbox,
@@ -27,6 +28,7 @@ export const NAV_SECTIONS: Array<{ title: string; items: NavItem[] }> = [
       { to: "/", label: "Dashboard", icon: LayoutDashboard, permission: "emails:read", end: true },
       { to: "/inbox", label: "Bandeja", icon: Inbox, permission: "emails:read" },
       { to: "/bots", label: "Bots", icon: Bot, permission: "bots:read" },
+      { to: "/customers", label: "Clientes", icon: Contact, permission: "customers:read" },
       { to: "/rules", label: "Reglas", icon: Workflow, permission: "rules:read" },
       { to: "/categories", label: "Categorías", icon: FolderTree, permission: "categories:read" },
       { to: "/accounts", label: "Cuentas de correo", icon: Mailbox, permission: "email-accounts:read" }

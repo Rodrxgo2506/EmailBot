@@ -1,6 +1,8 @@
 import type {
   AuditAction,
   BotStatus,
+  CustomerIdentifierType,
+  CustomerStatus,
   EmailAccountStatus,
   EmailProvider,
   OrganizationRole,
@@ -62,6 +64,9 @@ export const ENTITY_LABELS: Record<string, string> = {
   email_account: "Cuenta de correo",
   category: "Categoría",
   bot: "Bot",
+  customer: "Cliente",
+  customer_identifier: "Identificador de cliente",
+  bot_customer_assignment: "Bot de cliente",
   email_rule: "Regla",
   email: "Correo",
   user: "Usuario"
@@ -80,6 +85,19 @@ export const ACCOUNT_ERROR_LABELS: Record<string, string> = {
 export const BOT_STATUS_LABELS: Record<BotStatus, string> = {
   ACTIVE: "Activo",
   PAUSED: "Pausado"
+};
+
+export const CUSTOMER_STATUS_LABELS: Record<CustomerStatus, string> = {
+  ACTIVE: "Activo",
+  SUSPENDED: "Suspendido"
+};
+
+export const IDENTIFIER_TYPE_LABELS: Record<CustomerIdentifierType, string> = {
+  EMAIL: "Correo",
+  PHONE: "Teléfono",
+  USERNAME: "Usuario",
+  EXTERNAL_ID: "ID externo",
+  CUSTOM: "Personalizado"
 };
 
 export const ORGANIZATION_STATUS_LABELS: Record<OrganizationStatus, string> = {
