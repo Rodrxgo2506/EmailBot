@@ -14,8 +14,11 @@ const MIGRATION_7 = "20261003130000";
 
 const TABLES = [
   "audit_logs",
+  "bot_customer_assignments",
   "bots",
   "categories",
+  "customer_identifiers",
+  "customers",
   "email_accounts",
   "email_attachments",
   "email_rules",
@@ -32,9 +35,13 @@ type Privilege = (typeof PRIVILEGES)[number];
 /** Exactly what apps/api (privileged.ts) and apps/worker (supabase-stores.ts) need. */
 const SERVICE_ROLE_EXPECTED: Record<(typeof TABLES)[number], Privilege[]> = {
   audit_logs: ["INSERT"],
+  // V2 phase 2: no worker access yet (customer resolution is phase 3).
+  bot_customer_assignments: [],
   // V2 phase 1: column SELECT (id, organization_id, status) only, checked below.
   bots: [],
   categories: [],
+  customer_identifiers: [],
+  customers: [],
   email_accounts: ["SELECT", "INSERT", "UPDATE"],
   email_attachments: ["SELECT", "INSERT", "UPDATE"],
   email_rules: ["SELECT"],
@@ -46,7 +53,8 @@ const SERVICE_ROLE_EXPECTED: Record<(typeof TABLES)[number], Privilege[]> = {
 };
 
 /** Tables that existed before migration 7 (V2 tables are created later). */
-const V1_TABLES = TABLES.filter((table) => table !== "bots");
+const V2_TABLES: readonly string[] = ["bots", "customers", "customer_identifiers", "bot_customer_assignments"];
+const V1_TABLES = TABLES.filter((table) => !V2_TABLES.includes(table));
 
 async function privilegeMatrix(tx: Tx, role: string, tables: readonly string[] = TABLES): Promise<Record<string, Privilege[]>> {
   const matrix: Record<string, Privilege[]> = {};
@@ -191,6 +199,9 @@ describe.each<DefaultPrivilegesProfile>(["production", "local"])("AFTER migratio
     ["SELECT organizations.*", "select * from public.organizations"],
     ["SELECT bots.name", "select name from public.bots"],
     ["INSERT bots", "insert into public.bots (organization_id, name, slug) values (gen_random_uuid(), 'x', 'x')"],
+    ["SELECT customers", "select 1 from public.customers"],
+    ["SELECT customer_identifiers", "select 1 from public.customer_identifiers"],
+    ["SELECT bot_customer_assignments", "select 1 from public.bot_customer_assignments"],
     ["UPDATE organization_members", "update public.organization_members set role = 'VIEWER'"],
     ["TRUNCATE emails", "truncate public.emails"]
   ])("service_role cannot %s", async (_label, sql) => {
