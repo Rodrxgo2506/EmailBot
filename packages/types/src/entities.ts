@@ -4,6 +4,7 @@ import type {
   BotStatus,
   CustomerIdentifierType,
   CustomerResolutionSource,
+  CustomerStatus,
   EmailAccountStatus,
   EmailDirection,
   EmailProcessingStatus,
@@ -112,6 +113,48 @@ export interface Bot {
   updatedBy: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+/** End customer of an organization (EmailBot V2). Not an auth user. */
+export interface Customer {
+  id: string;
+  organizationId: string;
+  displayName: string;
+  status: CustomerStatus;
+  externalRef: string | null;
+  notes: string | null;
+  createdBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Value that identifies a customer in emails. Not a credential. */
+export interface CustomerIdentifier {
+  id: string;
+  organizationId: string;
+  customerId: string;
+  type: CustomerIdentifierType;
+  value: string;
+  normalizedValue: string;
+  /** null = valid for every bot the customer is assigned to. */
+  botId: string | null;
+  active: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Bot <-> customer relation (the customer may receive that bot's emails while active). */
+export interface BotCustomerAssignment {
+  organizationId: string;
+  botId: string;
+  customerId: string;
+  active: boolean;
+  createdBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+  /** Embedded summaries (list endpoints). */
+  bot?: Pick<Bot, "id" | "name" | "slug" | "status">;
+  customer?: Pick<Customer, "id" | "displayName" | "status" | "externalRef">;
 }
 
 export interface Category {

@@ -21,6 +21,8 @@ export const PERMISSIONS = {
   "categories:manage": ["OWNER", "ADMIN"],
   "bots:read": ["OWNER", "ADMIN", "OPERATOR", "VIEWER"],
   "bots:manage": ["OWNER", "ADMIN"],
+  "customers:read": ["OWNER", "ADMIN", "OPERATOR", "VIEWER"],
+  "customers:manage": ["OWNER", "ADMIN", "OPERATOR"],
   "rules:read": ["OWNER", "ADMIN", "OPERATOR", "VIEWER"],
   "rules:manage": ["OWNER", "ADMIN"],
   "emails:read": ["OWNER", "ADMIN", "OPERATOR", "VIEWER"],

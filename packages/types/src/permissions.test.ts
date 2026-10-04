@@ -21,6 +21,14 @@ describe("hasPermission", () => {
     expect(hasPermission("OWNER", "bots:manage")).toBe(true);
   });
 
+  it("customers: every member reads; OWNER/ADMIN/OPERATOR manage (same as the customers RLS policies)", () => {
+    expect(hasPermission("VIEWER", "customers:read")).toBe(true);
+    expect(hasPermission("VIEWER", "customers:manage")).toBe(false);
+    expect(hasPermission("OPERATOR", "customers:manage")).toBe(true);
+    expect(hasPermission("ADMIN", "customers:manage")).toBe(true);
+    expect(hasPermission("OWNER", "customers:manage")).toBe(true);
+  });
+
   it("denies when there is no role", () => {
     expect(hasPermission(null, "emails:read")).toBe(false);
     expect(hasPermission(undefined, "emails:read")).toBe(false);

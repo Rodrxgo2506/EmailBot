@@ -5,3 +5,5 @@ export * from "./rules.js";
 export * from "./organizations.js";
 export * from "./resources.js";
 export * from "./bots.js";
+export * from "./identifiers.js";
+export * from "./customers.js";

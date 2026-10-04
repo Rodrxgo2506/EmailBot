@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
+  botCustomerAssignSchema,
   botCreateSchema,
+  customerCreateSchema,
+  customerIdentifierCreateSchema,
+  customerIdentifierUpdateSchema,
+  customerListQuerySchema,
+  customerUpdateSchema,
+  normalizeIdentifier,
   botUpdateSchema,
   categoryUpdateSchema,
   customerResolutionSchema,
@@ -245,5 +252,95 @@ describe("bots (EmailBot V2)", () => {
     expect(ruleCreateSchema.parse({ ...base, botId: null }).botId).toBeNull();
     expect(ruleCreateSchema.safeParse({ ...base, botId: "netflix" }).success).toBe(false);
     expect(ruleUpdateSchema.safeParse({ botId: null }).success).toBe(true);
+  });
+});
+
+describe("normalizeIdentifier (single implementation for API, web and worker)", () => {
+  const norm = (type: Parameters<typeof normalizeIdentifier>[0], value: string) => {
+    const result = normalizeIdentifier(type, value);
+    return result.ok ? result.normalized : `problem: ${result.problem}`;
+  };
+
+  it("EMAIL: trim + lowercase, keeping dots and +alias", () => {
+    expect(norm("EMAIL", "  Juan@Gmail.com ")).toBe("juan@gmail.com");
+    expect(norm("EMAIL", "john.smith@gmail.com")).toBe("john.smith@gmail.com");
+    expect(norm("EMAIL", "john+netflix@gmail.com")).toBe("john+netflix@gmail.com");
+    expect(norm("EMAIL", "JOHN.SMITH+Netflix@GMAIL.COM")).toBe("john.smith+netflix@gmail.com");
+    expect(norm("EMAIL", "no-at-sign")).toMatch(/problem/);
+    expect(norm("EMAIL", "a b@example.com")).toMatch(/problem/);
+    expect(norm("EMAIL", "a@b@example.com")).toMatch(/problem/);
+  });
+
+  it("PHONE: digits with a leading + kept, separators removed, 6-15 digits", () => {
+    expect(norm("PHONE", "+51 987-654-321")).toBe("+51987654321");
+    expect(norm("PHONE", "(01) 234.5678")).toBe("012345678");
+    expect(norm("PHONE", "+1 (415) 555/0100")).toBe("+14155550100");
+    expect(norm("PHONE", "987654321")).toBe("987654321");
+    expect(norm("PHONE", "12345")).toMatch(/6 to 15 digits/);
+    expect(norm("PHONE", "+1234567890123456")).toMatch(/6 to 15 digits/);
+    expect(norm("PHONE", "98765abc")).toMatch(/problem/);
+    expect(norm("PHONE", "51+987654321")).toMatch(/problem/);
+  });
+
+  it("USERNAME / EXTERNAL_ID / CUSTOM: trim + lowercase only", () => {
+    expect(norm("USERNAME", "  Juan.Perez_01 ")).toBe("juan.perez_01");
+    expect(norm("EXTERNAL_ID", "CRM-0042")).toBe("crm-0042");
+    expect(norm("CUSTOM", "Perfil 3 Kids")).toBe("perfil 3 kids");
+  });
+
+  it("is deterministic and Unicode-stable (composed and decomposed accents are equal)", () => {
+    const composed = "José";
+    const decomposed = "Jose\u0301";
+    expect(norm("USERNAME", decomposed)).toBe(norm("USERNAME", composed));
+    expect(norm("USERNAME", composed)).toBe(norm("USERNAME", composed));
+  });
+
+  it("rejects empty and overlong values", () => {
+    expect(norm("CUSTOM", "   ")).toMatch(/empty/);
+    expect(norm("CUSTOM", "x".repeat(321))).toMatch(/at most 320/);
+  });
+
+  it("outputs satisfy the database invariants (customer_identifiers_normalized_format)", () => {
+    for (const [type, value] of [
+      ["EMAIL", "Juan@Gmail.com"],
+      ["PHONE", "+51 987 654 321"],
+      ["USERNAME", " MiUsuario "],
+      ["CUSTOM", "Ñandú Ünïcode"]
+    ] as const) {
+      const result = normalizeIdentifier(type, value);
+      if (!result.ok) throw new Error(result.problem);
+      if (type === "PHONE") expect(result.normalized).toMatch(/^\+?[0-9]{6,15}$/);
+      else expect(result.normalized).not.toMatch(/[A-Z]/);
+      expect(result.normalized).toBe(result.normalized.trim());
+    }
+  });
+});
+
+describe("customers (EmailBot V2)", () => {
+  const ID = "11111111-1111-4111-8111-111111111111";
+
+  it("customer create/update are strict and never accept organizationId or createdBy", () => {
+    expect(customerCreateSchema.parse({ displayName: " Juan " })).toEqual({ displayName: "Juan", status: "ACTIVE" });
+    expect(customerCreateSchema.safeParse({ displayName: "Juan", organizationId: ID }).success).toBe(false);
+    expect(customerCreateSchema.safeParse({ displayName: "Juan", createdBy: ID }).success).toBe(false);
+    expect(customerCreateSchema.safeParse({ displayName: "" }).success).toBe(false);
+    expect(customerUpdateSchema.safeParse({}).success).toBe(false);
+    expect(customerUpdateSchema.safeParse({ status: "SUSPENDED" }).success).toBe(true);
+    expect(customerUpdateSchema.safeParse({ status: "DELETED" }).success).toBe(false);
+  });
+
+  it("identifier create validates the value with the normalizer; normalizedValue is never accepted", () => {
+    expect(customerIdentifierCreateSchema.safeParse({ type: "EMAIL", value: "juan@example.com" }).success).toBe(true);
+    expect(customerIdentifierCreateSchema.safeParse({ type: "EMAIL", value: "not-an-email" }).success).toBe(false);
+    expect(customerIdentifierCreateSchema.safeParse({ type: "PHONE", value: "123" }).success).toBe(false);
+    expect(customerIdentifierCreateSchema.safeParse({ type: "EMAIL", value: "a@b.c", normalizedValue: "x@y.z" }).success).toBe(false);
+    expect(customerIdentifierCreateSchema.safeParse({ type: "EMAIL", value: "a@b.c", botId: "netflix" }).success).toBe(false);
+    expect(customerIdentifierUpdateSchema.safeParse({ type: "PHONE" }).success).toBe(false);
+  });
+
+  it("list query and assignment schemas", () => {
+    expect(customerListQuerySchema.parse({ search: " juan ", page: "2" })).toMatchObject({ search: "juan", page: 2, pageSize: 25 });
+    expect(botCustomerAssignSchema.parse({ customerId: ID })).toEqual({ customerId: ID, active: true });
+    expect(botCustomerAssignSchema.safeParse({ customerId: ID, organizationId: ID }).success).toBe(false);
   });
 });

@@ -29,6 +29,9 @@ export type BotStatus = (typeof BOT_STATUSES)[number];
 export const CUSTOMER_RESOLUTION_SOURCES = ["NONE", "RECIPIENT", "SENDER", "EXTRACTED_FIELD"] as const;
 export type CustomerResolutionSource = (typeof CUSTOMER_RESOLUTION_SOURCES)[number];
 
+export const CUSTOMER_STATUSES = ["ACTIVE", "SUSPENDED"] as const;
+export type CustomerStatus = (typeof CUSTOMER_STATUSES)[number];
+
 export const CUSTOMER_IDENTIFIER_TYPES = ["EMAIL", "PHONE", "USERNAME", "EXTERNAL_ID", "CUSTOM"] as const;
 export type CustomerIdentifierType = (typeof CUSTOMER_IDENTIFIER_TYPES)[number];
 
