@@ -1,11 +1,15 @@
 import {
+  addCoalescedSync,
+  COALESCED_JOB_OPTIONS,
   DEFAULT_JOB_OPTIONS,
   emailProcessingJobId,
   notificationJobId,
   QUEUE_NAMES,
+  watchAccountJobId,
   type EmailEventJob,
   type EmailProcessingJob,
-  type NotificationJob
+  type NotificationJob,
+  type SyncReason
 } from "@emailbot/shared";
 import { Queue } from "bullmq";
 import type { Redis } from "ioredis";
@@ -16,7 +20,8 @@ export interface WorkerQueues {
   emailProcessing: Queue<EmailProcessingJob>;
   notifications: Queue<NotificationJob>;
   producer: JobProducer;
-  enqueueSync(account: { id: string; organizationId: string }): Promise<void>;
+  enqueueSync(account: { id: string; organizationId: string }, reason?: SyncReason): Promise<void>;
+  enqueueWatch(account: { id: string; organizationId: string }): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -43,11 +48,14 @@ export function createWorkerQueues(connection: Redis): WorkerQueues {
         await notifications.add("notify", job, { ...DEFAULT_JOB_OPTIONS, attempts: 3, jobId: notificationJobId(job) });
       }
     },
-    async enqueueSync(account) {
+    async enqueueSync(account, reason = "POLL") {
+      await addCoalescedSync(emailEvents as never, account, reason);
+    },
+    async enqueueWatch(account) {
       await emailEvents.add(
-        "SYNC_ACCOUNT",
-        { type: "SYNC_ACCOUNT", emailAccountId: account.id, organizationId: account.organizationId, requestedBy: null },
-        { ...DEFAULT_JOB_OPTIONS, jobId: `sync-${account.id}`, removeOnComplete: true, removeOnFail: true }
+        "WATCH_ACCOUNT",
+        { type: "WATCH_ACCOUNT", emailAccountId: account.id, organizationId: account.organizationId },
+        { ...COALESCED_JOB_OPTIONS, jobId: watchAccountJobId(account.id) }
       );
     },
     async close() {

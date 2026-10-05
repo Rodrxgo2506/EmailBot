@@ -32,12 +32,32 @@ export interface MicrosoftNotificationJob {
   messageId: string | null;
 }
 
-/** Explicit sync request (manual "sync now" or polling fallback). */
+/** Why an account sync was requested (logs only; never authority). */
+export type SyncReason = "PUBSUB" | "POLL" | "MANUAL" | "PORTAL" | "CONTINUATION" | "CONNECT";
+
+/**
+ * Account sync. Every ingestion path (Pub/Sub push, recovery polling, manual
+ * sync from the panel or the portal) ends here, and the worker processes the
+ * listed messages with the same pipeline. Never carries credentials.
+ */
 export interface SyncAccountJob {
   type: "SYNC_ACCOUNT";
   emailAccountId: string;
   organizationId: string;
   requestedBy: string | null;
+  reason?: SyncReason | undefined;
+}
+
+/** Create or renew the Gmail push subscription (users.watch) of one account. */
+export interface WatchAccountJob {
+  type: "WATCH_ACCOUNT";
+  emailAccountId: string;
+  organizationId: string;
+}
+
+/** Periodic: enqueue WATCH_ACCOUNT for Gmail accounts whose watch is missing or expiring. */
+export interface RenewWatchesJob {
+  type: "RENEW_WATCHES";
 }
 
 /** Periodic fallback (job scheduler in the worker): sync every active account. */
@@ -53,7 +73,33 @@ export interface RecoverIncompleteJob {
   type: "RECOVER_INCOMPLETE";
 }
 
-export type EmailEventJob = GmailNotificationJob | MicrosoftNotificationJob | SyncAccountJob | PollAccountsJob | RecoverIncompleteJob;
+export type EmailEventJob =
+  | GmailNotificationJob
+  | MicrosoftNotificationJob
+  | SyncAccountJob
+  | PollAccountsJob
+  | RecoverIncompleteJob
+  | WatchAccountJob
+  | RenewWatchesJob;
+
+/**
+ * Sync jobs are coalesced per account: at most one waiting job
+ * (`sync-<id>`) plus, while that one is running, one follow-up
+ * (`sync-<id>-next`) so a notification that arrives during a sync is not
+ * lost. Any number of notifications / polls / clicks therefore produce at
+ * most two queued syncs per account.
+ */
+export function syncAccountJobId(emailAccountId: string): string {
+  return `sync-${emailAccountId}`;
+}
+
+export function syncFollowUpJobId(emailAccountId: string): string {
+  return `sync-${emailAccountId}-next`;
+}
+
+export function watchAccountJobId(emailAccountId: string): string {
+  return `watch-${emailAccountId}`;
+}
 
 export interface EmailProcessingJob {
   organizationId: string;
@@ -105,3 +151,47 @@ export const DEFAULT_JOB_OPTIONS = {
   removeOnComplete: { age: 24 * 3600, count: 10_000 },
   removeOnFail: { age: 7 * 24 * 3600 }
 } as const;
+
+/** Job options of sync / watch jobs: removed when finished so the next request can be queued. */
+export const COALESCED_JOB_OPTIONS = { ...DEFAULT_JOB_OPTIONS, removeOnComplete: true, removeOnFail: true } as const;
+
+/** The two BullMQ Queue methods used to coalesce syncs (structural: no bullmq dependency here). */
+export interface CoalescingQueue {
+  getJob(id: string): Promise<{ getState(): Promise<string>; remove(): Promise<void> } | undefined | null>;
+  add(name: string, data: EmailEventJob, options: Record<string, unknown>): Promise<unknown>;
+}
+
+/**
+ * Coalesced sync request, shared by the API (manual sync) and the worker
+ * (push, polling, continuations): one waiting job per account (sync-<id>);
+ * while that one runs, one follow-up (sync-<id>-next) so changes notified
+ * during a run are not lost. Adding a job whose id exists is a no-op in
+ * BullMQ. Returns whether a new job was queued. Payload: ids and a reason only.
+ */
+export async function addCoalescedSync(
+  queue: CoalescingQueue,
+  account: { id: string; organizationId: string },
+  reason: SyncReason,
+  requestedBy: string | null = null
+): Promise<boolean> {
+  const data: SyncAccountJob = { type: "SYNC_ACCOUNT", emailAccountId: account.id, organizationId: account.organizationId, requestedBy, reason };
+  const primary = await queue.getJob(syncAccountJobId(account.id));
+  const state = primary ? await primary.getState() : null;
+  if (state === "waiting" || state === "delayed" || state === "prioritized" || state === "waiting-children") return false;
+  // A finished job kept by an older retention policy would block its id forever.
+  if (primary && (state === "completed" || state === "failed")) await primary.remove().catch(() => undefined);
+  const jobId = state === "active" ? syncFollowUpJobId(account.id) : syncAccountJobId(account.id);
+  if (state === "active" && (await queue.getJob(jobId))) return false;
+  await queue.add("SYNC_ACCOUNT", data, { ...COALESCED_JOB_OPTIONS, jobId });
+  return true;
+}
+
+/** A sync of the account is waiting, delayed or running. */
+export async function isSyncPending(queue: Pick<CoalescingQueue, "getJob">, emailAccountId: string): Promise<boolean> {
+  for (const id of [syncAccountJobId(emailAccountId), syncFollowUpJobId(emailAccountId)]) {
+    const job = await queue.getJob(id);
+    const state = job ? await job.getState() : null;
+    if (state && state !== "completed" && state !== "failed") return true;
+  }
+  return false;
+}

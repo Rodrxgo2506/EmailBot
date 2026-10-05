@@ -20,6 +20,7 @@ import { loadWorkerConfig } from "./config/env.js";
 import { createProviderContext } from "./credentials/token-manager.js";
 import { closeServer, createHealthServer, listen, type WorkerHealthState } from "./infrastructure/health.js";
 import { createWorkerQueues } from "./infrastructure/queues.js";
+import { createRedisSyncLock } from "./infrastructure/sync-lock.js";
 import {
   createAccountStore,
   createAttachmentStorage,
@@ -29,7 +30,7 @@ import {
   createRoutingStore
 } from "./infrastructure/supabase-stores.js";
 import { handleAccountFailure, NonRetryableError } from "./pipeline/failures.js";
-import { handleEmailEvent, type HandleEventDeps } from "./pipeline/handle-email-event.js";
+import { handleEmailEvent, SyncBusyError, type HandleEventDeps } from "./pipeline/handle-email-event.js";
 import { deliverNotification } from "./pipeline/notify.js";
 import { processEmail, type ProcessEmailDeps } from "./pipeline/process-email.js";
 import { createProviderRegistry } from "./providers/registry.js";
@@ -106,11 +107,13 @@ const secretBox = SecretBox.fromBase64(config.tokenEncryptionKey);
 const createContext = (account: WorkerAccount) =>
   createProviderContext(account, { secretBox, accounts, oauth: config.oauth, fetch: providerFetch });
 
+const auditRecorder = createAuditRecorder(supabase);
+
 const processDeps: Omit<ProcessEmailDeps, "logger"> = {
   accounts,
   emails,
   routing: createRoutingStore(supabase),
-  audit: createAuditRecorder(supabase),
+  audit: auditRecorder,
   storage: createAttachmentStorage(supabase),
   realtime,
   producer: queues.producer,
@@ -126,7 +129,11 @@ const eventDeps: Omit<HandleEventDeps, "logger"> = {
   producer: queues.producer,
   providers,
   createContext,
-  enqueueSync: (account) => queues.enqueueSync(account)
+  enqueueSync: (account, reason) => queues.enqueueSync(account, reason),
+  enqueueWatch: (account) => queues.enqueueWatch(account),
+  lock: createRedisSyncLock(connection),
+  audit: auditRecorder,
+  watchTopic: config.gmailPubSubTopic
 };
 
 /** Maps domain failures to BullMQ semantics (UnrecoverableError = no retry). */
@@ -138,6 +145,8 @@ async function runWithFailureHandling<T>(
   try {
     return await run();
   } catch (error) {
+    // Another run holds the account: expected, retried with backoff (no error report).
+    if (error instanceof SyncBusyError) throw error;
     try {
       return await handleAccountFailure(error, account, { accounts, realtime, logger: jobLogger });
     } catch (handled) {
@@ -153,10 +162,17 @@ const eventsWorker = new Worker<EmailEventJob>(
   async (job: Job<EmailEventJob>) => {
     const jobLogger = logger.child({ queue: QUEUE_NAMES.emailEvents, jobId: job.id, type: job.data.type });
     const account =
-      job.data.type === "SYNC_ACCOUNT"
+      job.data.type === "SYNC_ACCOUNT" || job.data.type === "WATCH_ACCOUNT"
         ? { id: job.data.emailAccountId, organizationId: job.data.organizationId }
         : null;
-    return runWithFailureHandling(account, jobLogger, () => handleEmailEvent(job.data, { ...eventDeps, logger: jobLogger }));
+    return runWithFailureHandling(account, jobLogger, () =>
+      handleEmailEvent(job.data, {
+        ...eventDeps,
+        // Every ingestion path (push, recovery polling, manual sync) uses the same pipeline.
+        processMessage: (message) => processEmail(message, { ...processDeps, logger: jobLogger }, { attempt: 1 }),
+        logger: jobLogger
+      })
+    );
   },
   { connection, concurrency: config.eventsConcurrency }
 );
@@ -238,6 +254,17 @@ try {
     await queues.emailEvents.removeJobScheduler("poll-active-accounts");
   }
 
+  // Gmail push: renew watches before they expire (7 days). Polling covers accounts without a valid watch.
+  if (config.gmailPubSubTopic) {
+    await queues.emailEvents.upsertJobScheduler(
+      "renew-gmail-watches",
+      { every: config.watchRenewIntervalMinutes * 60_000 },
+      { name: "RENEW_WATCHES", data: { type: "RENEW_WATCHES" }, opts: { removeOnComplete: true, removeOnFail: 100 } }
+    );
+  } else {
+    await queues.emailEvents.removeJobScheduler("renew-gmail-watches");
+  }
+
   // Resumes emails left RECEIVED / PROCESSING by jobs that exhausted their retries (migration 9).
   await queues.emailEvents.upsertJobScheduler(
     "recover-incomplete-emails",
@@ -257,6 +284,7 @@ logger.info(
   {
     queues: Object.values(QUEUE_NAMES),
     pollIntervalMinutes: config.pollIntervalMinutes,
+    gmailPush: Boolean(config.gmailPubSubTopic),
     providersConfigured: { gmail: Boolean(config.oauth.GMAIL), microsoft: Boolean(config.oauth.MICROSOFT) },
     // One-way identifier (not part of the key): must match the API's to decrypt its tokens.
     tokenEncryptionKeyFingerprint: encryptionKeyFingerprint(config.tokenEncryptionKey)

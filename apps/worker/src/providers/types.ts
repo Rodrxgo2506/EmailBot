@@ -10,6 +10,10 @@ export interface WorkerAccount {
   status: EmailAccountStatus;
   emailAddress: string;
   syncCursor: string | null;
+  /** Last successful sync (email_accounts.last_synced_at). */
+  lastSyncedAt?: string | null;
+  /** Gmail users.watch expiration (phase 5.6). */
+  watchExpiresAt?: string | null;
   providerMetadata: Record<string, unknown>;
   accessTokenEncrypted: string | null;
   refreshTokenEncrypted: string | null;
@@ -25,8 +29,21 @@ export interface ProviderContext {
 export interface ChangeSet {
   /** New provider message ids to process (deduplicated). */
   messageIds: string[];
-  /** Cursor to persist after the ids were enqueued. */
+  /** Cursor to persist once every id was processed (never before). */
   nextCursor: string | null;
+  /** The run stopped early (bounded); the cursor points to the last change fully included. */
+  hasMore?: boolean;
+  /** The cursor is too old for the provider's change history: recover with recoverMessageIds. */
+  historyGap?: boolean;
+}
+
+export interface RecoverySet {
+  /** Recent message ids (oldest first), bounded. */
+  messageIds: string[];
+  /** Mailbox position taken BEFORE listing (nothing arriving meanwhile is skipped). */
+  nextCursor: string;
+  /** More messages existed than the bound. */
+  truncated: boolean;
 }
 
 /**
@@ -35,7 +52,11 @@ export interface ChangeSet {
  */
 export interface ProviderAdapter {
   readonly provider: EmailProvider;
-  listNewMessageIds(context: ProviderContext): Promise<ChangeSet>;
+  listNewMessageIds(context: ProviderContext, options?: { maxMessages?: number }): Promise<ChangeSet>;
+  /** Bounded recovery after a history gap (Gmail). */
+  recoverMessageIds?(context: ProviderContext, options: { since: Date; maxMessages: number }): Promise<RecoverySet>;
+  /** Push subscription (Gmail users.watch on a Pub/Sub topic). */
+  watch?(context: ProviderContext, topicName: string): Promise<{ expiresAt: string }>;
   fetchMessage(context: ProviderContext, providerMessageId: string): Promise<NormalizedEmail>;
   downloadAttachment(
     context: ProviderContext,

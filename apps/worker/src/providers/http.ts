@@ -27,13 +27,31 @@ export async function providerGet(
   fetchImpl: typeof fetch,
   headers: Record<string, string> = {}
 ): Promise<unknown> {
+  return providerRequest(context, "GET", url, undefined, fetchImpl, headers);
+}
+
+/** Authenticated JSON POST (e.g. Gmail users.watch); same error classification as providerGet. */
+export async function providerPost(context: ProviderContext, url: string, body: unknown, fetchImpl: typeof fetch): Promise<unknown> {
+  return providerRequest(context, "POST", url, body, fetchImpl, { "content-type": "application/json" });
+}
+
+async function providerRequest(
+  context: ProviderContext,
+  method: "GET" | "POST",
+  url: string,
+  body: unknown,
+  fetchImpl: typeof fetch,
+  headers: Record<string, string>
+): Promise<unknown> {
   for (const forceRefresh of [false, true]) {
     const accessToken = await context.getAccessToken({ forceRefresh });
 
     let response: Response;
     try {
       response = await fetchImpl(url, {
-        headers: { authorization: `Bearer ${accessToken}`, accept: "application/json", ...headers }
+        method,
+        headers: { authorization: `Bearer ${accessToken}`, accept: "application/json", ...headers },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) })
       });
     } catch (error) {
       // Timeouts (HttpTimeoutError) and network failures are transient: BullMQ retries with backoff.

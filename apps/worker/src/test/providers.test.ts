@@ -96,10 +96,13 @@ describe("Gmail adapter", () => {
     expect(String(fetchMock.mock.calls[1]?.[0])).toContain("pageToken=p2");
   });
 
-  it("restarts from the current history id when the cursor expired (404)", async () => {
+  it("reports a history gap when the cursor expired (404) instead of jumping to now (phase 5.6)", async () => {
     const fetchMock = vi.fn().mockResolvedValueOnce(json({}, 404)).mockResolvedValueOnce(json({ historyId: "999" }));
     const adapter = createGmailAdapter(fetchMock as unknown as typeof fetch);
-    expect(await adapter.listNewMessageIds(staticContext())).toEqual({ messageIds: [], nextCursor: "999" });
+    const changes = await adapter.listNewMessageIds(staticContext());
+    // The stored cursor is kept: the caller recovers (bounded resync) and only then moves it.
+    expect(changes).toEqual({ messageIds: [], nextCursor: makeAccount().syncCursor, historyGap: true });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it("refreshes once on 401 and fails with ProviderAuthError on a second 401", async () => {

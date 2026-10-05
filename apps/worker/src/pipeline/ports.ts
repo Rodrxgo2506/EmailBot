@@ -18,6 +18,19 @@ export interface AccountStore {
   findAccountBySubscription(subscriptionId: string): Promise<WorkerAccount | null>;
   listActiveOAuthAccounts(limit: number): Promise<Array<Pick<WorkerAccount, "id" | "organizationId">>>;
   updateSyncState(id: string, state: { syncCursor: string | null; lastSyncedAt: string }): Promise<void>;
+  /**
+   * Compare-and-set of the history cursor: written only if it still equals
+   * `from` (the cursor the sync started with). Returns false when another
+   * sync moved it meanwhile (nothing is overwritten, the cursor never goes back).
+   */
+  advanceSyncCursor(id: string, state: { from: string | null; to: string | null; lastSyncedAt: string }): Promise<boolean>;
+  /** Gmail users.watch state (phase 5.6). */
+  saveWatchState(
+    id: string,
+    state: { expiresAt?: string | null; renewedAt?: string | null; errorCode: string | null; errorAt?: string | null }
+  ): Promise<void>;
+  /** Active Gmail accounts of active organizations whose watch is missing or expires before `renewBefore`. */
+  listAccountsNeedingWatch(options: { renewBefore: string; limit: number }): Promise<Array<Pick<WorkerAccount, "id" | "organizationId">>>;
   saveTokens(
     id: string,
     tokens: { accessTokenEncrypted: string; refreshTokenEncrypted: string | null; tokenExpiresAt: string | null }
@@ -152,6 +165,26 @@ export interface RoutingStore {
 /** SYSTEM audit entries about an email. Metadata never carries identifier values, tokens or other personal data. */
 export interface AuditRecorder {
   recordEmailEvent(entry: { organizationId: string; emailId: string; event: string; description: string; metadata: Record<string, unknown> }): Promise<void>;
+  /** SYSTEM audit entry about a mailbox (watch / sync events). Never tokens or message content. */
+  recordAccountEvent(entry: {
+    organizationId: string;
+    emailAccountId: string;
+    action: "PROCESS" | "UPDATE" | "FAIL";
+    event: string;
+    description: string;
+    metadata: Record<string, unknown>;
+  }): Promise<void>;
+}
+
+/**
+ * One effective sync per account at a time (Redis lease, shared by every
+ * worker instance). The cursor compare-and-set keeps correctness even if a
+ * lease expired; the lease avoids wasted duplicate work.
+ */
+export interface SyncLock {
+  /** Returns a release token, or null when another sync holds the account. */
+  acquire(emailAccountId: string, ttlMs: number): Promise<string | null>;
+  release(emailAccountId: string, token: string): Promise<void>;
 }
 
 export interface AttachmentStorage {

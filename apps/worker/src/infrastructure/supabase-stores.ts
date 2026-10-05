@@ -26,7 +26,7 @@ type Row = Record<string, any>;
 
 // organizations(status): column grant of migration organization_status_worker_access (no other organization column).
 const ACCOUNT_COLUMNS =
-  "id,organization_id,provider,status,email_address,sync_cursor,provider_metadata,access_token_encrypted,refresh_token_encrypted,token_expires_at,organizations!inner(status)";
+  "id,organization_id,provider,status,email_address,sync_cursor,last_synced_at,watch_expires_at,provider_metadata,access_token_encrypted,refresh_token_encrypted,token_expires_at,organizations!inner(status)";
 
 function check<T>(result: { data: T; error: { message: string; code?: string } | null }, operation: string): T {
   if (result.error) {
@@ -47,6 +47,8 @@ function toAccount(row: Row): WorkerAccount {
     status: row.status,
     emailAddress: row.email_address,
     syncCursor: row.sync_cursor,
+    lastSyncedAt: row.last_synced_at ?? null,
+    watchExpiresAt: row.watch_expires_at ?? null,
     providerMetadata: row.provider_metadata ?? {},
     accessTokenEncrypted: row.access_token_encrypted,
     refreshTokenEncrypted: row.refresh_token_encrypted,
@@ -115,6 +117,41 @@ export function createAccountStore(db: SupabaseClient): AccountStore {
           .eq("id", id),
         "updateSyncState"
       );
+    },
+
+    async advanceSyncCursor(id, state) {
+      // Compare-and-set: only from the cursor the sync started with (never overwrites a newer one).
+      let query = db
+        .from("email_accounts")
+        .update({ sync_cursor: state.to, last_synced_at: state.lastSyncedAt, last_error_code: null, last_error_message: null })
+        .eq("id", id);
+      query = state.from === null ? query.is("sync_cursor", null) : query.eq("sync_cursor", state.from);
+      const rows = check(await query.select("id"), "advanceSyncCursor") as Row[];
+      return rows.length > 0;
+    },
+
+    async saveWatchState(id, state) {
+      const columns: Row = { watch_error_code: state.errorCode?.slice(0, 100) ?? null };
+      if (state.expiresAt !== undefined) columns.watch_expires_at = state.expiresAt;
+      if (state.renewedAt !== undefined) columns.watch_renewed_at = state.renewedAt;
+      if (state.errorAt !== undefined) columns.watch_error_at = state.errorAt;
+      check(await db.from("email_accounts").update(columns).eq("id", id), "saveWatchState");
+    },
+
+    async listAccountsNeedingWatch({ renewBefore, limit }) {
+      const rows = check(
+        await db
+          .from("email_accounts")
+          .select("id,organization_id,organizations!inner(status)")
+          .eq("provider", "GMAIL")
+          .eq("status", "ACTIVE")
+          .eq("organizations.status", "ACTIVE")
+          .or(`watch_expires_at.is.null,watch_expires_at.lt.${renewBefore}`)
+          .order("watch_expires_at", { ascending: true, nullsFirst: true })
+          .limit(limit),
+        "listAccountsNeedingWatch"
+      ) as Row[];
+      return rows.map((row) => ({ id: row.id, organizationId: row.organization_id }));
     },
 
     async saveTokens(id, tokens) {
@@ -398,6 +435,22 @@ export function createRoutingStore(db: SupabaseClient): RoutingStore {
 
 export function createAuditRecorder(db: SupabaseClient): AuditRecorder {
   return {
+    async recordAccountEvent(entry) {
+      check(
+        await db.from("audit_logs").insert({
+          organization_id: entry.organizationId,
+          actor_type: "SYSTEM",
+          actor_user_id: null,
+          action: entry.action,
+          entity_type: "email_account",
+          entity_id: entry.emailAccountId,
+          description: entry.description.slice(0, 2000),
+          metadata: { event: entry.event, ...entry.metadata }
+        }),
+        "recordAccountEvent"
+      );
+    },
+
     async recordEmailEvent(entry) {
       check(
         await db.from("audit_logs").insert({

@@ -657,9 +657,9 @@ function eventSetup(accounts: WorkerAccount[], adapter = makeAdapter()) {
 }
 
 describe("handleEmailEvent", () => {
-  it("Gmail notification syncs every active account with that address (one per organization)", async () => {
+  it("Gmail notification queues a sync of every active account with that address (one per organization)", async () => {
     const adapter = makeAdapter({ listNewMessageIds: vi.fn(async () => ({ messageIds: ["m1", "m2"], nextCursor: "200" })) });
-    const { deps, producer, store } = eventSetup(
+    const { deps, enqueueSync } = eventSetup(
       [
         makeAccount({ id: "acc-a", organizationId: ORG }),
         makeAccount({ id: "acc-b", organizationId: OTHER_ORG }),
@@ -670,14 +670,13 @@ describe("handleEmailEvent", () => {
 
     const outcome = await handleEmailEvent({ type: "GMAIL_NOTIFICATION", emailAddress: "me@gmail.com", historyId: "200" }, deps);
 
-    expect(outcome).toEqual({ accounts: 2, enqueued: 4 });
-    expect(producer.processing.map((job) => `${job.organizationId}/${job.emailAccountId}/${job.providerMessageId}`)).toEqual([
-      `${ORG}/acc-a/m1`,
-      `${ORG}/acc-a/m2`,
-      `${OTHER_ORG}/acc-b/m1`,
-      `${OTHER_ORG}/acc-b/m2`
+    // Phase 5.6: the push only triggers the account's (coalesced, locked) sync; no inline listing.
+    expect(outcome).toEqual({ accounts: 2, enqueued: 2 });
+    expect(enqueueSync.mock.calls).toEqual([
+      [expect.objectContaining({ id: "acc-a", organizationId: ORG }), "PUBSUB"],
+      [expect.objectContaining({ id: "acc-b", organizationId: OTHER_ORG }), "PUBSUB"]
     ]);
-    expect(store.updateSyncState).toHaveBeenCalledWith("acc-a", expect.objectContaining({ syncCursor: "200" }));
+    expect(adapter.listNewMessageIds).not.toHaveBeenCalled();
   });
 
   it("SYNC_ACCOUNT ignores accounts of another organization", async () => {
@@ -708,7 +707,7 @@ describe("handleEmailEvent", () => {
     ]);
     await handleEmailEvent({ type: "POLL_ACCOUNTS" }, deps);
     expect(enqueueSync).toHaveBeenCalledTimes(1);
-    expect(enqueueSync).toHaveBeenCalledWith({ id: "a1", organizationId: ORG });
+    expect(enqueueSync).toHaveBeenCalledWith({ id: "a1", organizationId: ORG }, "POLL");
   });
 });
 
@@ -828,16 +827,17 @@ describe("EmailBot V2 phase 1: bots and organization status", () => {
   it("SYNC_ACCOUNT of a suspended organization lists nothing and keeps the cursor", async () => {
     const { deps, adapter, store } = eventSetup([makeAccount({ id: "acc-s", organizationStatus: "SUSPENDED" })]);
     const outcome = await handleEmailEvent({ type: "SYNC_ACCOUNT", emailAccountId: "acc-s", organizationId: ORG, requestedBy: null }, deps);
-    expect(outcome).toEqual({ accounts: 1, enqueued: 0 });
+    expect(outcome).toEqual({ accounts: 1, enqueued: 0, processed: 0 });
     expect(adapter.listNewMessageIds).not.toHaveBeenCalled();
     expect(store.updateSyncState).not.toHaveBeenCalled();
+    expect(store.advanceSyncCursor).not.toHaveBeenCalled();
   });
 
   it("POLL_ACCOUNTS skips accounts of suspended organizations", async () => {
     const { deps, enqueueSync } = eventSetup([makeAccount({ id: "ok" }), makeAccount({ id: "suspended", organizationStatus: "SUSPENDED" })]);
     await handleEmailEvent({ type: "POLL_ACCOUNTS" }, deps);
     expect(enqueueSync).toHaveBeenCalledTimes(1);
-    expect(enqueueSync).toHaveBeenCalledWith(expect.objectContaining({ id: "ok" }));
+    expect(enqueueSync).toHaveBeenCalledWith(expect.objectContaining({ id: "ok" }), "POLL");
   });
 });
 

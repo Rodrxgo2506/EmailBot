@@ -25,8 +25,16 @@ const envSchema = z.object({
 
   WORKER_EVENTS_CONCURRENCY: z.coerce.number().int().min(1).max(100).default(5),
   WORKER_PROCESSING_CONCURRENCY: z.coerce.number().int().min(1).max(100).default(10),
-  /** Polling fallback for accounts without push notifications. 0 disables it. */
+  /** Recovery polling (not the primary ingestion once Gmail push is enabled). 0 disables it. */
   WORKER_POLL_INTERVAL_MINUTES: z.coerce.number().int().min(0).max(1440).default(5),
+  /**
+   * Gmail push (users.watch): Pub/Sub topic "projects/<project>/topics/<topic>".
+   * Unset = push disabled, mailboxes are only polled. The topic must grant
+   * Pub/Sub Publisher to gmail-api-push@system.gserviceaccount.com.
+   */
+  GMAIL_PUBSUB_TOPIC: optionalEnv(z.string().regex(/^projects\/[a-z][a-z0-9-]{4,28}[a-z0-9]\/topics\/[A-Za-z][\w.~+%-]{2,254}$/, "must be projects/<project>/topics/<topic>")),
+  /** How often Gmail watches close to expiry are renewed (they last 7 days). */
+  WORKER_WATCH_RENEW_INTERVAL_MINUTES: z.coerce.number().int().min(5).max(1440).default(60),
   /** Attachments larger than this are recorded (metadata) but not stored. */
   WORKER_MAX_ATTACHMENT_BYTES: z.coerce.number().int().min(0).default(25 * 1024 * 1024),
 
@@ -82,6 +90,9 @@ export interface WorkerConfig {
   eventsConcurrency: number;
   processingConcurrency: number;
   pollIntervalMinutes: number;
+  /** null = Gmail push disabled (polling only). */
+  gmailPubSubTopic: string | null;
+  watchRenewIntervalMinutes: number;
   maxAttachmentBytes: number;
   /** null = health endpoint disabled. */
   health: { port: number; host: string } | null;
@@ -118,6 +129,8 @@ export function loadWorkerConfig(source: NodeJS.ProcessEnv = process.env): Worke
     eventsConcurrency: env.WORKER_EVENTS_CONCURRENCY,
     processingConcurrency: env.WORKER_PROCESSING_CONCURRENCY,
     pollIntervalMinutes: env.WORKER_POLL_INTERVAL_MINUTES,
+    gmailPubSubTopic: env.GMAIL_PUBSUB_TOPIC ?? null,
+    watchRenewIntervalMinutes: env.WORKER_WATCH_RENEW_INTERVAL_MINUTES,
     maxAttachmentBytes: env.WORKER_MAX_ATTACHMENT_BYTES,
     health: (env.WORKER_HEALTH_PORT ?? env.PORT) !== undefined
       ? { port: (env.WORKER_HEALTH_PORT ?? env.PORT) as number, host: env.WORKER_HEALTH_HOST }

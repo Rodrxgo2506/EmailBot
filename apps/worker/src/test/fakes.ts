@@ -331,9 +331,19 @@ export class MemoryRoutingStore implements RoutingStore {
 
 export function makeAudit() {
   const entries: Array<{ organizationId: string; emailId: string; event: string; description: string; metadata: Record<string, unknown> }> = [];
+  const accountEntries: Array<{
+    organizationId: string;
+    emailAccountId: string;
+    action: "PROCESS" | "UPDATE" | "FAIL";
+    event: string;
+    description: string;
+    metadata: Record<string, unknown>;
+  }> = [];
   return {
     entries,
-    recordEmailEvent: vi.fn(async (entry: (typeof entries)[number]) => void entries.push(entry))
+    accountEntries,
+    recordEmailEvent: vi.fn(async (entry: (typeof entries)[number]) => void entries.push(entry)),
+    recordAccountEvent: vi.fn(async (entry: (typeof accountEntries)[number]) => void accountEntries.push(entry))
   };
 }
 
@@ -352,6 +362,29 @@ export function makeAccountStore(accounts: WorkerAccount[]): AccountStore & Reco
         .map((a) => ({ id: a.id, organizationId: a.organizationId }))
     ),
     updateSyncState: vi.fn(async () => undefined),
+    // Compare-and-set on the in-memory account (the database does the same with .eq(sync_cursor)).
+    advanceSyncCursor: vi.fn(async (id: string, state: { from: string | null; to: string | null; lastSyncedAt: string }) => {
+      const account = accounts.find((candidate) => candidate.id === id);
+      if (!account || account.syncCursor !== state.from) return false;
+      account.syncCursor = state.to;
+      account.lastSyncedAt = state.lastSyncedAt;
+      return true;
+    }),
+    saveWatchState: vi.fn(async (id: string, state: { expiresAt?: string | null; errorCode: string | null }) => {
+      const account = accounts.find((candidate) => candidate.id === id);
+      if (account && state.expiresAt !== undefined) account.watchExpiresAt = state.expiresAt;
+    }),
+    listAccountsNeedingWatch: vi.fn(async ({ renewBefore }: { renewBefore: string; limit: number }) =>
+      accounts
+        .filter(
+          (a) =>
+            a.provider === "GMAIL" &&
+            a.status === "ACTIVE" &&
+            a.organizationStatus === "ACTIVE" &&
+            (!a.watchExpiresAt || a.watchExpiresAt < renewBefore)
+        )
+        .map((a) => ({ id: a.id, organizationId: a.organizationId }))
+    ),
     saveTokens: vi.fn(async () => undefined),
     markError: vi.fn(async () => undefined)
   } as unknown as AccountStore & Record<string, ReturnType<typeof vi.fn>>;
