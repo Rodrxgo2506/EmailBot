@@ -39,6 +39,10 @@ const AUTHENTICATED_DEFINER_ALLOWLIST = [
   "private.has_organization_role",
   "private.is_organization_member",
   "public.create_organization",
+  // V2 phase 4: customer Access ID administration (role checked inside, atomic).
+  "public.issue_customer_access",
+  "public.revoke_customer_access",
+  "public.revoke_customer_sessions",
   "public.transfer_organization_ownership"
 ];
 

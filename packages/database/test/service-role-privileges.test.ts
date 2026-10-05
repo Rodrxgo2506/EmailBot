@@ -17,7 +17,9 @@ const TABLES = [
   "bot_customer_assignments",
   "bots",
   "categories",
+  "customer_access_credentials",
   "customer_identifiers",
+  "customer_sessions",
   "customers",
   "email_accounts",
   "email_attachments",
@@ -41,7 +43,10 @@ const SERVICE_ROLE_EXPECTED: Record<(typeof TABLES)[number], Privilege[]> = {
   // V2 phase 1: column SELECT (id, organization_id, status); phase 3 adds customer_resolution.
   bots: [],
   categories: [],
+  // V2 phase 4: no table privilege; portal.* SECURITY DEFINER functions only (no hash is ever readable).
+  customer_access_credentials: [],
   customer_identifiers: [],
+  customer_sessions: [],
   customers: [],
   email_accounts: ["SELECT", "INSERT", "UPDATE"],
   email_attachments: ["SELECT", "INSERT", "UPDATE"],
@@ -56,7 +61,7 @@ const SERVICE_ROLE_EXPECTED: Record<(typeof TABLES)[number], Privilege[]> = {
 };
 
 /** Tables that existed before migration 7 (V2 tables are created later). */
-const V2_TABLES: readonly string[] = ["bots", "customers", "customer_identifiers", "bot_customer_assignments", "email_deliveries"];
+const V2_TABLES: readonly string[] = ["bots", "customers", "customer_identifiers", "bot_customer_assignments", "email_deliveries", "customer_access_credentials", "customer_sessions"];
 const V1_TABLES = TABLES.filter((table) => !V2_TABLES.includes(table));
 
 async function privilegeMatrix(tx: Tx, role: string, tables: readonly string[] = TABLES): Promise<Record<string, Privilege[]>> {
@@ -213,6 +218,10 @@ describe.each<DefaultPrivilegesProfile>(["production", "local"])("AFTER migratio
     ["SELECT customer_identifiers.value", "select value from public.customer_identifiers"],
     ["UPDATE bot_customer_assignments", "update public.bot_customer_assignments set active = false"],
     ["DELETE email_deliveries", "delete from public.email_deliveries"],
+    ["SELECT customer_access_credentials", "select id from public.customer_access_credentials"],
+    ["SELECT customer_access_credentials.secret_hash", "select secret_hash from public.customer_access_credentials"],
+    ["SELECT customer_sessions.token_hash", "select token_hash from public.customer_sessions"],
+    ["UPDATE customer_sessions", "update public.customer_sessions set revoked_at = now()"],
     ["UPDATE organization_members", "update public.organization_members set role = 'VIEWER'"],
     ["TRUNCATE emails", "truncate public.emails"]
   ])("service_role cannot %s", async (_label, sql) => {
