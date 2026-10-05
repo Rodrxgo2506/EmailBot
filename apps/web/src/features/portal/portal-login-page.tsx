@@ -3,6 +3,7 @@ import { useState, type FormEvent } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Input, Label } from "@/components/ui/form-controls";
+import { LegalLinks } from "@/features/legal/legal-layout";
 import { portalErrorMessage } from "./portal-api";
 import { usePortalLogin } from "./portal-queries";
 
@@ -75,6 +76,8 @@ export function PortalLoginPage() {
           </Button>
         </form>
         <p className="mt-4 text-center text-xs text-muted-foreground">Si no tienes un Access ID, solicítalo a quien te dio acceso.</p>
+        <p className="mt-2 text-center text-xs text-muted-foreground">Al ingresar aceptas los Términos de Servicio y la Política de Privacidad.</p>
+        <LegalLinks className="mt-2 justify-center text-xs" />
       </div>
     </main>
   );
