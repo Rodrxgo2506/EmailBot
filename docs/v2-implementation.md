@@ -10,7 +10,7 @@ Producción no se modifica sin autorización explícita por fase.
 | 0 | Preparación y compatibilidad | completada |
 | 1 | Bots (tabla, `bot_id` en reglas y correos, motor de reglas) + `organizations.status` | completada |
 | 2 | Customers, identificadores, asignaciones | completada |
-| 3 | Routing: Customer Resolver + `email_deliveries` | pendiente |
+| 3 | Routing: Customer Resolver + `email_deliveries` | completada |
 | 4 | Customer Access ID + sesiones | pendiente |
 | 5 | API del portal | pendiente |
 | 6 | UI del portal | pendiente |
@@ -178,7 +178,7 @@ identificador activo.
 | ¿Cruza organización? | no (RLS + FK compuestas) | no | no |
 | ¿Customer (portal)? | no | no | no |
 | ¿Super Admin? | sin excepción RLS | sin excepción RLS | sin excepción RLS |
-| service_role | sin acceso (fase 3) | sin acceso (fase 3) | sin acceso (fase 3) |
+| service_role | fase 3: `select (id, organization_id, status)` | fase 3: lectura por columnas, sin `value` | fase 3: lectura por columnas |
 
 ### Búsqueda de clientes por teléfono (corrección)
 
@@ -186,6 +186,93 @@ La búsqueda compara los identificadores por su forma normalizada: el texto en m
 el fragmento de teléfono normalizado (`+51 987` → `+51987`, `987 654 321` → `987654321`). Ambas formas salen de
 `normalizeIdentifierFragment`, que reutiliza la misma canonicalización que `normalizeIdentifier` (sin las
 comprobaciones de valor completo). Valores almacenados y semántica de `PHONE` sin cambios.
+
+## Fase 3: decisiones implementadas
+
+### Flujo del worker
+
+```
+proveedor -> worker -> fetch/normalize -> dedupe -> evaluateRules (selección de bot + extractores)
+  -> insert email (RECEIVED) -> PROCESSING -> CustomerResolver -> insert email_deliveries
+  -> adjuntos -> realtime -> notificaciones -> PROCESSED
+```
+
+**Desviación documentada:** el resolver se ejecuta **después** de insertar el correo (no antes). Motivo: la
+entrega necesita `email_id`, y así el primer intento y cualquier reanudación (reintento BullMQ, job estancado,
+barrido de recuperación, workers concurrentes) siguen exactamente el mismo camino. El resolver usa lo
+**guardado** con el correo (`emails.bot_id`, `provider_metadata.botSelection`, `extracted_data`), no una
+reevaluación: si las reglas cambian entre intentos, el routing no cambia (y `emails.bot_id` nunca cambia).
+`PROCESSED` se escribe solo después de las entregas.
+
+### CustomerResolver (`apps/worker/src/pipeline/resolve-customers.ts`)
+
+Entrada: organización, bot del correo, resultado de la selección de bot, datos normalizados del correo,
+`extracted_data` y `customer_resolution` del bot (revalidado con `customerResolutionSchema`). Salida
+determinista:
+
+| Caso | Resultado | Auditoría (`metadata.event`) |
+|---|---|---|
+| Sin bot (regla general, correo V1) | sin entregas | — |
+| Empate entre bots | sin entregas | `routing.ambiguous_bot` (ids de bots candidatos) |
+| Bot no encontrado / PAUSED | sin entregas | `routing.unassigned` (`BOT_NOT_FOUND` / `BOT_PAUSED`) |
+| `customer_resolution` inválido | sin entregas | `routing.unassigned` (`INVALID_CONFIGURATION`) |
+| `source = NONE` | sin entregas | — |
+| El correo no aporta identificador válido | sin entregas | `routing.unassigned` (`NO_IDENTIFIER`) |
+| 0 clientes | sin entregas | `routing.unassigned` (`NO_MATCH`) |
+| 1 cliente | 1 entrega AUTOMATIC | — |
+| N clientes + LEAVE_UNASSIGNED | sin entregas | `routing.multiple_matches` |
+| N clientes + DELIVER_ALL | N entregas AUTOMATIC | `routing.multiple_matches` (`delivered`) |
+| Error (BD, red) | excepción → política de reintentos | `routing.failed` (solo código de error) |
+
+- Valores buscados: RECIPIENT = To ∪ Cc; SENDER = remitente; EXTRACTED_FIELD = `extracted_data[field]`. Todos
+  pasan por `normalizeIdentifier` (el mismo normalizador que la API); los inválidos se ignoran.
+- Cliente elegible: identificador activo, de la organización, con alcance organización (`bot_id` NULL) o el bot
+  del correo; cliente ACTIVE; asignación activa al bot; bot ACTIVE. El store filtra en SQL y el resolver vuelve a
+  filtrar (defensa en profundidad); la base de datos vuelve a comprobarlo al insertar.
+- Un cliente encontrado por varios identificadores cuenta una vez (se registra el identificador con alcance de
+  bot; si no, el de menor id). Los clientes se ordenan por id: nunca se elige uno arbitrariamente.
+- Auditoría: eventos SYSTEM (acción `PROCESS`, entidad `email`) sin datos personales (nunca valores de
+  identificadores, Access IDs ni tokens). Es *at-least-once*: un correo reanudado o procesado por workers
+  concurrentes puede registrar el mismo evento más de una vez (las entregas nunca se duplican).
+- Consultas del worker: búsqueda por `(organization_id, type, normalized_value) where active` (en bloques de 50
+  valores, cada valor entrecomillado y escapado para PostgREST) + asignaciones activas del bot.
+
+### `email_deliveries`
+
+- `unique (email_id, customer_id)`: el worker inserta con `ON CONFLICT DO NOTHING` (idempotente).
+- FK `(organization_id, email_id, bot_id)` → `emails(organization_id, id, bot_id)`: el correo es de la misma
+  organización **y** su bot es exactamente el de la entrega; un correo sin bot nunca se entrega.
+- FK `(organization_id, customer_id)` → `customers`; FK `(organization_id, customer_id, identifier_id)` →
+  `customer_identifiers` (el identificador es de ese cliente; borrarlo solo pone `identifier_id` a NULL);
+  FK `(organization_id, bot_id)` → `bots` (un bot con entregas no se puede borrar).
+- Trigger `validate_email_delivery_eligibility` (SECURITY INVOKER, no ejecutable directamente): una entrega
+  **nueva** exige bot ACTIVE, cliente ACTIVE y asignación activa. Pausar un bot o suspender un cliente no borra
+  el historial.
+- AUTOMATIC nunca tiene `created_by`; MANUAL queda reservado (sin API ni política en la fase 3).
+
+### RLS de `email_deliveries` (plantilla)
+
+| Pregunta | Respuesta |
+|---|---|
+| SELECT | miembros de la organización (todos los roles) |
+| INSERT / UPDATE / DELETE | nadie (sin grant ni política) en la fase 3 |
+| ¿Cruza `organization_id`? | No: RLS + FK compuestas + trigger (también para service role y owner) |
+| ¿Customer? | No (portal: fases 4-5, mediante funciones SECURITY DEFINER) |
+| ¿Super Admin? | Sin excepción RLS (fase 7) |
+| service_role | `insert (organization_id, email_id, customer_id, bot_id, resolution, identifier_id)`, `select (id, email_id, customer_id)` |
+
+### Grants del worker (migración `worker_customer_resolution_access`)
+
+Solo lectura por columnas: `bots.customer_resolution`; `customers (id, organization_id, status)`;
+`customer_identifiers (id, organization_id, customer_id, type, normalized_value, bot_id, active)` (sin el valor
+original); `bot_customer_assignments (organization_id, bot_id, customer_id, active)`. Sin escritura en esas
+tablas y sin acceso a nombres, notas ni referencias externas.
+
+### Compatibilidad
+
+Correos V1 y de reglas generales (`bot_id` NULL): mismo comportamiento, sin entregas ni auditoría; sin backfill
+ni asignación retroactiva. Un correo que quedó sin asignar no se reasigna solo cuando después se crea el
+cliente (la entrega manual es una fase posterior).
 
 ## Deuda de QA
 
@@ -195,5 +282,11 @@ comprobaciones de valor completo). Valores almacenados y semántica de `PHONE` s
 
 ## Decisiones pendientes
 
-Ninguna abierta tras la fase 1 (las cuatro de la fase 0 se aprobaron: empate = AMBIGUOUS, estado de la
-organización en la fase 1, migraciones en la fase que las usa, rutas en la raíz).
+Las cuatro de la fase 0 se aprobaron (empate = AMBIGUOUS, estado de la organización en la fase 1, migraciones
+en la fase que las usa, rutas en la raíz). Abiertas tras la fase 3:
+
+1. Entregas MANUAL (asignar/quitar un cliente a un correo desde el panel): API, UI, roles y si exigen asignación
+   activa al bot (hoy el trigger la exige para toda entrega nueva).
+2. Correos sin asignar cuando el cliente se crea después: ¿solo entrega manual o reprocesado explícito?
+3. RECIPIENT usa To + Cc (no Bcc): confirmar.
+4. Auditoría de routing *at-least-once* (puede repetirse en reanudaciones concurrentes): aceptar o deduplicar.
