@@ -224,6 +224,12 @@ export interface PortalInboxItem {
   fields: PortalFieldValue[];
 }
 
+/** GET /api/portal/filters: what the customer can filter its inbox by (names and slugs only). */
+export interface PortalFilters {
+  bots: Array<{ name: string; slug: string }>;
+  categories: Array<{ name: string; slug: string }>;
+}
+
 export interface PortalInboxPage {
   items: PortalInboxItem[];
   /** Opaque keyset cursor for the next page, or null. */

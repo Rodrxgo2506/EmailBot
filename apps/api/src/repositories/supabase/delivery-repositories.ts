@@ -85,7 +85,10 @@ const toFields = (value: unknown): PortalFieldValue[] =>
     value: field.value === null || field.value === undefined ? null : String(field.value)
   }));
 
-type PortalDataOperations = Pick<PrivilegedOperations, "listPortalInbox" | "getPortalEmail" | "getPortalAttachment">;
+type PortalDataOperations = Pick<PrivilegedOperations, "listPortalInbox" | "getPortalEmail" | "getPortalAttachment" | "listPortalFilters">;
+
+const toNamed = (value: unknown) =>
+  (Array.isArray(value) ? value : []).map((entry: Row) => ({ name: String(entry.name), slug: String(entry.slug) }));
 
 export function portalDataOperations(service: SupabaseClient): PortalDataOperations {
   const portal = () => service.schema("portal");
@@ -95,7 +98,7 @@ export function portalDataOperations(service: SupabaseClient): PortalDataOperati
         await portal().rpc("list_inbox", {
           p_token_hash: tokenHash,
           p_limit: filters.limit,
-          p_before_delivered_at: filters.before?.deliveredAt ?? null,
+          p_before_received_at: filters.before?.receivedAt ?? null,
           p_before_id: filters.before?.deliveryId ?? null,
           p_bot_slug: filters.bot ?? null,
           p_category_slug: filters.category ?? null,
@@ -151,6 +154,11 @@ export function portalDataOperations(service: SupabaseClient): PortalDataOperati
             )
           : null
       };
+    },
+
+    async listPortalFilters(tokenHash) {
+      const filters = unwrap(await portal().rpc("list_filters", { p_token_hash: tokenHash })) as Row | null;
+      return filters ? { bots: toNamed(filters.bots), categories: toNamed(filters.categories) } : null;
     },
 
     async getPortalAttachment(tokenHash, deliveryId, attachmentId): Promise<PortalAttachmentLocation | null> {

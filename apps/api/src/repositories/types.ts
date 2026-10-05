@@ -28,6 +28,7 @@ import type {
   OrganizationStatus,
   Paginated,
   PortalEmailDetail,
+  PortalFilters,
   PortalInboxItem,
   PortalProfile,
   PortalSettings
@@ -354,7 +355,8 @@ export interface PortalSessionContext {
 export interface PortalInboxFilters {
   /** Rows requested (the route asks for page size + 1). */
   limit: number;
-  before: { deliveredAt: string; deliveryId: string } | null;
+  /** Keyset position: the inbox is ordered by (received_at DESC, delivery id DESC). */
+  before: { receivedAt: string; deliveryId: string } | null;
   bot?: string | undefined;
   category?: string | undefined;
   unread?: boolean | undefined;
@@ -395,4 +397,5 @@ export interface PrivilegedOperations {
   listPortalInbox(tokenHash: string, filters: PortalInboxFilters): Promise<PortalInboxRow[]>;
   getPortalEmail(tokenHash: string, deliveryId: string): Promise<PortalEmailDetail | null>;
   getPortalAttachment(tokenHash: string, deliveryId: string, attachmentId: string): Promise<PortalAttachmentLocation | null>;
+  listPortalFilters(tokenHash: string): Promise<PortalFilters | null>;
 }

@@ -166,15 +166,26 @@ describe("portal inbox", () => {
     const first = await get("/api/portal/inbox?limit=1", cookie);
     expect(first.json().items).toHaveLength(1);
     const cursor = first.json().nextCursor as string;
-    expect(decodeCursor(cursor)).toEqual({ deliveredAt: "2026-10-05T10:00:00.000Z", deliveryId: DELIVERY_A });
+    expect(decodeCursor(cursor)).toEqual({ receivedAt: "2026-10-05T10:00:00.000Z", deliveryId: DELIVERY_A });
     expect(cursor).not.toContain(DELIVERY_A);
 
     await get(`/api/portal/inbox?limit=1&cursor=${cursor}`, cookie);
-    expect(privileged.listPortalInbox.mock.calls[1]?.[1]).toMatchObject({ limit: 2, before: { deliveredAt: "2026-10-05T10:00:00.000Z", deliveryId: DELIVERY_A } });
+    expect(privileged.listPortalInbox.mock.calls[1]?.[1]).toMatchObject({ limit: 2, before: { receivedAt: "2026-10-05T10:00:00.000Z", deliveryId: DELIVERY_A } });
     expect((await get("/api/portal/inbox?cursor=garbage", cookie)).json().error.code).toBe("INVALID_CURSOR");
     const forged = Buffer.from(JSON.stringify({ d: "x", i: "y" })).toString("base64url");
     expect((await get(`/api/portal/inbox?cursor=${forged}`, cookie)).statusCode).toBe(400);
     expect(encodeCursor("2026-10-05T10:00:00.000Z", DELIVERY_A)).toBe(cursor);
+  });
+});
+
+describe("portal filters", () => {
+  it("returns the session customer's bots and categories (names and slugs only); 401 without a session", async () => {
+    const { get, cookieFor, privileged } = await setup();
+    privileged.listPortalFilters.mockResolvedValue({ bots: [{ name: "Netflix", slug: "netflix" }], categories: [{ name: "Códigos", slug: "codigos" }] });
+    expect((await get("/api/portal/filters")).statusCode).toBe(401);
+    const response = await get(`/api/portal/filters?customerId=${CUSTOMER_B}`, cookieFor(CUSTOMER_A, ORG_A));
+    expect(response.json()).toEqual({ bots: [{ name: "Netflix", slug: "netflix" }], categories: [{ name: "Códigos", slug: "codigos" }] });
+    expect(privileged.listPortalFilters).toHaveBeenCalledWith(expect.stringMatching(/^[0-9a-f]{64}$/));
   });
 });
 

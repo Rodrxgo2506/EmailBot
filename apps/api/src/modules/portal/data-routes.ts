@@ -1,5 +1,5 @@
 import { ATTACHMENT_URL_TTL_SECONDS } from "@emailbot/shared";
-import type { PortalInboxPage } from "@emailbot/types";
+import type { PortalFilters, PortalInboxPage } from "@emailbot/types";
 import { idSchema, portalAttachmentParamsSchema, portalDeliveryParamsSchema, portalInboxQuerySchema } from "@emailbot/validation";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
@@ -13,7 +13,8 @@ import { portalTokenHash } from "./session.js";
 /*
  * Customer portal data (EmailBot V2 phase 5).
  *
- *   GET /api/portal/inbox                                    the customer's deliveries (keyset pages)
+ *   GET /api/portal/inbox                                    the customer's visible deliveries, newest received first (keyset pages)
+ *   GET /api/portal/filters                                  bots / categories to filter by
  *   GET /api/portal/email/:deliveryId                        detail, as allowed by the bot's portal settings
  *   GET /api/portal/email/:deliveryId/attachments/:attachmentId   short-lived signed URL
  *
@@ -24,16 +25,17 @@ import { portalTokenHash } from "./session.js";
  * delivery or attachment that is not the customer's is a generic 404.
  */
 
-const cursorSchema = z.object({ d: z.iso.datetime({ offset: true }), i: idSchema }).strict();
+const cursorSchema = z.object({ r: z.iso.datetime({ offset: true }), i: idSchema }).strict();
 
-export function encodeCursor(deliveredAt: string, deliveryId: string): string {
-  return Buffer.from(JSON.stringify({ d: deliveredAt, i: deliveryId })).toString("base64url");
+/** Opaque for clients: position (received_at, delivery id) of the last item of the page. */
+export function encodeCursor(receivedAt: string, deliveryId: string): string {
+  return Buffer.from(JSON.stringify({ r: receivedAt, i: deliveryId })).toString("base64url");
 }
 
-export function decodeCursor(cursor: string): { deliveredAt: string; deliveryId: string } {
+export function decodeCursor(cursor: string): { receivedAt: string; deliveryId: string } {
   try {
     const parsed = cursorSchema.parse(JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")));
-    return { deliveredAt: parsed.d, deliveryId: parsed.i };
+    return { receivedAt: parsed.r, deliveryId: parsed.i };
   } catch {
     throw badRequest("Invalid cursor", "INVALID_CURSOR");
   }
@@ -59,7 +61,12 @@ export function portalDataRoutes(deps: AppDeps) {
       });
       const items = rows.slice(0, query.limit);
       const last = items.at(-1);
-      return { items, nextCursor: rows.length > query.limit && last ? encodeCursor(last.deliveredAt, last.deliveryId) : null };
+      return { items, nextCursor: rows.length > query.limit && last ? encodeCursor(last.receivedAt, last.deliveryId) : null };
+    });
+
+    app.get("/portal/filters", read, async (request): Promise<PortalFilters> => {
+      const filters = await deps.privileged.listPortalFilters(portalTokenHash(request));
+      return filters ?? { bots: [], categories: [] };
     });
 
     app.get("/portal/email/:deliveryId", read, async (request) => {

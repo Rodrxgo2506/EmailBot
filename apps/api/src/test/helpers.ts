@@ -90,7 +90,8 @@ export function createFakePrivileged(): { [K in keyof PrivilegedOperations]: Ret
     endPortalSession: unexpected("privileged.endPortalSession"),
     listPortalInbox: unexpected("privileged.listPortalInbox"),
     getPortalEmail: unexpected("privileged.getPortalEmail"),
-    getPortalAttachment: unexpected("privileged.getPortalAttachment")
+    getPortalAttachment: unexpected("privileged.getPortalAttachment"),
+    listPortalFilters: unexpected("privileged.listPortalFilters")
   };
 }
 
