@@ -13,8 +13,8 @@ Producción no se modifica sin autorización explícita por fase.
 | 3 | Routing: Customer Resolver + `email_deliveries` | completada |
 | 4 | Customer Access ID + sesiones | completada |
 | 5 | API del portal (bandeja, detalle, adjuntos) + entregas MANUAL | completada |
-| 6 | Super Admin (orden fijado al aprobar la fase 4) | pendiente |
-| — | UI del portal | pendiente (fase por decidir) |
+| 5.5 | UI del portal + cierre de decisiones de la fase 5 | completada |
+| 6 | Super Admin | pendiente |
 | — | Hardening, E2E, documentación, preparación de producción | pendiente |
 
 ## Convenciones
@@ -479,20 +479,81 @@ organización suspendidos: el portal entero responde 401 (fase 4); nada se borra
 Índices: `email_deliveries_portal_inbox_idx (customer_id, created_at desc, id desc) where removed_at is null`
 (la bandeja usa un *index only scan*) y `email_deliveries_email_idx (email_id)`.
 
+## Fase 5.5: decisiones implementadas
+
+### Visibilidad según la asignación actual
+
+El portal filtra por el estado **actual** de la asignación bot ↔ cliente (`portal.list_inbox`, `get_email`,
+`get_attachment`, `list_filters`):
+
+| Situación | Portal |
+|---|---|
+| cliente ACTIVE + asignación ACTIVE (bot ACTIVE o PAUSED) | ve sus entregas |
+| cliente ACTIVE + asignación INACTIVE | no ve las entregas de ese bot (siguen almacenadas) |
+| entrega MANUAL retirada | no aparece |
+| cliente u organización suspendidos | sin sesión (401) |
+
+No se borra nada (entregas, correos, adjuntos, auditoría): el historial sigue disponible para administración,
+auditoría, estadísticas y depuración, y vuelve a verse si la asignación se reactiva. `GET /api/portal/me` y
+`GET /api/portal/filters` listan los bots de las asignaciones activas, también si el bot está pausado.
+
+### Orden de la bandeja
+
+La bandeja lista correos: `received_at DESC, delivery id DESC`, con el cursor *keyset* sobre esas mismas
+columnas (opaco para el cliente). Una entrega MANUAL de un correo antiguo conserva su posición cronológica.
+`EXPLAIN`: escaneo por índice de las entregas del cliente (`email_deliveries_portal_inbox_idx`), búsqueda por
+clave en `emails` y ordenación *top-N*; sin escaneos completos. El coste crece con las entregas visibles de ese
+cliente (no con el tamaño de la tabla); si algún cliente llegara a tener un historial muy grande, se podría
+desnormalizar `received_at` en la entrega para un índice *keyset* puro.
+
+### `GET /api/portal/filters`
+
+`portal.list_filters`: bots de las asignaciones activas y categorías presentes en las entregas visibles; solo
+nombres y *slugs*.
+
+### Entregas MANUAL: seguridad en la capa de base de datos
+
+Probado llamando directamente a `add_manual_delivery` / `remove_manual_delivery` (PGlite y PostgREST real, sin
+pasar por la API): OWNER, ADMIN y OPERATOR permitidos; VIEWER, usuario sin membresía y miembro de otra
+organización rechazados; cliente o correo de otra organización rechazados; un bot de otra organización es
+imposible (FK compuesta del correo); bot PAUSED, cliente SUSPENDED y asignación INACTIVE rechazados.
+
+### UI del portal (`apps/web/src/features/portal`)
+
+Montada en `/portal/*` **fuera** de los proveedores de sesión Supabase y de organización del panel:
+
+| Ruta | Contenido |
+|---|---|
+| `/portal/login` | acceso con Access ID; error genérico «Access ID o credenciales no válidas.» |
+| `/portal` | bandeja: vistas Todos / No leídos / Importantes, servicio (bot), categoría, búsqueda con *debounce*, rango de fechas, «Cargar más» con el cursor opaco de la API |
+| `/portal/email/:deliveryId` | detalle: remitente, fecha, bot, categoría, importante, leído, campos permitidos, cuerpo (si la API lo devuelve) y adjuntos (si la API los devuelve) |
+
+- Cliente HTTP propio (`credentials: "include"`): solo `/api/portal/*`, sin token *bearer*, sin cabecera de
+  organización, sin ids como autoridad, nada en localStorage/sessionStorage/IndexedDB.
+- `QueryClient` propio del portal, separado del panel; cualquier 401 de un endpoint del portal limpia su estado y
+  redirige una sola vez a `/portal/login?expired=1` (el login queda excluido; sin bucles). Los 401 del panel no
+  se tocan.
+- Cuerpo HTML con el componente `EmailBody` del panel (iframe `sandbox` sin `allow-scripts` ni
+  `allow-same-origin`, CSP interna, imágenes remotas bloqueadas por defecto).
+- Adjuntos: la URL firmada se pide a la API al pulsar y se abre como descarga; la UI nunca construye rutas de
+  Storage.
+- Mensajes genéricos para 401/403/404/429/500/red; estados vacíos y *skeletons*; diseño *responsive* (filtros
+  plegables en móvil).
+- Sin realtime en el portal (datos bajo demanda); no se crea otra infraestructura WebSocket.
+
+Tests de componentes: `jsdom`, `@testing-library/react`, `@testing-library/dom`, `@testing-library/jest-dom`
+(solo devDependencies de `apps/web`). Los tests de componentes usan `// @vitest-environment jsdom` por archivo;
+los de lógica siguen en `node`.
+
 ## Deuda de QA
 
-- **TODO antes del lanzamiento**: añadir `jsdom` + `@testing-library/react` para tener tests de
-  componentes/render reales en la aplicación web (hoy la suite web solo cubre lógica sin DOM). No instalado
-  todavía.
+- ~~Añadir `jsdom` + `@testing-library/react`~~: hecho en la fase 5.5 (tests de componentes del portal). El panel
+  sigue con tests de lógica; ampliar los tests de componentes al panel queda como mejora.
 
 ## Decisiones pendientes
 
-Fases 0 a 4: todas cerradas. Abiertas tras la fase 5:
+Fases 0 a 5.5: todas cerradas. Abiertas:
 
-1. Historial tras **desactivar la asignación** bot ↔ cliente (o retirar al cliente de un bot): hoy el cliente
-   sigue viendo las entregas existentes (igual que con un bot PAUSED). ¿Debe ocultarse ese historial?
-2. **UI del portal**: ¿en qué fase? (la fase 6 es Super Admin). Al construirla, añadir `jsdom` +
-   `@testing-library/react` (deuda de QA).
-3. UI del panel para entregas manuales (la API ya existe).
-4. Retirada de entregas **AUTOMATIC**: hoy no permitida. ¿Hace falta?
-5. Despliegue: exponer el schema `portal` en PostgREST de producción (checklist de V2).
+1. UI del panel para entregas manuales (la API existe).
+2. Retirada de entregas **AUTOMATIC**: hoy no permitida.
+3. Despliegue: exponer el schema `portal` en PostgREST de producción (checklist de V2).
