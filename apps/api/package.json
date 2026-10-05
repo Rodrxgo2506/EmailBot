@@ -7,9 +7,10 @@
     "dev": "tsx watch src/server.ts",
     "build": "tsc -p tsconfig.build.json",
     "start": "node dist/server.js",
-    "typecheck": "tsc --noEmit -p tsconfig.json",
-    "lint": "tsc --noEmit -p tsconfig.json",
-    "test": "vitest run"
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc -p tsconfig.e2e.json",
+    "lint": "tsc --noEmit -p tsconfig.json && tsc -p tsconfig.e2e.json",
+    "test": "vitest run",
+    "e2e": "tsx e2e/isolation.e2e.ts"
   },
   "dependencies": {
     "@emailbot/rules-engine": "workspace:*",
