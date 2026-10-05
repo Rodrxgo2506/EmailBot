@@ -14,6 +14,7 @@ Producción no se modifica sin autorización explícita por fase.
 | 4 | Customer Access ID + sesiones | completada |
 | 5 | API del portal (bandeja, detalle, adjuntos) + entregas MANUAL | completada |
 | 5.5 | UI del portal + cierre de decisiones de la fase 5 | completada |
+| 5.6 | Gmail casi en tiempo real (watch + Pub/Sub) + sync manual del portal | completada |
 | 6 | Super Admin | pendiente |
 | — | Hardening, E2E, documentación, preparación de producción | pendiente |
 
@@ -545,6 +546,142 @@ Tests de componentes: `jsdom`, `@testing-library/react`, `@testing-library/dom`,
 (solo devDependencies de `apps/web`). Los tests de componentes usan `// @vitest-environment jsdom` por archivo;
 los de lógica siguen en `node`.
 
+## Fase 5.6: Gmail casi en tiempo real + sync manual del portal
+
+### Arquitectura
+
+```
+Gmail --users.watch--> Pub/Sub --push (OIDC)--> POST /webhooks/gmail --> [email-events] GMAIL_NOTIFICATION
+                                                                              |
+recovery polling: POLL_ACCOUNTS (cada WORKER_POLL_INTERVAL_MINUTES) ------+   |
+sync manual: panel POST /api/email-accounts/:id/sync, portal POST /api/portal/sync
+                                                                          v   v
+                                       SYNC_ACCOUNT (coalescido por cuenta) --> syncAccount()
+     lease Redis por cuenta -> History API desde el cursor guardado -> processEmail (pipeline existente:
+     normalización, extractores, motor de reglas, selección de bot, CustomerResolver, entregas, adjuntos)
+     -> cursor compare-and-set -> portal
+```
+
+Los tres caminos (evento, recovery polling, manual) terminan en el mismo `syncAccount()` y en el mismo
+`processEmail`. No hay otro parser, extractor, motor de reglas, resolver, routing ni procesador de adjuntos.
+**El polling es el mecanismo de recuperación, no la ingesta principal** (misma frecuencia que antes, 5 min).
+
+### Webhook (`POST /webhooks/gmail`)
+
+- Autenticación configurable (al menos una; ambas si ambas están configuradas):
+  - **OIDC (recomendada):** la suscripción push de Pub/Sub envía un JWT firmado por Google. Se verifica la firma
+    RS256 con las claves públicas JWKS de Google (en caché según `Cache-Control`), más `iss`, `aud`
+    (`GMAIL_PUBSUB_OIDC_AUDIENCE`), `email` (`GMAIL_PUBSUB_SERVICE_ACCOUNT`), `email_verified` y la expiración.
+    Es verificación JWT estándar, sin criptografía propia (`apps/api/src/lib/google-oidc.ts`).
+  - Token compartido en la URL (`GMAIL_PUBSUB_VERIFICATION_TOKEN`, V1): se mantiene por compatibilidad.
+  - Sin ninguna configurada, la ruta no existe (404). Nunca se confía en IP, User-Agent, Origin ni Referer.
+- Solo valida, decodifica `{emailAddress, historyId}`, ignora buzones desconocidos (204), encola **un** job
+  deduplicado (`gmail-<hash(dirección)>-<historyId>`) y responde 204. Sin llamadas a Gmail ni procesamiento.
+- Mensaje malformado: 204 (Pub/Sub no reintenta indefinidamente). Cola caída o claves de Google no disponibles:
+  503 (Pub/Sub reenvía; nunca se acepta un push sin verificar).
+- El `historyId` de la notificación no tiene autoridad: solo dispara el sync; el worker usa su cursor guardado.
+
+### Cursor de historial
+
+- Se guarda en `email_accounts.sync_cursor` (historyId de Gmail, ya existía desde V1); `last_synced_at` es el
+  último sync correcto. Es por cuenta, nunca global.
+- **Solo avanza después del procesamiento:** el sync procesa cada mensaje con el pipeline y solo entonces
+  escribe el cursor con *compare-and-set* (`where sync_cursor = <cursor de inicio>`). Si algún mensaje falla de
+  forma transitoria, el cursor no se mueve y el job se reintenta (BullMQ: 5 intentos, backoff exponencial). Son
+  resultados duraderos: procesado, reanudado, omitido (duplicado, sin regla), adjuntos pendientes (guardado; lo
+  completa el barrido de recuperación) o mensaje borrado en Gmail (404).
+- Paginación completa de `history.list` (`nextPageToken`). Cada ejecución está acotada (200 mensajes, 20 páginas):
+  si se corta, el cursor apunta al último registro de historial incluido completo (nunca al último historyId del
+  buzón, lo que antes podía saltarse páginas) y se encola una continuación.
+- Notificaciones duplicadas o fuera de orden: el CAS impide retroceder o pisar un cursor más nuevo; el
+  procesamiento es idempotente (únicos `(cuenta, mensaje)`, `(email, cliente)`, `(email, adjunto)`).
+
+### Concurrencia
+
+- Jobs de sync coalescidos por cuenta (lógica compartida API/worker en `@emailbot/shared`): como máximo uno en
+  espera (`sync-<id>`) y, mientras ese corre, un seguimiento (`sync-<id>-next`). N pushes, polls o clics producen
+  como máximo dos syncs en cola por cuenta.
+- Lease por cuenta en Redis (`SET NX PX`, liberación compare-and-delete): un solo sync efectivo por cuenta;
+  un segundo recibe `SyncBusyError` y se reintenta con backoff. Cuentas distintas sincronizan en paralelo.
+
+### History gap y resync controlado
+
+Si Gmail responde 404 (cursor fuera de la ventana de historial), el adaptador lo **informa** (antes saltaba a
+"ahora" y perdía correo). Se registra `gmail.sync.history_gap` (log + auditoría) y se recupera:
+
+1. se toma primero la posición actual del buzón;
+2. se listan los mensajes de INBOX posteriores al último sync (menos 1 h de margen, como máximo 7 días; 1 día sin
+   historial), con un máximo de 300;
+3. se procesan con el pipeline (los ya guardados se omiten como duplicados);
+4. el cursor pasa a la posición tomada en el paso 1.
+
+Un fallo deja el cursor intacto y se reintenta; no hay bucle (los reintentos de BullMQ están acotados y después
+actúa el polling).
+
+### Gmail watch
+
+- `WATCH_ACCOUNT` crea `users.watch` (INBOX, topic `GMAIL_PUBSUB_TOPIC`) con el scope `gmail.readonly` existente.
+  Se encola tras conectar o reconectar por OAuth. Un watch válido (más de 24 h restantes) no se recrea.
+- `RENEW_WATCHES` (cada `WORKER_WATCH_RENEW_INTERVAL_MINUTES`, 60 por defecto) encola los watches ausentes o con
+  menos de 24 h (los watches duran 7 días), en lotes de 100.
+- Estado en `email_accounts`: `watch_expires_at`, `watch_renewed_at`, `watch_error_code`, `watch_error_at`.
+- Un fallo no transitorio (p. ej. permisos del topic) se registra (`gmail.watch.failed`) y no bloquea nada: la
+  cuenta sigue en polling. Credenciales revocadas: cuenta `ERROR` (reconexión). Fallos transitorios: reintento.
+- Sin `GMAIL_PUBSUB_TOPIC` no hay watch: solo polling (comportamiento V1).
+
+### Sync manual del portal
+
+- `POST /api/portal/sync` (respuesta inmediata, `QUEUED`, `ALREADY_RUNNING` o `NOTHING_TO_SYNC`, más
+  `lastSyncAt`) y `GET /api/portal/sync` (`{ running, lastSyncAt }`).
+- Alcance **solo por la sesión** (`portal.sync_scope`): sesión → cliente → organización → asignaciones activas →
+  cuentas ACTIVE de la organización. Sin asignación activa no hay alcance. El cuerpo, la query y las cabeceras no
+  se leen: ningún `customerId`, `organizationId`, `botId` ni `emailAccountId` amplía el alcance, y los ids de
+  cuenta no salen del servidor.
+- Un sync manual por cliente cada 30 s (almacén de rate limit existente: Redis, contadores locales si falla),
+  además del límite por IP; jobs coalescidos (20 clics no son 20 jobs). Guardia de `Origin` (CSRF).
+- UI: botón «Actualizar» con los estados «Actualizando...», «Bandeja actualizada», «No hay correos nuevos»,
+  «Espera unos segundos antes de volver a actualizar.» y «No pudimos actualizar la bandeja.». Mientras corre,
+  sondea `GET /api/portal/sync` cada 2 s (máximo 60 s), sin WebSocket. Después refresca la bandeja con TanStack
+  Query, sin recargar. «Última sincronización: hace X» sale de `last_synced_at` del backend.
+
+### Seguridad
+
+- Una petición externa no puede sincronizar una cuenta arbitraria: el webhook exige OIDC de Google y/o el token;
+  el buzón se resuelve en el servidor; los jobs están deduplicados y coalescidos.
+- Un cliente del portal no puede sincronizar otra organización (`portal.sync_scope` por sesión).
+- Los payloads de BullMQ solo llevan ids, `historyId` y motivo, nunca tokens ni credenciales: el worker descifra
+  las credenciales en cada uso (AES-GCM existente) y refresca el token con el mecanismo existente.
+- Logs y auditoría sin tokens ni contenido de correos. La dirección del buzón en los logs del webhook va hasheada.
+- `portal.sync_scope`: SECURITY DEFINER, `search_path = ''`, solo `service_role`.
+
+### Auditoría y observabilidad
+
+- Auditoría (SYSTEM, *at-least-once*): `gmail.watch.created`, `gmail.watch.renewed`, `gmail.watch.failed`,
+  `gmail.sync.history_gap` (entidad `email_account`) y `gmail.manual_sync.requested` (entidad `customer`).
+- Solo logs estructurados (no auditoría), para no inundar `audit_logs` con un registro por cuenta cada 5 min:
+  `gmail.pubsub.received`, `gmail.pubsub.rejected`, `gmail.sync.started`, `gmail.sync.completed`,
+  `gmail.sync.failed`, `gmail.sync.recovery`, `gmail.manual_sync.rate_limited`.
+- Métricas: no existe plataforma de métricas; los logs llevan los contadores (encontrados, procesados, omitidos,
+  gap, duración).
+
+### Pruebas locales
+
+Sin Gmail, OAuth, Google Cloud ni Pub/Sub reales:
+
+- API de Gmail simulada con el adaptador real;
+- JWT OIDC firmado con una clave RSA de prueba y servido como JWKS;
+- Supabase local;
+- BullMQ sobre un Valkey local temporal (`wsl/38-phase56-local.sh`).
+
+### Configuración pendiente de producción (checklist de despliegue de V2)
+
+1. Topic de Pub/Sub con `roles/pubsub.publisher` para `gmail-api-push@system.gserviceaccount.com`.
+2. Suscripción push a `https://<api>/webhooks/gmail`, con autenticación (cuenta de servicio y audiencia).
+3. Variables: API `GMAIL_PUBSUB_OIDC_AUDIENCE` y `GMAIL_PUBSUB_SERVICE_ACCOUNT`; worker `GMAIL_PUBSUB_TOPIC`.
+4. Migración `20261004180000` y el schema `portal` expuesto (fase 4).
+
+Sin esto, todo sigue funcionando con polling.
+
 ## Deuda de QA
 
 - ~~Añadir `jsdom` + `@testing-library/react`~~: hecho en la fase 5.5 (tests de componentes del portal). El panel
@@ -552,8 +689,9 @@ los de lógica siguen en `node`.
 
 ## Decisiones pendientes
 
-Fases 0 a 5.5: todas cerradas. Abiertas:
+Fases 0 a 5.6: todas cerradas. Abiertas:
 
 1. UI del panel para entregas manuales (la API existe).
 2. Retirada de entregas **AUTOMATIC**: hoy no permitida.
-3. Despliegue: exponer el schema `portal` en PostgREST de producción (checklist de V2).
+3. Despliegue de V2: schema `portal` expuesto, Pub/Sub (topic, suscripción push con OIDC) y variables de la
+   fase 5.6 en producción.
