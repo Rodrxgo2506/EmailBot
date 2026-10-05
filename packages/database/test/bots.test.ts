@@ -209,7 +209,7 @@ describe("worker access (service role)", () => {
     );
     expect(row).toEqual({ organization_status: "ACTIVE", bot_status: "ACTIVE" });
     await expect(t.asService((tx) => tx.query("select slug from public.organizations"))).rejects.toThrow(/permission denied/);
-    await expect(t.asService((tx) => tx.query("select customer_resolution from public.bots"))).rejects.toThrow(/permission denied/);
+    await expect(t.asService((tx) => tx.query("select portal_settings from public.bots"))).rejects.toThrow(/permission denied/);
     await expect(t.asService((tx) => tx.query("update public.bots set status = 'PAUSED'"))).rejects.toThrow(/permission denied/);
     await expect(t.asService((tx) => tx.query("update public.organizations set status = 'SUSPENDED'"))).rejects.toThrow(/permission denied/);
   });

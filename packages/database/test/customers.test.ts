@@ -112,11 +112,12 @@ describe("customers: tenant isolation", () => {
     expect(await t.asUser(f.outsiderId, (tx) => count(tx, "select 1 from public.customers"))).toBe(0);
   });
 
-  it("anon and the service role have no access yet", async () => {
+  it("anon has no access; the service role reads only the resolver columns (phase 3)", async () => {
     await expect(t.asAnon((tx) => tx.query("select 1 from public.customers"))).rejects.toThrow(/permission denied/);
-    await expect(t.asService((tx) => tx.query("select 1 from public.customers"))).rejects.toThrow(/permission denied/);
-    await expect(t.asService((tx) => tx.query("select 1 from public.customer_identifiers"))).rejects.toThrow(/permission denied/);
-    await expect(t.asService((tx) => tx.query("select 1 from public.bot_customer_assignments"))).rejects.toThrow(/permission denied/);
+    await expect(t.asService((tx) => tx.query("select display_name from public.customers"))).rejects.toThrow(/permission denied/);
+    await expect(t.asService((tx) => tx.query("select notes from public.customers"))).rejects.toThrow(/permission denied/);
+    await expect(t.asService((tx) => tx.query("select value from public.customer_identifiers"))).rejects.toThrow(/permission denied/);
+    await expect(t.asService((tx) => tx.query("select created_by from public.bot_customer_assignments"))).rejects.toThrow(/permission denied/);
   });
 });
 

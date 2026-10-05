@@ -21,6 +21,7 @@ const TABLES = [
   "customers",
   "email_accounts",
   "email_attachments",
+  "email_deliveries",
   "email_rules",
   "emails",
   "organization_members",
@@ -35,15 +36,17 @@ type Privilege = (typeof PRIVILEGES)[number];
 /** Exactly what apps/api (privileged.ts) and apps/worker (supabase-stores.ts) need. */
 const SERVICE_ROLE_EXPECTED: Record<(typeof TABLES)[number], Privilege[]> = {
   audit_logs: ["INSERT"],
-  // V2 phase 2: no worker access yet (customer resolution is phase 3).
+  // V2 phase 3: column SELECT for the CustomerResolver only, checked below.
   bot_customer_assignments: [],
-  // V2 phase 1: column SELECT (id, organization_id, status) only, checked below.
+  // V2 phase 1: column SELECT (id, organization_id, status); phase 3 adds customer_resolution.
   bots: [],
   categories: [],
   customer_identifiers: [],
   customers: [],
   email_accounts: ["SELECT", "INSERT", "UPDATE"],
   email_attachments: ["SELECT", "INSERT", "UPDATE"],
+  // V2 phase 3: column INSERT/SELECT only (checked in email-deliveries.test.ts).
+  email_deliveries: [],
   email_rules: ["SELECT"],
   emails: ["SELECT", "INSERT"],
   organization_members: ["SELECT"],
@@ -53,7 +56,7 @@ const SERVICE_ROLE_EXPECTED: Record<(typeof TABLES)[number], Privilege[]> = {
 };
 
 /** Tables that existed before migration 7 (V2 tables are created later). */
-const V2_TABLES: readonly string[] = ["bots", "customers", "customer_identifiers", "bot_customer_assignments"];
+const V2_TABLES: readonly string[] = ["bots", "customers", "customer_identifiers", "bot_customer_assignments", "email_deliveries"];
 const V1_TABLES = TABLES.filter((table) => !V2_TABLES.includes(table));
 
 async function privilegeMatrix(tx: Tx, role: string, tables: readonly string[] = TABLES): Promise<Record<string, Privilege[]>> {
@@ -198,17 +201,25 @@ describe.each<DefaultPrivilegesProfile>(["production", "local"])("AFTER migratio
     ["SELECT organizations.name", "select name from public.organizations"],
     ["SELECT organizations.*", "select * from public.organizations"],
     ["SELECT bots.name", "select name from public.bots"],
+    ["SELECT bots.portal_settings", "select portal_settings from public.bots"],
+    ["SELECT customers.notes", "select notes from public.customers"],
+    ["SELECT customers.external_ref", "select external_ref from public.customers"],
+    ["INSERT customers", "insert into public.customers (organization_id, display_name) values (gen_random_uuid(), 'x')"],
+    ["UPDATE customer_identifiers", "update public.customer_identifiers set active = false"],
+    ["SELECT email_deliveries.created_by", "select created_by from public.email_deliveries"],
+    ["UPDATE email_deliveries", "update public.email_deliveries set resolution = 'MANUAL'"],
     ["INSERT bots", "insert into public.bots (organization_id, name, slug) values (gen_random_uuid(), 'x', 'x')"],
-    ["SELECT customers", "select 1 from public.customers"],
-    ["SELECT customer_identifiers", "select 1 from public.customer_identifiers"],
-    ["SELECT bot_customer_assignments", "select 1 from public.bot_customer_assignments"],
+    ["SELECT customers.display_name", "select display_name from public.customers"],
+    ["SELECT customer_identifiers.value", "select value from public.customer_identifiers"],
+    ["UPDATE bot_customer_assignments", "update public.bot_customer_assignments set active = false"],
+    ["DELETE email_deliveries", "delete from public.email_deliveries"],
     ["UPDATE organization_members", "update public.organization_members set role = 'VIEWER'"],
     ["TRUNCATE emails", "truncate public.emails"]
   ])("service_role cannot %s", async (_label, sql) => {
     await expect(t.asService((tx) => tx.query(sql))).rejects.toThrow(/permission denied/);
   });
 
-  it("service_role reads only the columns the worker needs: organizations (id, status), bots (id, organization_id, status)", async () => {
+  it("service_role reads only the columns the worker needs (organization status, bot status and resolution, resolver columns)", async () => {
     await t.asService(async (tx) => {
       const org = await one<{ status: string }>(tx, "select id, status from public.organizations where id = $1", [f.a.orgId]);
       expect(org.status).toBe("ACTIVE");
@@ -216,7 +227,12 @@ describe.each<DefaultPrivilegesProfile>(["production", "local"])("AFTER migratio
         `select a.id, o.status from public.email_accounts a join public.organizations o on o.id = a.organization_id where a.id = $1`,
         [f.a.accountId]
       );
-      await tx.query("select id, organization_id, status from public.bots");
+      await tx.query("select id, organization_id, status, customer_resolution from public.bots");
+      // V2 phase 3: CustomerResolver
+      await tx.query("select id, organization_id, status from public.customers");
+      await tx.query("select id, organization_id, customer_id, type, normalized_value, bot_id, active from public.customer_identifiers");
+      await tx.query("select organization_id, bot_id, customer_id, active from public.bot_customer_assignments");
+      await tx.query("select id, email_id, customer_id from public.email_deliveries");
     });
   });
 
