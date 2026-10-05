@@ -1,5 +1,6 @@
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { usePortalApi, PUBLIC_MUTATION } from "./portal-context";
+import { useEffect } from "react";
+import { usePortalApi, usePortalRealtime, PUBLIC_MUTATION } from "./portal-context";
 import type { PortalInboxParams } from "./portal-api";
 
 /* Portal queries. Keys live under ["portal", ...] in the portal's own QueryClient. */
@@ -70,4 +71,39 @@ export function usePortalLogout() {
     // The session is server-side: whatever the answer, the local portal state is dropped.
     onSettled: () => client.clear()
   });
+}
+
+/** Signals arriving close together (several deliveries of one sync) cause one refetch. */
+export const PORTAL_REALTIME_DEBOUNCE_MS = 300;
+
+/**
+ * EmailBot V2 phase 7: while a session is open, "inbox changed" signals
+ * refetch the inbox and the filters (the data still comes from the API with
+ * the session's own scope); a revoked session refetches /me, whose 401 sends
+ * the customer to the login page through the portal's single 401 handler.
+ */
+export function usePortalInboxRealtime(enabled: boolean) {
+  const realtime = usePortalRealtime();
+  const client = useQueryClient();
+
+  useEffect(() => {
+    if (!enabled || !realtime) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const stop = realtime({
+      onInboxChanged() {
+        clearTimeout(timer);
+        timer = setTimeout(() => {
+          void client.invalidateQueries({ queryKey: portalKeys.inboxAll });
+          void client.invalidateQueries({ queryKey: portalKeys.filters });
+        }, PORTAL_REALTIME_DEBOUNCE_MS);
+      },
+      onRevoked() {
+        void client.invalidateQueries({ queryKey: portalKeys.me });
+      }
+    });
+    return () => {
+      clearTimeout(timer);
+      stop();
+    };
+  }, [enabled, realtime, client]);
 }

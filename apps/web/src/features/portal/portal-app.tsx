@@ -7,18 +7,23 @@ import { PortalEmailPage } from "./portal-email-page";
 import { PortalInboxPage } from "./portal-inbox-page";
 import { PortalLayout } from "./portal-layout";
 import { PortalLoginPage } from "./portal-login-page";
+import { createPortalRealtime, type PortalRealtime } from "./portal-realtime";
 
 /**
  * Customer portal (EmailBot V2), mounted at /portal/* outside the panel's
  * Supabase session and organization providers:
  *   /portal/login               Access ID sign-in
- *   /portal                     inbox
+ *   /portal                     inbox (refreshed in realtime, phase 7)
  *   /portal/email/:deliveryId   email detail
+ *
+ * `api` / `realtime` are injected in tests; an injected api without a
+ * realtime connector runs without realtime (no socket to the real API).
  */
-export function PortalApp({ api }: { api?: PortalApi }) {
+export function PortalApp({ api, realtime }: { api?: PortalApi; realtime?: PortalRealtime | null }) {
   const [client] = useState(() => api ?? createPortalApi({ baseUrl: env.apiUrl }));
+  const [connector] = useState<PortalRealtime | null>(() => (realtime !== undefined ? realtime : api ? null : createPortalRealtime(env.apiUrl)));
   return (
-    <PortalProvider api={client}>
+    <PortalProvider api={client} realtime={connector}>
       <Routes>
         <Route path="login" element={<PortalLoginPage />} />
         <Route element={<PortalLayout />}>

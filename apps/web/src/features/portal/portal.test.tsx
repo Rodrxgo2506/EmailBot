@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "@/lib/api-client";
 import type { PortalApi } from "./portal-api";
 import { PortalApp } from "./portal-app";
+import type { PortalRealtime, PortalRealtimeHandlers } from "./portal-realtime";
 
 /*
  * Customer portal UI (EmailBot V2 phase 5.5). The API is faked: database and
@@ -69,15 +70,26 @@ function fakeApi(overrides: Partial<Record<keyof PortalApi, unknown>> = {}) {
   return api as unknown as PortalApi & Record<keyof PortalApi, ReturnType<typeof vi.fn>>;
 }
 
-function renderPortal(path: string, api = fakeApi()) {
+function renderPortal(path: string, api = fakeApi(), realtime?: PortalRealtime | null) {
   const view = render(
     <MemoryRouter initialEntries={[path]}>
       <Routes>
-        <Route path="/portal/*" element={<PortalApp api={api} />} />
+        <Route path="/portal/*" element={<PortalApp api={api} realtime={realtime} />} />
       </Routes>
     </MemoryRouter>
   );
   return { ...view, api };
+}
+
+/** Records the realtime connections the portal opens and lets the test fire their signals. */
+function fakeRealtime() {
+  const connections: Array<{ handlers: PortalRealtimeHandlers; stop: ReturnType<typeof vi.fn> }> = [];
+  const connect = vi.fn((handlers: PortalRealtimeHandlers) => {
+    const stop = vi.fn();
+    connections.push({ handlers, stop });
+    return stop;
+  });
+  return { connect: connect as unknown as PortalRealtime, calls: connect, connections };
 }
 
 const typeAccessId = (value: string) => fireEvent.change(screen.getByLabelText("Access ID"), { target: { value } });
@@ -399,5 +411,53 @@ describe("portal manual sync (Actualizar)", () => {
     await screen.findByText("No hay correos nuevos");
     expect(setItem).not.toHaveBeenCalled();
     expect(document.cookie).toBe("");
+  });
+});
+
+describe("portal realtime (EmailBot V2 phase 7)", () => {
+  it("connects once the session is confirmed and an inbox signal refetches the inbox (debounced)", async () => {
+    const realtime = fakeRealtime();
+    const { api } = renderPortal("/portal", fakeApi(), realtime.connect);
+    await screen.findByText("Tu código de acceso");
+    await waitFor(() => expect(realtime.calls).toHaveBeenCalledTimes(1));
+    const before = api.inbox.mock.calls.length;
+    api.inbox.mockResolvedValue(page([item({ deliveryId: "dddddddd-dddd-4ddd-8ddd-ddddddddddd2", subject: "Nuevo código" }), item()]));
+
+    act(() => {
+      // Several deliveries of one sync arrive together: one refetch.
+      realtime.connections[0]?.handlers.onInboxChanged();
+      realtime.connections[0]?.handlers.onInboxChanged();
+    });
+    expect(await screen.findByText("Nuevo código")).toBeInTheDocument();
+    expect(api.inbox.mock.calls.length).toBe(before + 1);
+  });
+
+  it("does not connect on the login page (no session)", async () => {
+    const realtime = fakeRealtime();
+    renderPortal("/portal/login", fakeApi(), realtime.connect);
+    await screen.findByLabelText("Access ID");
+    expect(realtime.calls).not.toHaveBeenCalled();
+  });
+
+  it("a revoked session sends the customer back to the login page", async () => {
+    const realtime = fakeRealtime();
+    const api = fakeApi();
+    renderPortal("/portal", api, realtime.connect);
+    await screen.findByText("Tu código de acceso");
+    await waitFor(() => expect(realtime.calls).toHaveBeenCalledTimes(1));
+    api.me.mockRejectedValue(new ApiError(401, "UNAUTHORIZED", "La sesión no es válida."));
+    act(() => realtime.connections[0]?.handlers.onRevoked());
+    expect(await screen.findByRole("status")).toHaveTextContent("Tu sesión terminó. Vuelve a ingresar con tu Access ID.");
+    expect(realtime.connections[0]?.stop).toHaveBeenCalled();
+  });
+
+  it("logging out closes the connection", async () => {
+    const realtime = fakeRealtime();
+    renderPortal("/portal", fakeApi(), realtime.connect);
+    await screen.findByText("Tu código de acceso");
+    await waitFor(() => expect(realtime.calls).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole("button", { name: /cerrar sesión/i }));
+    await screen.findByLabelText("Access ID");
+    expect(realtime.connections[0]?.stop).toHaveBeenCalled();
   });
 });

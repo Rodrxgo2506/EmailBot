@@ -3,6 +3,7 @@ import { createContext, useContext, useRef, useState, type ReactNode } from "rea
 import { useLocation, useNavigate } from "react-router-dom";
 import { ApiError } from "@/lib/api-client";
 import type { PortalApi } from "./portal-api";
+import type { PortalRealtime } from "./portal-realtime";
 
 /*
  * Portal state, kept apart from the admin panel:
@@ -17,11 +18,17 @@ import type { PortalApi } from "./portal-api";
 export const PORTAL_LOGIN_PATH = "/portal/login";
 
 const PortalApiContext = createContext<PortalApi | null>(null);
+const PortalRealtimeContext = createContext<PortalRealtime | null>(null);
 
 export function usePortalApi(): PortalApi {
   const api = useContext(PortalApiContext);
   if (!api) throw new Error("usePortalApi must be used inside PortalProvider");
   return api;
+}
+
+/** Realtime connector (null = no realtime: the inbox refreshes with "Actualizar" and navigation). */
+export function usePortalRealtime(): PortalRealtime | null {
+  return useContext(PortalRealtimeContext);
 }
 
 /** Mutations with this meta never trigger the session-expired redirect (portal login). */
@@ -51,7 +58,7 @@ export function createPortalQueryClient(onUnauthorized: () => void): QueryClient
   });
 }
 
-export function PortalProvider({ api, children }: { api: PortalApi; children: ReactNode }) {
+export function PortalProvider({ api, realtime = null, children }: { api: PortalApi; realtime?: PortalRealtime | null; children: ReactNode }) {
   const navigate = useNavigate();
   const location = useLocation();
   const pathRef = useRef(location.pathname);
@@ -69,7 +76,9 @@ export function PortalProvider({ api, children }: { api: PortalApi; children: Re
 
   return (
     <QueryClientProvider client={client}>
-      <PortalApiContext.Provider value={api}>{children}</PortalApiContext.Provider>
+      <PortalApiContext.Provider value={api}>
+        <PortalRealtimeContext.Provider value={realtime}>{children}</PortalRealtimeContext.Provider>
+      </PortalApiContext.Provider>
     </QueryClientProvider>
   );
 }

@@ -4,7 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/feedback";
 import { ApiError } from "@/lib/api-client";
 import { PORTAL_LOGIN_PATH } from "./portal-context";
-import { usePortalLogout, usePortalMe } from "./portal-queries";
+import { usePortalInboxRealtime, usePortalLogout, usePortalMe } from "./portal-queries";
 
 /**
  * Customer portal shell: header with the customer's name and logout. Its
@@ -15,6 +15,7 @@ export function PortalLayout() {
   const navigate = useNavigate();
   const me = usePortalMe();
   const logout = usePortalLogout();
+  usePortalInboxRealtime(me.data !== undefined);
 
   const signOut = async () => {
     try {
