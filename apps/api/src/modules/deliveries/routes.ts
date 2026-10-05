@@ -1,5 +1,7 @@
 import { emailDeliveryParamsSchema, idParamsSchema, manualDeliveryCreateSchema } from "@emailbot/validation";
+import { serializeError } from "@emailbot/shared";
 import type { FastifyInstance, FastifyRequest } from "fastify";
+import type { AppDeps } from "../../deps.js";
 import { notFound } from "../../lib/errors.js";
 import { RATE_LIMITS } from "../../lib/rate-limits.js";
 import { parseWith } from "../../lib/validation.js";
@@ -27,7 +29,20 @@ async function requireEmail(request: FastifyRequest, emailId: string) {
   return email;
 }
 
-export async function deliveryRoutes(app: FastifyInstance) {
+/** Best effort: the customer's open portal refreshes its inbox (the manual "Actualizar" still works without it). */
+function signalPortal(deps: AppDeps, request: FastifyRequest, organizationId: string, customerId: string): void {
+  void deps.realtimePublisher
+    ?.publish({ type: "portal.deliveries", organizationId, customerIds: [customerId] })
+    .catch((error: unknown) => request.log.warn({ err: serializeError(error) }, "portal realtime signal failed"));
+}
+
+export function deliveryRoutes(deps: AppDeps) {
+  return async (app: FastifyInstance) => {
+    await registerDeliveryRoutes(app, deps);
+  };
+}
+
+async function registerDeliveryRoutes(app: FastifyInstance, deps: AppDeps) {
   const read = { preHandler: [app.authenticate, app.requireOrganization, requirePermission("emails:read")] };
   const manage = {
     preHandler: [app.authenticate, app.requireOrganization, requirePermission("deliveries:manage")],
@@ -64,6 +79,7 @@ export async function deliveryRoutes(app: FastifyInstance) {
           reactivated: result.outcome === "REACTIVATED"
         }
       });
+      signalPortal(deps, request, organizationId, customerId);
     }
     const delivery = await auth.repos.emailDeliveries.get(organizationId, id, result.deliveryId);
     return reply.status(result.outcome === "EXISTING" ? 200 : 201).send({ delivery, outcome: result.outcome });
@@ -84,6 +100,7 @@ export async function deliveryRoutes(app: FastifyInstance) {
         entityId: deliveryId,
         metadata: { event: "delivery.removed.manual", emailId: id, deliveryId, customerId: result.customerId, botId: result.botId }
       });
+      signalPortal(deps, request, organizationId, result.customerId);
     }
     return { removed: result.removed };
   });

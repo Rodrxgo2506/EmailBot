@@ -226,9 +226,10 @@ async function completeProcessing(
   notify: boolean
 ): Promise<void> {
   // A failure throws: the job is retried and the email stays incomplete (resumed later).
-  await routeEmail(emailId, { organizationId: account.organizationId, email, ...routing }, deps);
+  const routed = await routeEmail(emailId, { organizationId: account.organizationId, email, ...routing }, deps);
   const pending = await completeAttachments(emailId, job.providerMessageId, email, account, settings, deps, context);
-  await announce(emailId, email, result, account, settings, deps, notify);
+  const customerIds = routed.status === "DELIVER" ? routed.deliveries.map((delivery) => delivery.customerId) : [];
+  await announce(emailId, email, result, account, settings, deps, notify, customerIds);
 
   if (pending > 0) {
     const error = new AttachmentsPendingError(pending);
@@ -244,9 +245,10 @@ async function completeProcessing(
 }
 
 /**
- * Realtime event (clients de-duplicate by email id) + notifications
- * (de-duplicated by job id). A failure fails the job (retryable) so the
- * resumed run publishes them; the email is not PROCESSED until then.
+ * Realtime events (clients de-duplicate by email id; a repeated portal
+ * signal only triggers one more refetch) + notifications (de-duplicated by
+ * job id). A failure fails the job (retryable) so the resumed run publishes
+ * them; the email is not PROCESSED until then.
  */
 async function announce(
   emailId: string,
@@ -255,7 +257,8 @@ async function announce(
   account: WorkerAccount,
   settings: OrganizationProcessingSettings,
   deps: ProcessEmailDeps,
-  notify: boolean
+  notify: boolean,
+  customerIds: string[]
 ): Promise<void> {
   await deps.realtime.publish({
     type: "email.processed",
@@ -268,6 +271,10 @@ async function announce(
     subject: email.subject.slice(0, 200),
     important: result.markImportant
   });
+  // Portal: the customers who received it refresh their inbox (ids only; the API relays a bare signal).
+  if (customerIds.length > 0) {
+    await deps.realtime.publish({ type: "portal.deliveries", organizationId: account.organizationId, customerIds: [...new Set(customerIds)] });
+  }
 
   if (!notify || !settings.notificationsEnabled || !result.matched) return;
   for (const notification of result.notifications) {

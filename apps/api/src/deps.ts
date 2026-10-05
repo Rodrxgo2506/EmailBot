@@ -1,4 +1,5 @@
 import type { EmailEventJob, SecretBox, SyncReason } from "@emailbot/shared";
+import type { RealtimeEvent } from "@emailbot/types";
 import type { ApiConfig } from "./config/env.js";
 import type { RateLimitRedis } from "./infrastructure/rate-limit-store.js";
 import type { GoogleOidcVerifier } from "./lib/google-oidc.js";
@@ -60,4 +61,6 @@ export interface AppDeps {
   rateLimitRedis?: RateLimitRedis;
   /** Pub/Sub push OIDC verification (default: Google's JWKS through deps.fetch). */
   pubsubVerifier?: GoogleOidcVerifier;
+  /** Publishes realtime events to every API instance through Redis (portal signals of manual deliveries). */
+  realtimePublisher?: { publish(event: RealtimeEvent): Promise<void> };
 }

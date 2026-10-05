@@ -904,6 +904,25 @@ describe("EmailBot V2 phase 3: Email -> Bot -> Customer routing", () => {
     expect(all.emails.rows).toHaveLength(1); // one email, N deliveries
   });
 
+  it("EmailBot V2 phase 7: delivered customers get a portal signal after email.processed (ids only)", async () => {
+    const all = routedSetup({ resolution: { source: "RECIPIENT", onMultipleMatches: "DELIVER_ALL" } });
+    all.routing.addCustomer("juan", { normalizedValue: "me@gmail.com" }, { bots: [NETFLIX] });
+    all.routing.addCustomer("ana", { normalizedValue: "me@gmail.com" }, { bots: [NETFLIX] });
+    await processEmail(all.job, all.deps);
+    expect(all.realtime.events.map((event) => event.type)).toEqual(["email.processed", "portal.deliveries"]);
+    const portal = all.realtime.events[1] as { organizationId: string; customerIds: string[] };
+    expect(portal).toEqual({ type: "portal.deliveries", organizationId: ORG, customerIds: expect.arrayContaining(["juan", "ana"]) });
+    expect(portal.customerIds).toHaveLength(2);
+    expect(JSON.stringify(portal)).not.toMatch(/subject|body|me@gmail/);
+  });
+
+  it("EmailBot V2 phase 7: no portal signal when nobody received the email", async () => {
+    const { deps, job, routing, realtime } = routedSetup();
+    routing.addCustomer("ana", { normalizedValue: "ana@gmail.com" }, { bots: [NETFLIX] });
+    await processEmail(job, deps);
+    expect(realtime.events.map((event) => event.type)).toEqual(["email.processed"]);
+  });
+
   it("extractors feed the resolver (EXTRACTED_FIELD)", async () => {
     const { deps, job, routing } = routedSetup({
       resolution: { source: "EXTRACTED_FIELD", field: "verification_code", identifierType: "CUSTOM", onMultipleMatches: "LEAVE_UNASSIGNED" }

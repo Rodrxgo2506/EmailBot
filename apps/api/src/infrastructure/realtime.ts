@@ -13,6 +13,7 @@ import type { FastifyInstance } from "fastify";
 import type { Redis } from "ioredis";
 import { Server } from "socket.io";
 import type { AppDeps } from "../deps.js";
+import { attachPortalNamespace, relayPortalEvent } from "./portal-realtime.js";
 
 /*
  * Real-time delivery: worker --(Redis pub/sub)--> API --(Socket.IO room per
@@ -144,7 +145,7 @@ export function attachRealtime(
   app: FastifyInstance,
   deps: AppDeps,
   subscriber: Redis,
-  options: { revalidateMs?: number } = {}
+  options: { revalidateMs?: number; portalRevalidateMs?: number } = {}
 ): Server {
   const io = new Server(app.server, {
     path: "/realtime",
@@ -190,9 +191,17 @@ export function attachRealtime(
     app.log.error({ err: serializeError(error) }, "failed to subscribe to realtime channel");
   });
 
+  // EmailBot V2 phase 7: customer portal namespace (session cookie, one room per customer).
+  const portal = attachPortalNamespace(io, app, deps, { revalidateMs: options.portalRevalidateMs });
+
   subscriber.on("message", (_channel, message) => {
     try {
       const event = JSON.parse(message) as RealtimeEvent;
+      // Portal signals never reach the organization room (they carry customer ids).
+      if (event.type === "portal.deliveries") {
+        relayPortalEvent(portal, event);
+        return;
+      }
       if (!idSchema.safeParse(event.organizationId).success) return;
       io.to(organizationRoom(event.organizationId)).emit(event.type, event);
     } catch {

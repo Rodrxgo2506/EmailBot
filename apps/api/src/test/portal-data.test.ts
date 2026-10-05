@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { EmailDelivery, PortalEmailDetail, PortalInboxItem } from "@emailbot/types";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { generateSessionToken, hashSessionToken } from "../lib/customer-access.js";
 import { decodeCursor, encodeCursor } from "../modules/portal/data-routes.js";
 import { PORTAL_SESSION_COOKIE } from "../modules/portal/session.js";
@@ -319,6 +319,31 @@ describe("manual deliveries (admin API)", () => {
     repos.emailDeliveries.removeManual.mockResolvedValueOnce({ removed: false, emailId: EMAIL, customerId: CUSTOMER, botId: BOT });
     await app.inject({ method: "DELETE", url: `/api/emails/${EMAIL}/deliveries/${DELIVERY}`, headers: authHeaders(operator, ORG_A) });
     expect(privileged.insertAuditLog).toHaveBeenCalledTimes(1);
+  });
+
+  it("EmailBot V2 phase 7: a manual add or removal signals the customer's portal (ids only, best effort)", async () => {
+    const { app, operator, repos, deps } = await admin();
+    const publish = vi.fn(async (_event: unknown) => undefined);
+    deps.realtimePublisher = { publish };
+    const headers = authHeaders(operator, ORG_A);
+    await app.inject({ method: "POST", url: `/api/emails/${EMAIL}/deliveries`, headers, payload: { customerId: CUSTOMER } });
+    await app.inject({ method: "DELETE", url: `/api/emails/${EMAIL}/deliveries/${DELIVERY}`, headers });
+    expect(publish.mock.calls).toEqual([
+      [{ type: "portal.deliveries", organizationId: ORG_A, customerIds: [CUSTOMER] }],
+      [{ type: "portal.deliveries", organizationId: ORG_A, customerIds: [CUSTOMER] }]
+    ]);
+
+    // Nothing changed for the customer: no signal.
+    repos.emailDeliveries.addManual.mockResolvedValueOnce({ deliveryId: DELIVERY, outcome: "EXISTING", botId: BOT, resolution: "AUTOMATIC" });
+    await app.inject({ method: "POST", url: `/api/emails/${EMAIL}/deliveries`, headers, payload: { customerId: CUSTOMER } });
+    repos.emailDeliveries.removeManual.mockResolvedValueOnce({ removed: false, emailId: EMAIL, customerId: CUSTOMER, botId: BOT });
+    await app.inject({ method: "DELETE", url: `/api/emails/${EMAIL}/deliveries/${DELIVERY}`, headers });
+    expect(publish).toHaveBeenCalledTimes(2);
+
+    // A Redis failure never fails the operation.
+    publish.mockRejectedValueOnce(new Error("redis down"));
+    const response = await app.inject({ method: "POST", url: `/api/emails/${EMAIL}/deliveries`, headers, payload: { customerId: CUSTOMER } });
+    expect(response.statusCode).toBe(201);
   });
 
   it("VIEWER reads the deliveries of an email but cannot add or remove", async () => {

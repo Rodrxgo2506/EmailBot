@@ -162,7 +162,7 @@ export async function buildApp(deps: AppDeps, options: BuildAppOptions = {}) {
       await api.register(portalRoutes(deps, portalLoginThrottle));
       await api.register(portalDataRoutes(deps));
       await api.register(portalSyncRoutes(deps, portalSyncLimiter));
-      await api.register(deliveryRoutes);
+      await api.register(deliveryRoutes(deps));
       await api.register(ruleRoutes);
       await api.register(emailRoutes(deps));
       await api.register(auditRoutes);

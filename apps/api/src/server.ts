@@ -1,6 +1,7 @@
 import { resolve } from "node:path";
 import { config as loadDotenv } from "dotenv";
 import { encryptionKeyFingerprint, fetchWithTimeout, SecretBox, serializeError } from "@emailbot/shared";
+import { REALTIME_REDIS_CHANNEL } from "@emailbot/types";
 import { buildApp } from "./app.js";
 import { loadConfig } from "./config/env.js";
 import type { AppDeps } from "./deps.js";
@@ -44,6 +45,11 @@ const deps: AppDeps = {
   fetch: fetchWithTimeout(globalThis.fetch, config.providerHttpTimeoutMs),
   oauthNonces: createRedisNonceStore(producerConnection),
   rateLimitRedis: producerConnection,
+  realtimePublisher: {
+    async publish(event) {
+      await producerConnection.publish(REALTIME_REDIS_CHANNEL, JSON.stringify(event));
+    }
+  },
   readinessChecks: [
     {
       name: "redis",
