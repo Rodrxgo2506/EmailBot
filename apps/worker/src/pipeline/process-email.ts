@@ -4,21 +4,27 @@ import type { NormalizedAttachment, NormalizedEmail } from "@emailbot/types";
 import type { ProviderRegistry } from "../providers/registry.js";
 import { ProviderAuthError, type ProviderContext, type WorkerAccount } from "../providers/types.js";
 import { buildEmailRow } from "./email-row.js";
+import { routeEmail, type CustomerResolverInput } from "./resolve-customers.js";
 import type {
   AccountStore,
   AttachmentStorage,
+  AuditRecorder,
   EmailStore,
   JobProducer,
   Logger,
   OrganizationProcessingSettings,
   ExistingEmail,
   RealtimePublisher,
+  RoutingStore,
   StoredAttachment
 } from "./ports.js";
 
 export interface ProcessEmailDeps {
   accounts: AccountStore;
   emails: EmailStore;
+  /** EmailBot V2: customer resolution + email_deliveries. */
+  routing: RoutingStore;
+  audit: AuditRecorder;
   storage: AttachmentStorage;
   realtime: RealtimePublisher;
   producer: JobProducer;
@@ -65,7 +71,8 @@ export const NOTIFICATION_RESEND_WINDOW_MS = 23 * 60 * 60 * 1000;
  * Processes ONE provider message:
  *
  *   account checks -> already stored? -> load rules -> fetch + normalize ->
- *   rule engine -> (no match: discard) -> INSERT (RECEIVED) -> PROCESSING ->
+ *   rule engine (bot selection, extractors) -> (no match: discard) ->
+ *   INSERT (RECEIVED) -> PROCESSING -> customer resolution + deliveries ->
  *   attachment rows -> attachment contents -> realtime event ->
  *   notifications -> PROCESSED
  *
@@ -75,6 +82,9 @@ export const NOTIFICATION_RESEND_WINDOW_MS = 23 * 60 * 60 * 1000;
  * concurrent worker or the recovery sweep (handle-email-event) - resumes it.
  * Every step is idempotent:
  *   - email: unique (email_account_id, provider_message_id), ON CONFLICT DO NOTHING;
+ *   - deliveries: unique (email_id, customer_id), ON CONFLICT DO NOTHING; the
+ *     resolver uses the bot and extracted data STORED with the email, so a
+ *     resumed run resolves like the first one (emails.bot_id never changes);
  *   - attachment rows: unique (email_id, provider_attachment_id), ON CONFLICT DO NOTHING;
  *   - contents: deterministic Storage key, reused if it already exists, row
  *     marked stored only after the upload;
@@ -140,7 +150,13 @@ export async function processEmail(
   }
 
   await deps.emails.updateProcessingState(inserted.id, { status: "PROCESSING" });
-  await completeProcessing(inserted.id, job, email, result, account, settings, deps, context, true);
+  const routing: RoutingState = {
+    botId: result.botId,
+    botSelection: result.botSelection === "AMBIGUOUS" ? "AMBIGUOUS" : null,
+    extracted: result.extracted,
+    botCandidateIds: result.botCandidateIds
+  };
+  await completeProcessing(inserted.id, job, email, result, routing, account, settings, deps, context, true);
 
   log.info(
     { emailId: inserted.id, matchedRules: result.matchedRules.length, categoryId: result.categoryId },
@@ -183,13 +199,18 @@ async function continueExisting(
   const notify = Date.now() - startedAt < NOTIFICATION_RESEND_WINDOW_MS;
   if (!notify) deps.logger.warn({ emailId: existing.id }, "resumed too late to notify again safely; notifications skipped");
 
+  // Routing uses what was stored with the email, not the re-evaluation (rules may have changed).
+  const routing: RoutingState = { botId: existing.botId, botSelection: existing.botSelection, extracted: existing.extractedData };
   const before = (await deps.emails.listAttachments(existing.id)).length;
-  await completeProcessing(existing.id, job, email, result, account, settings, deps, context, notify);
+  await completeProcessing(existing.id, job, email, result, routing, account, settings, deps, context, notify);
   const insertedAttachments = (await deps.emails.listAttachments(existing.id)).length - before;
 
   deps.logger.info({ emailId: existing.id, insertedAttachments }, "email processing resumed");
   return { status: "resumed", emailId: existing.id, insertedAttachments };
 }
+
+/** Routing input as stored in the email row (bot_id, provider_metadata.botSelection, extracted_data). */
+type RoutingState = Pick<CustomerResolverInput, "botId" | "botSelection" | "extracted"> & { botCandidateIds?: string[] };
 
 /** Every step after the email row exists; marks the email PROCESSED only when all succeeded. */
 async function completeProcessing(
@@ -197,12 +218,15 @@ async function completeProcessing(
   job: EmailProcessingJob,
   email: NormalizedEmail,
   result: RuleEvaluationResult,
+  routing: RoutingState,
   account: WorkerAccount,
   settings: OrganizationProcessingSettings,
   deps: ProcessEmailDeps,
   context: ProviderContext,
   notify: boolean
 ): Promise<void> {
+  // A failure throws: the job is retried and the email stays incomplete (resumed later).
+  await routeEmail(emailId, { organizationId: account.organizationId, email, ...routing }, deps);
   const pending = await completeAttachments(emailId, job.providerMessageId, email, account, settings, deps, context);
   await announce(emailId, email, result, account, settings, deps, notify);
 

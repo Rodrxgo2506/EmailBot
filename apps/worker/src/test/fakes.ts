@@ -1,17 +1,21 @@
 import type { EmailRuleRow } from "@emailbot/rules-engine";
 import type { EmailProcessingJob, NotificationJob } from "@emailbot/shared";
-import type { NormalizedEmail, RealtimeEvent } from "@emailbot/types";
+import type { CustomerIdentifierType, CustomerStatus, NormalizedEmail, RealtimeEvent } from "@emailbot/types";
 import { vi } from "vitest";
 import type {
   AccountStore,
   AttachmentInsertRow,
+  DeliveryInsertRow,
   EmailInsertRow,
   EmailStore,
   Logger,
   ExistingEmail,
+  IdentifierCandidate,
   IncompleteEmail,
   OrganizationProcessingSettings,
   ProcessingStateUpdate,
+  RoutingBot,
+  RoutingStore,
   StoredAttachment
 } from "../pipeline/ports.js";
 import type { ProviderRegistry } from "../providers/registry.js";
@@ -116,7 +120,10 @@ export class MemoryEmailStore implements EmailStore {
       id: `email-${index + 1}`,
       processingStatus: row.processing_status as ExistingEmail["processingStatus"],
       processingAttempts: Number(row.processing_attempts ?? 0),
-      processingStartedAt: (row.processing_started_at as string | null) ?? null
+      processingStartedAt: (row.processing_started_at as string | null) ?? null,
+      botId: (row.bot_id as string | null | undefined) ?? null,
+      botSelection: (row.provider_metadata as { botSelection?: string } | undefined)?.botSelection === "AMBIGUOUS" ? "AMBIGUOUS" : null,
+      extractedData: (row.extracted_data as Record<string, string> | undefined) ?? {}
     };
   });
 
@@ -210,6 +217,124 @@ export class MemoryEmailStore implements EmailStore {
       attachment.storage_uploaded = true;
     }
   });
+}
+
+export interface FakeIdentifier {
+  id: string;
+  organizationId: string;
+  customerId: string;
+  type: CustomerIdentifierType;
+  normalizedValue: string;
+  botId: string | null;
+  active: boolean;
+}
+
+/**
+ * In-memory RoutingStore mirroring the SQL of createRoutingStore and the
+ * database guarantees of email_deliveries: unique (email_id, customer_id),
+ * delivery bot = email bot and same organization (composite FKs), and the
+ * eligibility trigger (bot ACTIVE, customer ACTIVE, active assignment).
+ */
+export class MemoryRoutingStore implements RoutingStore {
+  bots = new Map<string, RoutingBot>();
+  customers = new Map<string, { organizationId: string; status: CustomerStatus }>();
+  identifiers: FakeIdentifier[] = [];
+  assignments: Array<{ organizationId: string; botId: string; customerId: string; active: boolean }> = [];
+  deliveries: DeliveryInsertRow[] = [];
+
+  constructor(private readonly emails: MemoryEmailStore) {}
+
+  addBot(id: string, customerResolution: unknown, overrides: Partial<RoutingBot> = {}): this {
+    this.bots.set(id, { id, organizationId: ORG, status: "ACTIVE", customerResolution, ...overrides });
+    return this;
+  }
+
+  /** Customer (ACTIVE) with one identifier and an active assignment to each bot given. */
+  addCustomer(
+    id: string,
+    identifier: Partial<FakeIdentifier> & { normalizedValue: string },
+    options: { organizationId?: string; status?: CustomerStatus; bots?: string[] } = {}
+  ): this {
+    const organizationId = options.organizationId ?? ORG;
+    this.customers.set(id, { organizationId, status: options.status ?? "ACTIVE" });
+    this.identifiers.push({
+      id: `identifier-${id}-${this.identifiers.length + 1}`,
+      organizationId,
+      customerId: id,
+      type: "EMAIL",
+      botId: null,
+      active: true,
+      ...identifier
+    });
+    for (const botId of options.bots ?? []) this.assignments.push({ organizationId, botId, customerId: id, active: true });
+    return this;
+  }
+
+  loadBot = vi.fn(async (organizationId: string, botId: string): Promise<RoutingBot | null> => {
+    const bot = this.bots.get(botId);
+    return bot && bot.organizationId === organizationId ? bot : null;
+  });
+
+  findCandidates = vi.fn(
+    async (query: { organizationId: string; botId: string; type: CustomerIdentifierType; values: string[] }): Promise<IdentifierCandidate[]> =>
+      this.identifiers
+        .filter(
+          (identifier) =>
+            identifier.organizationId === query.organizationId &&
+            identifier.type === query.type &&
+            identifier.active &&
+            (identifier.botId === null || identifier.botId === query.botId) &&
+            query.values.includes(identifier.normalizedValue) &&
+            this.customers.has(identifier.customerId)
+        )
+        .map((identifier) => ({
+          identifierId: identifier.id,
+          organizationId: identifier.organizationId,
+          customerId: identifier.customerId,
+          type: identifier.type,
+          normalizedValue: identifier.normalizedValue,
+          botId: identifier.botId,
+          active: identifier.active,
+          customerStatus: this.customers.get(identifier.customerId)?.status ?? "SUSPENDED",
+          assigned: this.isAssigned(query.organizationId, query.botId, identifier.customerId)
+        }))
+  );
+
+  insertDeliveries = vi.fn(async (rows: DeliveryInsertRow[]): Promise<string[]> => {
+    // One statement: every row is checked before anything is written.
+    for (const row of rows) {
+      const email = this.emails.row(row.email_id);
+      if (email.organization_id !== row.organization_id || email.bot_id !== row.bot_id) throw new Error("email_deliveries_email_fkey");
+      const customer = this.customers.get(row.customer_id);
+      if (!customer || customer.organizationId !== row.organization_id) throw new Error("email_deliveries_customer_fkey");
+      if (this.bots.get(row.bot_id)?.status !== "ACTIVE") throw new Error("Bot is not active");
+      if (customer.status !== "ACTIVE") throw new Error("Customer is not active");
+      if (!this.isAssigned(row.organization_id, row.bot_id, row.customer_id)) throw new Error("Customer is not assigned to the bot");
+    }
+    const inserted: string[] = [];
+    for (const row of rows) {
+      // ON CONFLICT (email_id, customer_id) DO NOTHING
+      if (this.deliveries.some((existing) => existing.email_id === row.email_id && existing.customer_id === row.customer_id)) continue;
+      this.deliveries.push(row);
+      inserted.push(row.customer_id);
+    }
+    return inserted;
+  });
+
+  private isAssigned(organizationId: string, botId: string, customerId: string): boolean {
+    return this.assignments.some(
+      (assignment) =>
+        assignment.organizationId === organizationId && assignment.botId === botId && assignment.customerId === customerId && assignment.active
+    );
+  }
+}
+
+export function makeAudit() {
+  const entries: Array<{ organizationId: string; emailId: string; event: string; description: string; metadata: Record<string, unknown> }> = [];
+  return {
+    entries,
+    recordEmailEvent: vi.fn(async (entry: (typeof entries)[number]) => void entries.push(entry))
+  };
 }
 
 export function makeAccountStore(accounts: WorkerAccount[]): AccountStore & Record<string, ReturnType<typeof vi.fn>> {

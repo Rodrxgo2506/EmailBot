@@ -23,8 +23,10 @@ import { createWorkerQueues } from "./infrastructure/queues.js";
 import {
   createAccountStore,
   createAttachmentStorage,
+  createAuditRecorder,
   createEmailStore,
-  createRealtimePublisher
+  createRealtimePublisher,
+  createRoutingStore
 } from "./infrastructure/supabase-stores.js";
 import { handleAccountFailure, NonRetryableError } from "./pipeline/failures.js";
 import { handleEmailEvent, type HandleEventDeps } from "./pipeline/handle-email-event.js";
@@ -107,6 +109,8 @@ const createContext = (account: WorkerAccount) =>
 const processDeps: Omit<ProcessEmailDeps, "logger"> = {
   accounts,
   emails,
+  routing: createRoutingStore(supabase),
+  audit: createAuditRecorder(supabase),
   storage: createAttachmentStorage(supabase),
   realtime,
   producer: queues.producer,

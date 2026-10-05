@@ -5,9 +5,12 @@ import type { Redis } from "ioredis";
 import type {
   AccountStore,
   AttachmentStorage,
+  AuditRecorder,
   EmailStore,
+  IdentifierCandidate,
   OrganizationProcessingSettings,
-  RealtimePublisher
+  RealtimePublisher,
+  RoutingStore
 } from "../pipeline/ports.js";
 import type { WorkerAccount } from "../providers/types.js";
 
@@ -145,7 +148,7 @@ export function createEmailStore(db: SupabaseClient): EmailStore {
       const row = check(
         await db
           .from("emails")
-          .select("id,processing_status,processing_attempts,processing_started_at")
+          .select("id,processing_status,processing_attempts,processing_started_at,bot_id,bot_selection:provider_metadata->>botSelection,extracted_data")
           .eq("email_account_id", emailAccountId)
           .eq("provider_message_id", providerMessageId)
           .maybeSingle(),
@@ -156,7 +159,10 @@ export function createEmailStore(db: SupabaseClient): EmailStore {
             id: row.id,
             processingStatus: row.processing_status,
             processingAttempts: row.processing_attempts,
-            processingStartedAt: row.processing_started_at
+            processingStartedAt: row.processing_started_at,
+            botId: row.bot_id ?? null,
+            botSelection: row.bot_selection === "AMBIGUOUS" ? "AMBIGUOUS" : null,
+            extractedData: toExtractedData(row.extracted_data)
           }
         : null;
     },
@@ -284,6 +290,127 @@ export function createEmailStore(db: SupabaseClient): EmailStore {
           .update({ storage_bucket: bucket, storage_path: path, storage_uploaded: true })
           .eq("id", attachmentId),
         "markAttachmentStored"
+      );
+    }
+  };
+}
+
+/** emails.extracted_data as string values only (written by the worker, read defensively). */
+function toExtractedData(value: unknown): Record<string, string> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return Object.fromEntries(Object.entries(value).filter((entry): entry is [string, string] => typeof entry[1] === "string"));
+}
+
+/** PostgREST in.(...) list with every value double-quoted and escaped (values come from emails). */
+export function quotedInList(values: string[]): string {
+  return `(${values.map((value) => `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`).join(",")})`;
+}
+
+const LOOKUP_CHUNK = 50;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/*
+ * CustomerResolver persistence (EmailBot V2 phase 3). Column grants only:
+ * bots.customer_resolution/status, customers(id, organization_id, status),
+ * customer_identifiers without the raw value, bot_customer_assignments, and
+ * INSERT on email_deliveries. Every query is scoped by organization_id.
+ */
+export function createRoutingStore(db: SupabaseClient): RoutingStore {
+  return {
+    async loadBot(organizationId, botId) {
+      const row = check(
+        await db
+          .from("bots")
+          .select("id,organization_id,status,customer_resolution")
+          .eq("organization_id", organizationId)
+          .eq("id", botId)
+          .maybeSingle(),
+        "loadBot"
+      ) as Row | null;
+      return row
+        ? { id: row.id, organizationId: row.organization_id, status: row.status, customerResolution: row.customer_resolution }
+        : null;
+    },
+
+    async findCandidates({ organizationId, botId, type, values }) {
+      if (values.length === 0) return [];
+      if (!UUID.test(botId)) throw new Error("findCandidates: invalid bot id");
+      const identifiers: Row[] = [];
+      for (let start = 0; start < values.length; start += LOOKUP_CHUNK) {
+        const rows = check(
+          await db
+            .from("customer_identifiers")
+            .select("id,organization_id,customer_id,type,normalized_value,bot_id,active,customer:customers!inner(status)")
+            .eq("organization_id", organizationId)
+            .eq("type", type)
+            .eq("active", true)
+            .or(`bot_id.is.null,bot_id.eq.${botId}`)
+            .filter("normalized_value", "in", quotedInList(values.slice(start, start + LOOKUP_CHUNK))),
+          "findCandidates"
+        ) as Row[];
+        identifiers.push(...rows);
+      }
+      if (identifiers.length === 0) return [];
+
+      const customerIds = [...new Set(identifiers.map((row) => row.customer_id as string))];
+      const assignments = check(
+        await db
+          .from("bot_customer_assignments")
+          .select("customer_id")
+          .eq("organization_id", organizationId)
+          .eq("bot_id", botId)
+          .eq("active", true)
+          .in("customer_id", customerIds),
+        "findCandidates.assignments"
+      ) as Row[];
+      const assigned = new Set(assignments.map((row) => row.customer_id as string));
+
+      return identifiers.map((row): IdentifierCandidate => {
+        const customer = Array.isArray(row.customer) ? row.customer[0] : row.customer;
+        return {
+          identifierId: row.id,
+          organizationId: row.organization_id,
+          customerId: row.customer_id,
+          type: row.type,
+          normalizedValue: row.normalized_value,
+          botId: row.bot_id ?? null,
+          active: row.active === true,
+          // Fail closed: a customer whose status cannot be read is not eligible.
+          customerStatus: customer?.status ?? "SUSPENDED",
+          assigned: assigned.has(row.customer_id)
+        };
+      });
+    },
+
+    async insertDeliveries(rows) {
+      if (rows.length === 0) return [];
+      const inserted = check(
+        await db
+          .from("email_deliveries")
+          .upsert(rows, { onConflict: "email_id,customer_id", ignoreDuplicates: true })
+          .select("customer_id"),
+        "insertDeliveries"
+      ) as Row[];
+      return inserted.map((row) => row.customer_id as string);
+    }
+  };
+}
+
+export function createAuditRecorder(db: SupabaseClient): AuditRecorder {
+  return {
+    async recordEmailEvent(entry) {
+      check(
+        await db.from("audit_logs").insert({
+          organization_id: entry.organizationId,
+          actor_type: "SYSTEM",
+          actor_user_id: null,
+          action: "PROCESS",
+          entity_type: "email",
+          entity_id: entry.emailId,
+          description: entry.description.slice(0, 2000),
+          metadata: { event: entry.event, ...entry.metadata }
+        }),
+        "recordEmailEvent"
       );
     }
   };

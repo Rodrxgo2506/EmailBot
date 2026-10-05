@@ -1,6 +1,13 @@
 import type { EmailProcessingJob, NotificationJob } from "@emailbot/shared";
 import type { EmailRuleRow } from "@emailbot/rules-engine";
-import type { EmailProcessingStatus, EmailProvider, RealtimeEvent } from "@emailbot/types";
+import type {
+  BotStatus,
+  CustomerIdentifierType,
+  CustomerStatus,
+  EmailProcessingStatus,
+  EmailProvider,
+  RealtimeEvent
+} from "@emailbot/types";
 import type { WorkerAccount } from "../providers/types.js";
 
 /* Infrastructure contracts used by the pipeline (Supabase/Redis in prod, fakes in tests). */
@@ -60,6 +67,11 @@ export interface ExistingEmail {
   processingStatus: EmailProcessingStatus;
   processingAttempts: number;
   processingStartedAt: string | null;
+  /** EmailBot V2 routing input stored with the email (customer resolution on resume). */
+  botId: string | null;
+  /** provider_metadata.botSelection: "AMBIGUOUS" when bots tied, otherwise null. */
+  botSelection: "AMBIGUOUS" | null;
+  extractedData: Record<string, string>;
 }
 
 /** Writes only the columns migration 9 lets the service role update. */
@@ -94,6 +106,52 @@ export interface EmailStore {
   insertAttachments(rows: AttachmentInsertRow[]): Promise<Array<{ id: string; providerAttachmentId: string | null }>>;
   listAttachments(emailId: string): Promise<StoredAttachment[]>;
   markAttachmentStored(attachmentId: string, bucket: string, path: string): Promise<void>;
+}
+
+/** Bot columns the CustomerResolver reads (column grants of migration worker_customer_resolution_access). */
+export interface RoutingBot {
+  id: string;
+  organizationId: string;
+  status: BotStatus;
+  /** Raw JSONB: re-validated with customerResolutionSchema before use. */
+  customerResolution: unknown;
+}
+
+/** A customer_identifiers row returned for a lookup, with its customer's status and assignment to the bot. */
+export interface IdentifierCandidate {
+  identifierId: string;
+  organizationId: string;
+  customerId: string;
+  type: CustomerIdentifierType;
+  normalizedValue: string;
+  /** Scope: null = every bot of the organization, otherwise only that bot. */
+  botId: string | null;
+  active: boolean;
+  customerStatus: CustomerStatus;
+  /** The customer has an ACTIVE assignment to the bot being resolved. */
+  assigned: boolean;
+}
+
+export interface DeliveryInsertRow {
+  organization_id: string;
+  email_id: string;
+  customer_id: string;
+  bot_id: string;
+  resolution: "AUTOMATIC";
+  identifier_id: string;
+}
+
+export interface RoutingStore {
+  loadBot(organizationId: string, botId: string): Promise<RoutingBot | null>;
+  /** Active identifiers of (type, normalized values) in the organization, scoped to the organization or to this bot. */
+  findCandidates(query: { organizationId: string; botId: string; type: CustomerIdentifierType; values: string[] }): Promise<IdentifierCandidate[]>;
+  /** INSERT ... ON CONFLICT (email_id, customer_id) DO NOTHING. Returns the customers delivered by THIS call. */
+  insertDeliveries(rows: DeliveryInsertRow[]): Promise<string[]>;
+}
+
+/** SYSTEM audit entries about an email. Metadata never carries identifier values, tokens or other personal data. */
+export interface AuditRecorder {
+  recordEmailEvent(entry: { organizationId: string; emailId: string; event: string; description: string; metadata: Record<string, unknown> }): Promise<void>;
 }
 
 export interface AttachmentStorage {

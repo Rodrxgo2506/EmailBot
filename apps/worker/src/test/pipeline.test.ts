@@ -9,12 +9,14 @@ import {
   makeAccount,
   makeAccountStore,
   makeAdapter,
+  makeAudit,
   makeEmail,
   makeProducer,
   makeRealtime,
   makeRegistry,
   makeRuleRow,
   MemoryEmailStore,
+  MemoryRoutingStore,
   ORG,
   OTHER_ORG,
   silentLogger
@@ -34,10 +36,14 @@ function setup(options: { account?: WorkerAccount; adapter?: ReturnType<typeof m
     exists: vi.fn(async (_bucket: string, path: string) => objects.has(path))
   };
   const accounts = makeAccountStore([account]);
+  const routing = new MemoryRoutingStore(emails);
+  const audit = makeAudit();
 
   const deps: ProcessEmailDeps = {
     accounts,
     emails,
+    routing,
+    audit,
     storage,
     realtime,
     producer,
@@ -49,7 +55,7 @@ function setup(options: { account?: WorkerAccount; adapter?: ReturnType<typeof m
     storageRetryDelayMs: 0
   };
   const job = { organizationId: ORG, emailAccountId: account.id, provider: "GMAIL" as const, providerMessageId: "msg-1" };
-  return { account, emails, adapter, producer, realtime, storage, accounts, deps, job };
+  return { account, emails, adapter, producer, realtime, storage, accounts, routing, audit, deps, job };
 }
 
 const PDF = { providerAttachmentId: "a1", filename: "factura.pdf", contentType: "application/pdf", size: 3, contentId: null, isInline: false };
@@ -832,5 +838,208 @@ describe("EmailBot V2 phase 1: bots and organization status", () => {
     await handleEmailEvent({ type: "POLL_ACCOUNTS" }, deps);
     expect(enqueueSync).toHaveBeenCalledTimes(1);
     expect(enqueueSync).toHaveBeenCalledWith(expect.objectContaining({ id: "ok" }));
+  });
+});
+
+describe("EmailBot V2 phase 3: Email -> Bot -> Customer routing", () => {
+  const NETFLIX = "bot-netflix";
+  const YAPE = "bot-yape";
+  const RECIPIENT = { source: "RECIPIENT", onMultipleMatches: "LEAVE_UNASSIGNED" };
+  const botRule = (id: string, botId: string, overrides: Parameters<typeof makeRuleRow>[0] = {}) =>
+    makeRuleRow({ id, bot_id: botId, bot: { status: "ACTIVE" }, ...overrides });
+
+  /** Bot NETFLIX resolving by recipient; makeEmail() is sent to me@gmail.com. */
+  function routedSetup(options: Parameters<typeof setup>[0] & { resolution?: unknown } = {}) {
+    const context = setup(options);
+    context.emails.rules = [botRule("netflix", NETFLIX)];
+    context.routing.addBot(NETFLIX, options.resolution ?? RECIPIENT).addBot(YAPE, RECIPIENT);
+    return context;
+  }
+
+  it("automatic delivery: one matching customer gets the email, then PROCESSED", async () => {
+    const { deps, job, emails, routing, audit } = routedSetup();
+    routing.addCustomer("juan", { normalizedValue: "me@gmail.com" }, { bots: [NETFLIX] });
+
+    expect((await processEmail(job, deps)).status).toBe("processed");
+    expect(routing.deliveries).toEqual([
+      { organization_id: ORG, email_id: "email-1", customer_id: "juan", bot_id: NETFLIX, resolution: "AUTOMATIC", identifier_id: "identifier-juan-1" }
+    ]);
+    expect(emails.rows[0]?.processing_status).toBe("PROCESSED");
+    expect(audit.entries).toEqual([]);
+  });
+
+  it("PROCESSED is written only after the deliveries", async () => {
+    const { deps, job, emails, routing } = routedSetup();
+    routing.addCustomer("juan", { normalizedValue: "me@gmail.com" }, { bots: [NETFLIX] });
+    await processEmail(job, deps);
+
+    const deliveredAt = routing.insertDeliveries.mock.invocationCallOrder[0] as number;
+    const processedCall = emails.updateProcessingState.mock.calls.findIndex(([, state]) => state.status === "PROCESSED");
+    expect(emails.updateProcessingState.mock.invocationCallOrder[processedCall]).toBeGreaterThan(deliveredAt);
+  });
+
+  it("unassigned: no matching customer -> stored and PROCESSED without deliveries, audited", async () => {
+    const { deps, job, emails, routing, audit } = routedSetup();
+    routing.addCustomer("ana", { normalizedValue: "ana@gmail.com" }, { bots: [NETFLIX] });
+
+    expect((await processEmail(job, deps)).status).toBe("processed");
+    expect(routing.deliveries).toEqual([]);
+    expect(emails.rows[0]).toMatchObject({ processing_status: "PROCESSED", bot_id: NETFLIX });
+    expect(audit.entries).toEqual([expect.objectContaining({ emailId: "email-1", event: "routing.unassigned", metadata: expect.objectContaining({ reason: "NO_MATCH" }) })]);
+  });
+
+  it("multiple matches: LEAVE_UNASSIGNED delivers to nobody; DELIVER_ALL to every customer", async () => {
+    const leave = routedSetup();
+    leave.routing.addCustomer("juan", { normalizedValue: "me@gmail.com" }, { bots: [NETFLIX] });
+    leave.routing.addCustomer("ana", { normalizedValue: "me@gmail.com" }, { bots: [NETFLIX] });
+    await processEmail(leave.job, leave.deps);
+    expect(leave.routing.deliveries).toEqual([]);
+    expect(leave.audit.entries).toEqual([expect.objectContaining({ event: "routing.multiple_matches" })]);
+
+    const all = routedSetup({ resolution: { source: "RECIPIENT", onMultipleMatches: "DELIVER_ALL" } });
+    all.routing.addCustomer("juan", { normalizedValue: "me@gmail.com" }, { bots: [NETFLIX] });
+    all.routing.addCustomer("ana", { normalizedValue: "me@gmail.com" }, { bots: [NETFLIX] });
+    await processEmail(all.job, all.deps);
+    expect(all.routing.deliveries.map((delivery) => delivery.customer_id)).toEqual(["ana", "juan"]);
+    expect(all.emails.rows).toHaveLength(1); // one email, N deliveries
+  });
+
+  it("extractors feed the resolver (EXTRACTED_FIELD)", async () => {
+    const { deps, job, routing } = routedSetup({
+      resolution: { source: "EXTRACTED_FIELD", field: "verification_code", identifierType: "CUSTOM", onMultipleMatches: "LEAVE_UNASSIGNED" }
+    });
+    routing.addCustomer("juan", { type: "CUSTOM", normalizedValue: "4821" }, { bots: [NETFLIX] });
+    await processEmail(job, deps);
+    expect(routing.deliveries.map((delivery) => delivery.customer_id)).toEqual(["juan"]);
+  });
+
+  it("duplicate processing never duplicates the email or its deliveries", async () => {
+    const { deps, job, emails, routing } = routedSetup();
+    routing.addCustomer("juan", { normalizedValue: "me@gmail.com" }, { bots: [NETFLIX] });
+    await processEmail(job, deps);
+
+    expect(await processEmail(job, deps)).toEqual({ status: "skipped", reason: "duplicate" });
+    expect(emails.rows).toHaveLength(1);
+    expect(routing.deliveries).toHaveLength(1);
+    expect(routing.insertDeliveries).toHaveBeenCalledTimes(1);
+  });
+
+  it("retry: a resolver failure leaves the email PROCESSING (not lost); the retry delivers and completes", async () => {
+    const { deps, job, emails, routing, audit, realtime } = routedSetup();
+    routing.addCustomer("juan", { normalizedValue: "me@gmail.com" }, { bots: [NETFLIX] });
+    routing.insertDeliveries.mockRejectedValueOnce(new Error("insertDeliveries failed: connection reset"));
+
+    await expect(processEmail(job, deps)).rejects.toThrow(/connection reset/);
+    expect(emails.rows[0]?.processing_status).toBe("PROCESSING");
+    expect(routing.deliveries).toEqual([]);
+    expect(realtime.events).toEqual([]); // nothing announced before routing succeeded
+    expect(audit.entries).toEqual([expect.objectContaining({ event: "routing.failed" })]);
+
+    expect(await processEmail(job, deps, { attempt: 2 })).toMatchObject({ status: "resumed", emailId: "email-1" });
+    expect(routing.deliveries).toHaveLength(1);
+    expect(emails.rows[0]?.processing_status).toBe("PROCESSED");
+  });
+
+  it("restart after the deliveries were written: the resumed run re-resolves idempotently and completes", async () => {
+    const { deps, job, emails, routing, storage } = routedSetup({ adapter: withPdfAdapter() });
+    routing.addCustomer("juan", { normalizedValue: "me@gmail.com" }, { bots: [NETFLIX] });
+    storage.upload.mockRejectedValue(new Error("storage down"));
+
+    await expect(processEmail(job, deps)).rejects.toBeInstanceOf(AttachmentsPendingError);
+    expect(routing.deliveries).toHaveLength(1);
+    expect(emails.rows[0]?.processing_status).toBe("PROCESSING");
+
+    storage.upload.mockImplementation(async (_bucket: string, path: string, content: Uint8Array) => void storage.objects.set(path, content));
+    expect((await processEmail(job, deps, { attempt: 2 })).status).toBe("resumed");
+    expect(routing.insertDeliveries).toHaveBeenCalledTimes(2);
+    expect(await routing.insertDeliveries.mock.results[1]?.value).toEqual([]); // ON CONFLICT DO NOTHING
+    expect(routing.deliveries).toHaveLength(1);
+    expect(emails.rows[0]?.processing_status).toBe("PROCESSED");
+  });
+
+  it("resume uses the bot and extracted data stored with the email, not a re-evaluation", async () => {
+    const { deps, job, emails, routing } = routedSetup();
+    routing.addCustomer("juan", { normalizedValue: "me@gmail.com" }, { bots: [NETFLIX, YAPE] });
+    routing.insertDeliveries.mockRejectedValueOnce(new Error("transient"));
+    await expect(processEmail(job, deps)).rejects.toThrow("transient");
+
+    // The rules now point to another bot: the stored email keeps NETFLIX.
+    emails.rules = [botRule("yape", YAPE)];
+    await processEmail(job, deps, { attempt: 2 });
+    expect(routing.deliveries).toEqual([expect.objectContaining({ bot_id: NETFLIX, customer_id: "juan" })]);
+  });
+
+  it("a suspended customer gets no new delivery", async () => {
+    const { deps, job, emails, routing, audit } = routedSetup();
+    routing.addCustomer("juan", { normalizedValue: "me@gmail.com" }, { bots: [NETFLIX], status: "SUSPENDED" });
+    await processEmail(job, deps);
+    expect(routing.deliveries).toEqual([]);
+    expect(emails.rows[0]?.processing_status).toBe("PROCESSED");
+    expect(audit.entries).toEqual([expect.objectContaining({ event: "routing.unassigned" })]);
+  });
+
+  it("a bot paused before resolution gets no new delivery (email kept)", async () => {
+    const { deps, job, emails, routing, audit } = routedSetup();
+    routing.addCustomer("juan", { normalizedValue: "me@gmail.com" }, { bots: [NETFLIX] });
+    routing.addBot(NETFLIX, RECIPIENT, { status: "PAUSED" });
+    await processEmail(job, deps);
+    expect(routing.deliveries).toEqual([]);
+    expect(routing.findCandidates).not.toHaveBeenCalled();
+    expect(emails.rows[0]?.processing_status).toBe("PROCESSED");
+    expect(audit.entries).toEqual([expect.objectContaining({ metadata: expect.objectContaining({ reason: "BOT_PAUSED" }) })]);
+  });
+
+  it("ambiguous bot: stored without a bot, never routed, audited with the candidates", async () => {
+    const { deps, job, emails, routing, audit } = routedSetup();
+    emails.rules = [botRule("netflix", NETFLIX, { priority: 10 }), botRule("yape", YAPE, { priority: 10 })];
+    routing.addCustomer("juan", { normalizedValue: "me@gmail.com" }, { bots: [NETFLIX, YAPE] });
+
+    await processEmail(job, deps);
+    expect(emails.rows[0]).toMatchObject({ bot_id: null, processing_status: "PROCESSED" });
+    expect(routing.deliveries).toEqual([]);
+    expect(routing.loadBot).not.toHaveBeenCalled();
+    expect(audit.entries).toEqual([
+      expect.objectContaining({ event: "routing.ambiguous_bot", metadata: expect.objectContaining({ botCandidateIds: [NETFLIX, YAPE] }) })
+    ]);
+  });
+
+  it("general rules classify but never route; V1 behaviour is unchanged (no deliveries, no audit)", async () => {
+    const { deps, job, emails, routing, audit } = routedSetup();
+    emails.rules = [makeRuleRow()];
+    routing.addCustomer("juan", { normalizedValue: "me@gmail.com" }, { bots: [NETFLIX] });
+    await processEmail(job, deps);
+    expect(emails.rows[0]).toMatchObject({ bot_id: null, category_id: "category-codes", processing_status: "PROCESSED" });
+    expect(routing.loadBot).not.toHaveBeenCalled();
+    expect(routing.deliveries).toEqual([]);
+    expect(audit.entries).toEqual([]);
+  });
+
+  it("an incomplete V1 email (no bot_id) resumes and completes without routing", async () => {
+    const { deps, job, emails, routing } = routedSetup();
+    emails.rows.push({
+      organization_id: ORG,
+      email_account_id: "account-1",
+      provider_message_id: "msg-1",
+      processing_status: "PROCESSING",
+      processing_attempts: 1,
+      processing_started_at: new Date().toISOString()
+    });
+    expect((await processEmail(job, deps)).status).toBe("resumed");
+    expect(routing.loadBot).not.toHaveBeenCalled();
+    expect(emails.rows[0]?.processing_status).toBe("PROCESSED");
+  });
+
+  it("customers of another organization are never delivered, even with the same identifier", async () => {
+    const { deps, job, routing } = routedSetup();
+    routing.addCustomer("pedro", { normalizedValue: "me@gmail.com" }, { organizationId: OTHER_ORG, bots: [NETFLIX] });
+    await processEmail(job, deps);
+    expect(routing.deliveries).toEqual([]);
+  });
+
+  it("an identifier scoped to another bot is not used", async () => {
+    const { deps, job, routing } = routedSetup();
+    routing.addCustomer("juan", { normalizedValue: "me@gmail.com", botId: YAPE }, { bots: [NETFLIX, YAPE] });
+    await processEmail(job, deps);
+    expect(routing.deliveries).toEqual([]);
   });
 });
