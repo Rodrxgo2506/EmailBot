@@ -201,9 +201,10 @@ describe("portal functions: who may execute them", () => {
 });
 
 describe("portal inbox: scope and isolation", () => {
-  it("customer A sees only its deliveries, newest first, with no internal ids", async () => {
+  it("customer A sees only its deliveries, newest RECEIVED email first, with no internal ids", async () => {
     const rows = await inbox(a.token);
-    expect(rows.map((row) => row.delivery_id)).toEqual([...deliveriesA].reverse());
+    // Fixtures: each email is received earlier than the previous one (deliveries in the opposite order).
+    expect(rows.map((row) => row.delivery_id)).toEqual(deliveriesA);
     expect(Object.keys(rows[0] as object).sort()).toEqual(
       ["bot_name", "bot_slug", "category_name", "category_slug", "delivered_at", "delivery_id", "fields", "has_attachments", "is_important", "is_read", "received_at", "sender_email", "sender_name", "subject"].sort()
     );
@@ -230,8 +231,8 @@ describe("portal inbox: scope and isolation", () => {
   it("keyset pagination is stable and complete", async () => {
     const first = await inbox(a.token, { limit: 2 });
     const last = first.at(-1) as Record<string, unknown>;
-    const second = await inbox(a.token, { limit: 2, beforeAt: last.delivered_at, beforeId: last.delivery_id });
-    expect([...first, ...second].map((row) => row.delivery_id)).toEqual([...deliveriesA].reverse());
+    const second = await inbox(a.token, { limit: 2, beforeAt: last.received_at, beforeId: last.delivery_id });
+    expect([...first, ...second].map((row) => row.delivery_id)).toEqual(deliveriesA);
     await expect(inbox(a.token, { beforeAt: new Date().toISOString() })).rejects.toThrow(/Invalid cursor/);
     expect(await inbox(a.token, { limit: 1000 })).toHaveLength(4); // capped at 51
   });
@@ -448,5 +449,121 @@ describe("manual deliveries", () => {
         ])
       )
     ).rejects.toThrow(/permission denied/);
+  });
+});
+
+describe("phase 5.5: visibility follows the current assignment", () => {
+  const setAssignment = (botId: string, customerId: string, active: boolean) =>
+    t.asAdmin((tx) => tx.query("update public.bot_customer_assignments set active = $3 where bot_id = $1 and customer_id = $2", [botId, customerId, active]));
+  const filtersOf = async (token: string) =>
+    (await t.asService((tx) => one<{ f: { bots: Array<{ name: string; slug: string }>; categories: Array<{ name: string; slug: string }> } | null }>(tx, "select portal.list_filters($1) as f", [token]))).f;
+
+  it("assignment INACTIVE hides that bot's deliveries (inbox, detail, attachment, filters) without deleting anything", async () => {
+    const before = await t.asAdmin((tx) => count(tx, "select 1 from public.email_deliveries where customer_id = $1", [a.customerId]));
+    await setAssignment(a.botId, a.customerId, false);
+    try {
+      expect((await inbox(a.token)).map((row) => row.bot_slug)).toEqual(["yape"]);
+      expect(await detail(a.token, deliveriesA[0] as string)).toBeNull();
+      expect(await attachment(a.token, deliveriesA[0] as string, attachmentA)).toEqual([]);
+      expect((await filtersOf(a.token))?.bots.map((bot) => bot.slug)).toEqual(["yape"]);
+      expect(await t.asAdmin((tx) => count(tx, "select 1 from public.email_deliveries where customer_id = $1", [a.customerId]))).toBe(before);
+      expect(await t.asAdmin((tx) => count(tx, "select 1 from public.emails where id = any($1)", [emailsA]))).toBe(emailsA.length);
+      expect(await t.asAdmin((tx) => count(tx, "select 1 from public.email_attachments where id = $1", [attachmentA]))).toBe(1);
+    } finally {
+      await setAssignment(a.botId, a.customerId, true);
+    }
+    expect(await inbox(a.token)).toHaveLength(4);
+    expect(await detail(a.token, deliveriesA[0] as string)).not.toBeNull();
+  });
+
+  it("bot PAUSED + assignment ACTIVE: history and filters stay available", async () => {
+    await t.asAdmin((tx) => tx.query("update public.bots set status = 'PAUSED' where id = $1", [a.botId]));
+    try {
+      expect(await inbox(a.token, { bot: "netflix" })).toHaveLength(3);
+      expect((await filtersOf(a.token))?.bots.map((bot) => bot.slug)).toEqual(["netflix", "yape"]);
+    } finally {
+      await t.asAdmin((tx) => tx.query("update public.bots set status = 'ACTIVE' where id = $1", [a.botId]));
+    }
+  });
+
+  it("a MANUAL delivery of an old email keeps the email's original position", async () => {
+    const recent = await t.asAdmin((tx) => insertEmail(tx, a.orgId, f.a.accountId, a.botId, { received_at: new Date(Date.now() - 60_000).toISOString(), subject: "reciente" }));
+    const old = await t.asAdmin((tx) =>
+      insertEmail(tx, a.orgId, f.a.accountId, a.botId, { received_at: new Date(Date.now() - 90 * 86_400_000).toISOString(), subject: "antiguo" })
+    );
+    await t.asUser(f.a.ownerId, (tx) => tx.query("select * from public.add_manual_delivery($1, $2)", [recent, customerA2]));
+    await t.asUser(f.a.ownerId, (tx) => tx.query("select * from public.add_manual_delivery($1, $2)", [old, customerA2])); // delivered LAST
+    const token = await sessionFor(f.a.ownerId, customerA2); // earlier suspensions revoked older sessions
+    const subjects = (await inbox(token)).map((row) => row.subject);
+    expect(subjects.indexOf("reciente")).toBeLessThan(subjects.indexOf("antiguo"));
+    expect(subjects.at(-1)).toBe("antiguo");
+  });
+
+  it("list_filters: bots of active assignments and categories of visible deliveries; service role only", async () => {
+    await t.asAdmin((tx) => tx.query("update public.emails set category_id = $1 where id = $2", [f.a.categoryId, emailsA[0]]));
+    expect(await filtersOf(a.token)).toEqual({ bots: [{ name: "Netflix", slug: "netflix" }, { name: "Yape", slug: "yape" }], categories: [{ name: "Codes", slug: "codes" }] });
+    expect(await filtersOf(b.token)).toEqual({ bots: [{ name: "Netflix", slug: "netflix" }], categories: [] });
+    expect(await filtersOf(hex("unknown"))).toBeNull();
+    await expect(t.asUser(f.a.ownerId, (tx) => tx.query("select portal.list_filters($1)", [a.token]))).rejects.toThrow(/permission denied/);
+    await expect(t.asAnon((tx) => tx.query("select portal.list_filters($1)", [a.token]))).rejects.toThrow(/permission denied/);
+  });
+});
+
+describe("phase 5.5: manual delivery functions, security matrix at the database layer", () => {
+  let email: string;
+  beforeAll(async () => {
+    email = await t.asAdmin((tx) => insertEmail(tx, a.orgId, f.a.accountId, a.botId, { subject: "matrix" }));
+  });
+  const add = (userId: string, customerId = customerA2) =>
+    t.asUser(userId, (tx) => one<{ delivery_id: string; outcome: string }>(tx, "select * from public.add_manual_delivery($1, $2)", [email, customerId]));
+  const remove = (userId: string, deliveryId: string) =>
+    t.asUser(userId, (tx) => one<{ removed: boolean }>(tx, "select * from public.remove_manual_delivery($1)", [deliveryId]));
+
+  it.each(["ownerId", "adminId", "operatorId"] as const)("%s (deliveries:manage) may add and remove", async (who) => {
+    const added = await add(f.a[who]);
+    expect(["CREATED", "REACTIVATED"]).toContain(added.outcome);
+    expect(await remove(f.a[who], added.delivery_id)).toEqual(expect.objectContaining({ removed: true }));
+  });
+
+  it("VIEWER, a user without membership and a member of another organization are denied (add and remove)", async () => {
+    const added = await add(f.a.ownerId);
+    for (const userId of [f.a.viewerId, f.outsiderId, f.b.ownerId]) {
+      await expect(add(userId)).rejects.toThrow(/Email not found/);
+      await expect(remove(userId, added.delivery_id)).rejects.toThrow(/Delivery not found/);
+    }
+    await remove(f.a.ownerId, added.delivery_id);
+  });
+
+  it("customer of another organization and email of another organization: denied", async () => {
+    await expect(add(f.a.ownerId, b.customerId)).rejects.toThrow(/Customer not found in this organization/);
+    await expect(t.asUser(f.a.ownerId, (tx) => tx.query("select * from public.add_manual_delivery($1, $2)", [emailB, customerA2]))).rejects.toThrow(
+      /Email not found/
+    );
+  });
+
+  it("bot of another organization: impossible, an email only carries a bot of its own organization (composite FK)", async () => {
+    await expect(t.asAdmin((tx) => tx.query("update public.emails set bot_id = $1 where id = $2", [b.botId, email]))).rejects.toThrow(/foreign key/);
+  });
+
+  it("bot PAUSED, customer SUSPENDED, assignment INACTIVE: denied; everything ACTIVE: allowed", async () => {
+    const cases: Array<[string, string, string]> = [
+      ["update public.bots set status = 'PAUSED' where id = $1", "update public.bots set status = 'ACTIVE' where id = $1", a.botId],
+      ["update public.customers set status = 'SUSPENDED' where id = $1", "update public.customers set status = 'ACTIVE' where id = $1", customerA2]
+    ];
+    for (const [breakSql, fixSql, target] of cases) {
+      await t.asAdmin((tx) => tx.query(breakSql, [target]));
+      try {
+        await expect(add(f.a.ownerId)).rejects.toThrow(/not active/);
+      } finally {
+        await t.asAdmin((tx) => tx.query(fixSql, [target]));
+      }
+    }
+    await t.asAdmin((tx) => tx.query("update public.bot_customer_assignments set active = false where bot_id = $1 and customer_id = $2", [a.botId, customerA2]));
+    try {
+      await expect(add(f.a.ownerId)).rejects.toThrow(/not assigned/);
+    } finally {
+      await t.asAdmin((tx) => tx.query("update public.bot_customer_assignments set active = true where bot_id = $1 and customer_id = $2", [a.botId, customerA2]));
+    }
+    expect(["CREATED", "REACTIVATED"]).toContain((await add(f.a.ownerId)).outcome);
   });
 });
