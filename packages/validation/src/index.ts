@@ -7,3 +7,4 @@ export * from "./resources.js";
 export * from "./bots.js";
 export * from "./identifiers.js";
 export * from "./customers.js";
+export * from "./access-id.js";

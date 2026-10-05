@@ -2,8 +2,10 @@ import type {
   AuditAction,
   AuditActorType,
   BotStatus,
+  CustomerAccessStatus,
   CustomerIdentifierType,
   CustomerResolutionSource,
+  CustomerSessionRevokedReason,
   CustomerStatus,
   EmailAccountStatus,
   EmailDirection,
@@ -155,6 +157,47 @@ export interface BotCustomerAssignment {
   /** Embedded summaries (list endpoints). */
   bot?: Pick<Bot, "id" | "name" | "slug" | "status">;
   customer?: Pick<Customer, "id" | "displayName" | "status" | "externalRef">;
+}
+
+/**
+ * Customer Access ID credential as members see it (EmailBot V2 phase 4). The
+ * Access ID itself is never stored nor returned again after generation.
+ */
+export interface CustomerAccessCredential {
+  id: string;
+  customerId: string;
+  displayPrefix: string;
+  last4: string;
+  /** "SP-••••••••P4Z7" */
+  maskedAccessId: string;
+  status: CustomerAccessStatus;
+  expiresAt: string | null;
+  createdBy: string | null;
+  createdAt: string;
+  revokedAt: string | null;
+  revokedReason: string | null;
+}
+
+/** Customer portal session as members see it (no token, no hash). */
+export interface CustomerSession {
+  id: string;
+  credentialId: string;
+  createdAt: string;
+  lastSeenAt: string;
+  idleExpiresAt: string;
+  absoluteExpiresAt: string;
+  revokedAt: string | null;
+  revokedReason: CustomerSessionRevokedReason | null;
+  ip: string | null;
+  userAgent: string | null;
+}
+
+/** GET /api/portal/me: the minimum the portal UI needs (no internal ids). */
+export interface PortalProfile {
+  customer: { displayName: string; status: CustomerStatus };
+  organization: { name: string };
+  bots: Array<{ name: string; portalSettings: PortalSettings }>;
+  session: { idleExpiresAt: string; absoluteExpiresAt: string };
 }
 
 export interface Category {

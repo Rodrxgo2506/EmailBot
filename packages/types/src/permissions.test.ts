@@ -21,6 +21,13 @@ describe("hasPermission", () => {
     expect(hasPermission("OWNER", "bots:manage")).toBe(true);
   });
 
+  it("customer-access: OWNER/ADMIN/OPERATOR only, never VIEWER (same as the credentials/sessions RLS policies)", () => {
+    expect(hasPermission("VIEWER", "customer-access:manage")).toBe(false);
+    expect(hasPermission("OPERATOR", "customer-access:manage")).toBe(true);
+    expect(hasPermission("ADMIN", "customer-access:manage")).toBe(true);
+    expect(hasPermission("OWNER", "customer-access:manage")).toBe(true);
+  });
+
   it("customers: every member reads; OWNER/ADMIN/OPERATOR manage (same as the customers RLS policies)", () => {
     expect(hasPermission("VIEWER", "customers:read")).toBe(true);
     expect(hasPermission("VIEWER", "customers:manage")).toBe(false);

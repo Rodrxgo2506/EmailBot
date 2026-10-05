@@ -23,6 +23,8 @@ export const PERMISSIONS = {
   "bots:manage": ["OWNER", "ADMIN"],
   "customers:read": ["OWNER", "ADMIN", "OPERATOR", "VIEWER"],
   "customers:manage": ["OWNER", "ADMIN", "OPERATOR"],
+  /** EmailBot V2 phase 4: generate / regenerate / revoke Access IDs, list and revoke sessions. */
+  "customer-access:manage": ["OWNER", "ADMIN", "OPERATOR"],
   "rules:read": ["OWNER", "ADMIN", "OPERATOR", "VIEWER"],
   "rules:manage": ["OWNER", "ADMIN"],
   "emails:read": ["OWNER", "ADMIN", "OPERATOR", "VIEWER"],

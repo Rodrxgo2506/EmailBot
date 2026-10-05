@@ -25,7 +25,10 @@ export const LOG_REDACT_PATHS = [
   "*.refresh_token_encrypted",
   "*.serviceRoleKey",
   "*.SUPABASE_SERVICE_ROLE_KEY",
-  "*.TOKEN_ENCRYPTION_KEY"
+  "*.TOKEN_ENCRYPTION_KEY",
+  // EmailBot V2 phase 4: customer Access IDs.
+  "*.accessId",
+  "req.body.accessId"
 ];
 
 const SENSITIVE_KEY = /pass(word)?|secret|token|authorization|cookie|api[-_]?key|service[-_]?role|credential/i;
