@@ -123,8 +123,8 @@ Leyenda: **SECRET** = nunca en logs, repositorio ni bundle; se introduce con `sy
 | `SUPABASE_SERVICE_ROLE_KEY` | SECRET · SHARED | |
 | `REDIS_URL` | SECRET · SHARED | `fromService` (`connectionString`) |
 | `TOKEN_ENCRYPTION_KEY` | SECRET · SHARED | **idéntica** en ambos (comparar `tokenEncryptionKeyFingerprint` en los logs). Guardar copia fuera de Render. No usar `generateValue`: se generaría una distinta por servicio |
-| `GOOGLE_CLIENT_ID` / `MICROSOFT_CLIENT_ID` | PUBLIC · SHARED | más adelante (OAuth) |
-| `GOOGLE_CLIENT_SECRET` / `MICROSOFT_CLIENT_SECRET` | SECRET · SHARED | más adelante |
+| `GOOGLE_CLIENT_ID` / `MICROSOFT_CLIENT_ID` | PUBLIC · SHARED | en **ambos** servicios: la API conecta la cuenta y el worker refresca los tokens |
+| `GOOGLE_CLIENT_SECRET` / `MICROSOFT_CLIENT_SECRET` | SECRET · SHARED | ídem |
 | `GOOGLE_REDIRECT_URI` / `MICROSOFT_REDIRECT_URI` | PUBLIC · SHARED | mismo origen que `API_PUBLIC_URL` |
 | `MICROSOFT_TENANT` | PUBLIC · SHARED | `common` |
 | `ATTACHMENTS_BUCKET` | PUBLIC · SHARED | `email-attachments` |
@@ -143,7 +143,9 @@ Leyenda: **SECRET** = nunca en logs, repositorio ni bundle; se introduce con `sy
 | `RATE_LIMIT_MAX` | PUBLIC · API ONLY | 300 por defecto |
 | `SUPABASE_ANON_KEY` | PUBLIC · API ONLY | |
 | `OAUTH_STATE_SECRET` | SECRET · API ONLY | ≥ 32 caracteres aleatorios |
-| `GMAIL_PUBSUB_VERIFICATION_TOKEN` | SECRET · API ONLY | más adelante |
+| `GMAIL_PUBSUB_OIDC_AUDIENCE` | PUBLIC · API ONLY | push de Gmail (V2): `https://api.emailbot.app/webhooks/gmail`, idéntica a la audiencia de la suscripción |
+| `GMAIL_PUBSUB_SERVICE_ACCOUNT` | PUBLIC · API ONLY | push de Gmail (V2): cuenta de servicio OIDC de la suscripción; junto con la anterior |
+| `GMAIL_PUBSUB_VERIFICATION_TOKEN` | SECRET · API ONLY | heredada, no recomendada: si existe, todo push sin `?token=` recibe 401 |
 | `MICROSOFT_WEBHOOK_CLIENT_STATE` | SECRET · API ONLY | más adelante |
 
 ### Solo worker
@@ -151,7 +153,9 @@ Leyenda: **SECRET** = nunca en logs, repositorio ni bundle; se introduce con `sy
 | Variable | Clase | Notas |
 |---|---|---|
 | `WORKER_EVENTS_CONCURRENCY`, `WORKER_PROCESSING_CONCURRENCY` | PUBLIC · WORKER ONLY | 5 / 10 |
-| `WORKER_POLL_INTERVAL_MINUTES` | PUBLIC · WORKER ONLY | 5 |
+| `WORKER_POLL_INTERVAL_MINUTES` | PUBLIC · WORKER ONLY | 5 (recuperación; no poner 0) |
+| `GMAIL_PUBSUB_TOPIC` | PUBLIC · WORKER ONLY | push de Gmail (V2): `projects/<proyecto>/topics/<topic>`; sin ella, solo polling |
+| `WORKER_WATCH_RENEW_INTERVAL_MINUTES` | PUBLIC · WORKER ONLY | 60 por defecto; no definir |
 | `WORKER_MAX_ATTACHMENT_BYTES` | PUBLIC · WORKER ONLY | 25 MiB |
 | `WORKER_HEALTH_PORT`, `WORKER_HEALTH_HOST` | PUBLIC · WORKER ONLY | no definir en Render |
 

@@ -15,6 +15,7 @@ Producción no se modifica sin autorización explícita por fase.
 | 5 | API del portal (bandeja, detalle, adjuntos) + entregas MANUAL | completada |
 | 5.5 | UI del portal + cierre de decisiones de la fase 5 | completada |
 | 5.6 | Gmail casi en tiempo real (watch + Pub/Sub) + sync manual del portal | completada |
+| 5.7 | Auditoría de preparación de producción de Gmail push + portal ([runbook](v2-production-rollout.md)) | completada |
 | 6 | Super Admin | pendiente |
 | — | Hardening, E2E, documentación, preparación de producción | pendiente |
 
@@ -673,14 +674,11 @@ Sin Gmail, OAuth, Google Cloud ni Pub/Sub reales:
 - Supabase local;
 - BullMQ sobre un Valkey local temporal (`wsl/38-phase56-local.sh`).
 
-### Configuración pendiente de producción (checklist de despliegue de V2)
+### Configuración pendiente de producción
 
-1. Topic de Pub/Sub con `roles/pubsub.publisher` para `gmail-api-push@system.gserviceaccount.com`.
-2. Suscripción push a `https://<api>/webhooks/gmail`, con autenticación (cuenta de servicio y audiencia).
-3. Variables: API `GMAIL_PUBSUB_OIDC_AUDIENCE` y `GMAIL_PUBSUB_SERVICE_ACCOUNT`; worker `GMAIL_PUBSUB_TOPIC`.
-4. Migración `20261004180000` y el schema `portal` expuesto (fase 4).
-
-Sin esto, todo sigue funcionando con polling.
+Auditada en la fase 5.7: Google Cloud, variables de Render, migraciones, schema `portal`, orden de despliegue,
+rollback, smoke tests y riesgos en [`v2-production-rollout.md`](v2-production-rollout.md). Sin push configurado,
+todo sigue funcionando con polling.
 
 ## Deuda de QA
 
@@ -689,9 +687,9 @@ Sin esto, todo sigue funcionando con polling.
 
 ## Decisiones pendientes
 
-Fases 0 a 5.6: todas cerradas. Abiertas:
+Fases 0 a 5.7: todas cerradas. Abiertas:
 
 1. UI del panel para entregas manuales (la API existe).
 2. Retirada de entregas **AUTOMATIC**: hoy no permitida.
-3. Despliegue de V2: schema `portal` expuesto, Pub/Sub (topic, suscripción push con OIDC) y variables de la
-   fase 5.6 en producción.
+3. Despliegue de V2 en producción: pendiente de autorización, según
+   [`v2-production-rollout.md`](v2-production-rollout.md).
