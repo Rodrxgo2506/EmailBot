@@ -8,6 +8,7 @@ import Fastify, { type FastifyRequest, type FastifyServerOptions } from "fastify
 import type { AppDeps } from "./deps.js";
 import { createLoginThrottle } from "./infrastructure/login-throttle.js";
 import { createResilientRateLimitStore } from "./infrastructure/rate-limit-store.js";
+import { adminRoutes } from "./modules/admin/routes.js";
 import { auditRoutes } from "./modules/audit/routes.js";
 import { registerAuditRecorder } from "./modules/audit/recorder.js";
 import { botRoutes } from "./modules/bots/routes.js";
@@ -30,6 +31,7 @@ import { webhookRoutes } from "./modules/webhooks/routes.js";
 import { registerAuth } from "./plugins/auth.js";
 import { registerErrorHandler } from "./plugins/error-handler.js";
 import { ORGANIZATION_HEADER, registerOrganizationContext } from "./plugins/organization.js";
+import { registerPlatformAdmin } from "./plugins/platform-admin.js";
 
 const REQUEST_ID_PATTERN = /^[A-Za-z0-9._-]{8,128}$/;
 
@@ -115,6 +117,7 @@ export async function buildApp(deps: AppDeps, options: BuildAppOptions = {}) {
   registerErrorHandler(app);
   registerAuth(app, deps);
   registerOrganizationContext(app);
+  registerPlatformAdmin(app, deps);
   registerAuditRecorder(app, deps);
   registerPortalSession(app, deps);
 
@@ -148,7 +151,7 @@ export async function buildApp(deps: AppDeps, options: BuildAppOptions = {}) {
 
   await app.register(
     async (api) => {
-      await api.register(meRoutes);
+      await api.register(meRoutes(deps));
       await api.register(organizationRoutes);
       await api.register(memberRoutes(deps));
       await api.register(emailAccountRoutes(deps));
@@ -163,6 +166,7 @@ export async function buildApp(deps: AppDeps, options: BuildAppOptions = {}) {
       await api.register(ruleRoutes);
       await api.register(emailRoutes(deps));
       await api.register(auditRoutes);
+      await api.register(adminRoutes(deps));
     },
     { prefix: "/api" }
   );

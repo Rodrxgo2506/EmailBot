@@ -7,7 +7,7 @@ import type { ApiConfig } from "../config/env.js";
 import { createMemoryNonceStore } from "../infrastructure/nonces.js";
 import type { RateLimitRedis } from "../infrastructure/rate-limit-store.js";
 import type { AppDeps, AuthenticatedUser } from "../deps.js";
-import type { PrivilegedOperations, Repositories } from "../repositories/types.js";
+import type { AdminOperations, PrivilegedOperations, Repositories } from "../repositories/types.js";
 
 export const ORG_A = "11111111-1111-4111-8111-111111111111";
 export const ORG_B = "22222222-2222-4222-8222-222222222222";
@@ -98,6 +98,24 @@ export function createFakePrivileged(): { [K in keyof PrivilegedOperations]: Ret
   };
 }
 
+/** admin.* operations: fail loudly unless a test overrides them; isPlatformAdmin answers from `platformAdmins`. */
+export function createFakeAdmin(platformAdmins: string[] = []): { [K in keyof AdminOperations]: ReturnType<typeof vi.fn> } {
+  return {
+    isPlatformAdmin: vi.fn(async (userId: string) => platformAdmins.includes(userId)),
+    stats: unexpected("admin.stats"),
+    listOrganizations: unexpected("admin.listOrganizations"),
+    getOrganization: unexpected("admin.getOrganization"),
+    createOrganization: unexpected("admin.createOrganization"),
+    updateOrganization: unexpected("admin.updateOrganization"),
+    listMembers: unexpected("admin.listMembers"),
+    listBots: unexpected("admin.listBots"),
+    listCustomers: unexpected("admin.listCustomers"),
+    listEmailAccounts: unexpected("admin.listEmailAccounts"),
+    listActivity: unexpected("admin.listActivity"),
+    listAudit: unexpected("admin.listAudit")
+  };
+}
+
 export interface TestUser extends AuthenticatedUser {
   token: string;
   /** organizationId -> role */
@@ -121,11 +139,14 @@ export async function createTestApp(
     rateLimitRedis?: RateLimitRedis;
     /** organizations.status per organization id (default ACTIVE). */
     organizationStatuses?: Record<string, OrganizationStatus>;
+    /** User ids present in platform_admins. */
+    platformAdmins?: string[];
   } = {}
 ) {
   const users = options.users ?? [];
   const repos = createFakeRepositories();
   const privileged = createFakePrivileged();
+  const admin = createFakeAdmin(options.platformAdmins);
   const queue = {
     enqueueEmailEvent: vi.fn(async (_job: unknown, _options?: { jobId?: string }) => undefined),
     requestAccountSync: vi.fn(
@@ -170,6 +191,7 @@ export async function createTestApp(
     },
     repositories: () => repos as unknown as Repositories,
     privileged: privileged as unknown as PrivilegedOperations,
+    admin: admin as unknown as AdminOperations,
     queue,
     secretBox: SecretBox.fromBase64(config.tokenEncryptionKey),
     fetch: options.fetch ?? (vi.fn(async () => new Response("{}", { status: 500 })) as unknown as typeof fetch),
@@ -179,7 +201,7 @@ export async function createTestApp(
   };
 
   const app = await buildApp(deps, { logger: false });
-  return { app, deps, repos, privileged, queue };
+  return { app, deps, repos, privileged, admin, queue };
 }
 
 export function authHeaders(user: TestUser, organizationId?: string): Record<string, string> {

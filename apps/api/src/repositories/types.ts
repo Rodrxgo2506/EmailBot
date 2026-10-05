@@ -1,4 +1,14 @@
 import type {
+  AdminActivityItem,
+  AdminAuditEntry,
+  AdminBot,
+  AdminCustomer,
+  AdminEmailAccount,
+  AdminMember,
+  AdminOrganizationDetail,
+  AdminOrganizationSort,
+  AdminOrganizationSummary,
+  AdminStats,
   AuditAction,
   AuditLogEntry,
   Bot,
@@ -23,6 +33,7 @@ import type {
   Organization,
   OrganizationMember,
   OrganizationMembership,
+  OrganizationPlan,
   OrganizationRole,
   OrganizationSettings,
   OrganizationStatus,
@@ -403,4 +414,47 @@ export interface PrivilegedOperations {
   getPortalEmail(tokenHash: string, deliveryId: string): Promise<PortalEmailDetail | null>;
   getPortalAttachment(tokenHash: string, deliveryId: string, attachmentId: string): Promise<PortalAttachmentLocation | null>;
   listPortalFilters(tokenHash: string): Promise<PortalFilters | null>;
+}
+
+/* ------------------------------------------------------------------ platform administration (V2 phase 6) */
+
+export interface AdminOrganizationQuery {
+  search?: string | undefined;
+  status?: OrganizationStatus | undefined;
+  plan?: OrganizationPlan | undefined;
+  sort: AdminOrganizationSort;
+  limit: number;
+  offset: number;
+}
+
+/**
+ * Platform administration through the admin.* SECURITY DEFINER functions
+ * (service role; every call re-checks `actorId` against platform_admins in
+ * the database). Metadata only: no e-mail content, credentials, customer
+ * identifiers, Access IDs or sessions.
+ */
+export interface AdminOperations {
+  isPlatformAdmin(userId: string): Promise<boolean>;
+  stats(actorId: string): Promise<AdminStats>;
+  listOrganizations(actorId: string, query: AdminOrganizationQuery): Promise<{ items: AdminOrganizationSummary[]; total: number }>;
+  getOrganization(actorId: string, organizationId: string): Promise<AdminOrganizationDetail | null>;
+  /** Organization + OWNER membership + audit, atomically. Returns the new id. */
+  createOrganization(
+    actorId: string,
+    input: { name: string; slug: string; plan: OrganizationPlan; ownerUserId: string; requestId: string }
+  ): Promise<string>;
+  /** Returns false when the organization does not exist. */
+  updateOrganization(
+    actorId: string,
+    organizationId: string,
+    patch: { plan?: OrganizationPlan | undefined; status?: OrganizationStatus | undefined },
+    requestId: string
+  ): Promise<boolean>;
+  listMembers(actorId: string, organizationId: string): Promise<AdminMember[]>;
+  listBots(actorId: string, organizationId: string): Promise<AdminBot[]>;
+  listCustomers(actorId: string, organizationId: string, page: { limit: number; offset: number }): Promise<{ items: AdminCustomer[]; total: number }>;
+  listEmailAccounts(actorId: string, organizationId: string): Promise<AdminEmailAccount[]>;
+  /** `limit` rows at most, newest first. */
+  listActivity(actorId: string, query: { organizationId?: string | undefined; limit: number; offset: number }): Promise<AdminActivityItem[]>;
+  listAudit(actorId: string, query: { organizationId?: string | undefined; limit: number; offset: number }): Promise<AdminAuditEntry[]>;
 }

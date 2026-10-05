@@ -2,7 +2,7 @@ import type { EmailEventJob, SecretBox, SyncReason } from "@emailbot/shared";
 import type { ApiConfig } from "./config/env.js";
 import type { RateLimitRedis } from "./infrastructure/rate-limit-store.js";
 import type { GoogleOidcVerifier } from "./lib/google-oidc.js";
-import type { PrivilegedOperations, Repositories } from "./repositories/types.js";
+import type { AdminOperations, PrivilegedOperations, Repositories } from "./repositories/types.js";
 
 export interface AuthenticatedUser {
   id: string;
@@ -49,6 +49,8 @@ export interface AppDeps {
   repositories(accessToken: string): Repositories;
   /** Service-role operations (RLS bypassed). */
   privileged: PrivilegedOperations;
+  /** Platform administration: admin.* functions only (service role, actor re-checked in the database). */
+  admin: AdminOperations;
   queue: JobQueue;
   secretBox: SecretBox;
   fetch: typeof fetch;

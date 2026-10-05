@@ -27,6 +27,8 @@ export const RATE_LIMITS = {
   deliveryManage: { max: 60, timeWindow: "1 minute" },
   /** Generating / regenerating customer Access IDs. */
   customerAccessIssue: { max: 30, timeWindow: "10 minutes" },
+  /** Platform administration writes (create organization, plan, status). */
+  adminWrite: { max: 60, timeWindow: "1 minute" },
   /** Provider push traffic can burst. */
   webhook: { max: 1200, timeWindow: "1 minute" }
 } as const;
