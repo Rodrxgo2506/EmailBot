@@ -4,7 +4,8 @@ import {
   exchangeAuthorizationCode,
   serializeError,
   verifyOAuthState,
-  type OAuthProvider
+  type OAuthProvider,
+  watchAccountJobId
 } from "@emailbot/shared";
 import {
   emailAccountUpdateSchema,
@@ -138,6 +139,18 @@ export function emailAccountRoutes(deps: AppDeps) {
           .catch((error: unknown) =>
             request.log.error({ err: serializeError(error) }, "failed to write audit log")
           );
+
+        if (provider === "GMAIL") {
+          // Push notifications (users.watch) are created by the worker; a still valid watch is kept.
+          await deps.queue
+            .enqueueEmailEvent(
+              { type: "WATCH_ACCOUNT", emailAccountId: account.id, organizationId },
+              { jobId: watchAccountJobId(account.id) }
+            )
+            .catch((error: unknown) =>
+              request.log.warn({ err: serializeError(error), emailAccountId: account.id }, "could not queue the Gmail watch; the renewal job will create it")
+            );
+        }
 
         request.log.info({ organizationId, emailAccountId: account.id, provider }, "email account connected");
         return redirect({ oauth: "connected", provider: params.data.provider, accountId: account.id });

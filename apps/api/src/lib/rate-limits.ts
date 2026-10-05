@@ -19,6 +19,8 @@ export const RATE_LIMITS = {
   portalLogin: { max: 5, timeWindow: "1 minute" },
   /** Customer portal reads (inbox, email detail) per IP. */
   portalRead: { max: 120, timeWindow: "1 minute" },
+  /** Customer portal manual sync: one request per customer per window (on top of the per-IP limit). */
+  portalManualSync: { windowMs: 30_000 },
   /** Customer portal signed attachment URLs per IP. */
   portalDownload: { max: 30, timeWindow: "1 minute" },
   /** Manual deliveries (add / remove). */

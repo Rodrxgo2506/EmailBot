@@ -393,6 +393,11 @@ export interface PrivilegedOperations {
   createPortalSession(input: { secretHash: string; tokenHash: string; ip: string | null; userAgent: string | null }): Promise<PortalLoginResult>;
   validatePortalSession(tokenHash: string): Promise<PortalSessionContext | null>;
   endPortalSession(tokenHash: string): Promise<{ sessionId: string; organizationId: string; customerId: string } | null>;
+  /* EmailBot V2 phase 5.6 */
+  /** Whether an ACTIVE mailbox with this address exists (Pub/Sub pushes for unknown mailboxes are ignored). */
+  hasActiveMailbox(provider: "GMAIL", emailAddress: string): Promise<boolean>;
+  /** Accounts a portal session may sync (portal.sync_scope; ids stay server-side). */
+  portalSyncScope(tokenHash: string): Promise<Array<{ emailAccountId: string; organizationId: string; lastSyncedAt: string | null }>>;
   /* EmailBot V2 phase 5: portal data, only through portal.* functions (authority = session token hash). */
   listPortalInbox(tokenHash: string, filters: PortalInboxFilters): Promise<PortalInboxRow[]>;
   getPortalEmail(tokenHash: string, deliveryId: string): Promise<PortalEmailDetail | null>;

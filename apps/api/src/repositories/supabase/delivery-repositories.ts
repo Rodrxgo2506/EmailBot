@@ -85,7 +85,10 @@ const toFields = (value: unknown): PortalFieldValue[] =>
     value: field.value === null || field.value === undefined ? null : String(field.value)
   }));
 
-type PortalDataOperations = Pick<PrivilegedOperations, "listPortalInbox" | "getPortalEmail" | "getPortalAttachment" | "listPortalFilters">;
+type PortalDataOperations = Pick<
+  PrivilegedOperations,
+  "listPortalInbox" | "getPortalEmail" | "getPortalAttachment" | "listPortalFilters" | "portalSyncScope" | "hasActiveMailbox"
+>;
 
 const toNamed = (value: unknown) =>
   (Array.isArray(value) ? value : []).map((entry: Row) => ({ name: String(entry.name), slug: String(entry.slug) }));
@@ -154,6 +157,24 @@ export function portalDataOperations(service: SupabaseClient): PortalDataOperati
             )
           : null
       };
+    },
+
+    async portalSyncScope(tokenHash) {
+      const rows = unwrap(await portal().rpc("sync_scope", { p_token_hash: tokenHash })) as Row[];
+      return rows.map((row) => ({ emailAccountId: row.email_account_id, organizationId: row.organization_id, lastSyncedAt: row.last_synced_at ?? null }));
+    },
+
+    async hasActiveMailbox(provider, emailAddress) {
+      const rows = unwrap(
+        await service
+          .from("email_accounts")
+          .select("id")
+          .eq("provider", provider)
+          .eq("status", "ACTIVE")
+          .eq("email_address", emailAddress.toLowerCase())
+          .limit(1)
+      ) as Row[];
+      return rows.length > 0;
     },
 
     async listPortalFilters(tokenHash) {

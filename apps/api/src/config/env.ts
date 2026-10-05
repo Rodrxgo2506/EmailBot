@@ -55,8 +55,15 @@ const envSchema = z
     GOOGLE_CLIENT_ID: optionalEnv(z.string().min(1)),
     GOOGLE_CLIENT_SECRET: optionalEnv(z.string().min(1)),
     GOOGLE_REDIRECT_URI: optionalEnv(z.url()),
-    /** Shared secret appended to the Pub/Sub push endpoint (?token=...). */
+    /** Shared secret appended to the Pub/Sub push endpoint (?token=...). Legacy / additional check. */
     GMAIL_PUBSUB_VERIFICATION_TOKEN: optionalEnv(z.string().min(16)),
+    /**
+     * Pub/Sub push authentication (recommended): the push subscription sends a
+     * Google-signed OIDC token for this service account and audience. Both
+     * must be set together; the webhook then rejects requests without a valid token.
+     */
+    GMAIL_PUBSUB_OIDC_AUDIENCE: optionalEnv(z.string().min(1).max(500)),
+    GMAIL_PUBSUB_SERVICE_ACCOUNT: optionalEnv(z.email()),
 
     MICROSOFT_CLIENT_ID: optionalEnv(z.string().min(1)),
     MICROSOFT_CLIENT_SECRET: optionalEnv(z.string().min(1)),
@@ -75,6 +82,11 @@ const envSchema = z
     for (const origin of env.CORS_ORIGINS) {
       const result = normalizeOrigin(origin);
       if (!result.ok) issue("CORS_ORIGINS", `every origin ${result.problem}`);
+    }
+
+    // Every environment: a half-configured push authentication would silently be disabled.
+    if ((env.GMAIL_PUBSUB_OIDC_AUDIENCE === undefined) !== (env.GMAIL_PUBSUB_SERVICE_ACCOUNT === undefined)) {
+      issue("GMAIL_PUBSUB_OIDC_AUDIENCE", "GMAIL_PUBSUB_OIDC_AUDIENCE and GMAIL_PUBSUB_SERVICE_ACCOUNT must be set together");
     }
 
     if (env.NODE_ENV !== "production") return;
@@ -149,6 +161,8 @@ export interface ApiConfig {
   google: OAuthProviderConfig | null;
   microsoft: OAuthProviderConfig | null;
   gmailPubSubVerificationToken: string | null;
+  /** Pub/Sub push OIDC authentication; null = not configured. */
+  gmailPubSubOidc: { audience: string; serviceAccount: string } | null;
   microsoftWebhookClientState: string | null;
   sentryDsn: string | null;
 }
@@ -222,6 +236,10 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): ApiConfig {
       env.MICROSOFT_TENANT
     ),
     gmailPubSubVerificationToken: env.GMAIL_PUBSUB_VERIFICATION_TOKEN ?? null,
+    gmailPubSubOidc:
+      env.GMAIL_PUBSUB_OIDC_AUDIENCE && env.GMAIL_PUBSUB_SERVICE_ACCOUNT
+        ? { audience: env.GMAIL_PUBSUB_OIDC_AUDIENCE, serviceAccount: env.GMAIL_PUBSUB_SERVICE_ACCOUNT }
+        : null,
     microsoftWebhookClientState: env.MICROSOFT_WEBHOOK_CLIENT_STATE ?? null,
     sentryDsn: env.SENTRY_DSN ?? null
   };

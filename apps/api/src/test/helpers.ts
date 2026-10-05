@@ -33,6 +33,7 @@ export function testConfig(overrides: Partial<ApiConfig> = {}): ApiConfig {
     google: null,
     microsoft: null,
     gmailPubSubVerificationToken: null,
+    gmailPubSubOidc: null,
     microsoftWebhookClientState: null,
     sentryDsn: null,
     ...overrides
@@ -91,7 +92,9 @@ export function createFakePrivileged(): { [K in keyof PrivilegedOperations]: Ret
     listPortalInbox: unexpected("privileged.listPortalInbox"),
     getPortalEmail: unexpected("privileged.getPortalEmail"),
     getPortalAttachment: unexpected("privileged.getPortalAttachment"),
-    listPortalFilters: unexpected("privileged.listPortalFilters")
+    listPortalFilters: unexpected("privileged.listPortalFilters"),
+    portalSyncScope: unexpected("privileged.portalSyncScope"),
+    hasActiveMailbox: vi.fn(async () => true)
   };
 }
 
@@ -123,7 +126,14 @@ export async function createTestApp(
   const users = options.users ?? [];
   const repos = createFakeRepositories();
   const privileged = createFakePrivileged();
-  const queue = { enqueueEmailEvent: vi.fn(async () => undefined), close: vi.fn(async () => undefined) };
+  const queue = {
+    enqueueEmailEvent: vi.fn(async (_job: unknown, _options?: { jobId?: string }) => undefined),
+    requestAccountSync: vi.fn(
+      async (_account: { id: string; organizationId: string }, _reason: string): Promise<"QUEUED" | "ALREADY_QUEUED"> => "QUEUED"
+    ),
+    isAccountSyncPending: vi.fn(async (_emailAccountId: string) => false),
+    close: vi.fn(async () => undefined)
+  };
   const config = testConfig(options.config);
 
   const statusOf = (organizationId: string): OrganizationStatus => options.organizationStatuses?.[organizationId] ?? "ACTIVE";

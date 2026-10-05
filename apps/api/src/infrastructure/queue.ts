@@ -1,4 +1,4 @@
-import { DEFAULT_JOB_OPTIONS, QUEUE_NAMES, type EmailEventJob } from "@emailbot/shared";
+import { addCoalescedSync, DEFAULT_JOB_OPTIONS, isSyncPending, QUEUE_NAMES, type EmailEventJob } from "@emailbot/shared";
 import { Queue } from "bullmq";
 import { Redis } from "ioredis";
 import type { JobQueue } from "../deps.js";
@@ -31,6 +31,12 @@ export function createBullJobQueue(connection: Redis): JobQueue {
         ...(job.type === "SYNC_ACCOUNT" ? { removeOnComplete: true, removeOnFail: true } : {}),
         ...(options?.jobId ? { jobId: options.jobId } : {})
       });
+    },
+    async requestAccountSync(account, reason, requestedBy = null) {
+      return (await addCoalescedSync(emailEvents as never, account, reason, requestedBy)) ? "QUEUED" : "ALREADY_QUEUED";
+    },
+    async isAccountSyncPending(emailAccountId) {
+      return isSyncPending(emailEvents as never, emailAccountId);
     },
     async close() {
       await emailEvents.close();

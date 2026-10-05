@@ -1,6 +1,7 @@
-import type { EmailEventJob, SecretBox } from "@emailbot/shared";
+import type { EmailEventJob, SecretBox, SyncReason } from "@emailbot/shared";
 import type { ApiConfig } from "./config/env.js";
 import type { RateLimitRedis } from "./infrastructure/rate-limit-store.js";
+import type { GoogleOidcVerifier } from "./lib/google-oidc.js";
 import type { PrivilegedOperations, Repositories } from "./repositories/types.js";
 
 export interface AuthenticatedUser {
@@ -16,6 +17,13 @@ export interface IdentityVerifier {
 /** Producer side of the BullMQ queues. */
 export interface JobQueue {
   enqueueEmailEvent(job: EmailEventJob, options?: { jobId?: string }): Promise<void>;
+  /**
+   * Coalesced account sync (shared logic with the worker): at most one
+   * waiting sync per account plus one follow-up while it runs.
+   */
+  requestAccountSync(account: { id: string; organizationId: string }, reason: SyncReason, requestedBy?: string | null): Promise<"QUEUED" | "ALREADY_QUEUED">;
+  /** A sync of this account is waiting, delayed or running. */
+  isAccountSyncPending(emailAccountId: string): Promise<boolean>;
   close(): Promise<void>;
 }
 
@@ -48,4 +56,6 @@ export interface AppDeps {
   oauthNonces: NonceStore;
   /** Redis for the shared rate-limit store (per-instance counters when absent or failing). */
   rateLimitRedis?: RateLimitRedis;
+  /** Pub/Sub push OIDC verification (default: Google's JWKS through deps.fetch). */
+  pubsubVerifier?: GoogleOidcVerifier;
 }
