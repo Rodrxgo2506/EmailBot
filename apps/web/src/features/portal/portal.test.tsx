@@ -62,6 +62,8 @@ function fakeApi(overrides: Partial<Record<keyof PortalApi, unknown>> = {}) {
     filters: vi.fn(async () => ({ bots: [{ name: "Netflix", slug: "netflix" }], categories: [{ name: "Códigos", slug: "codigos" }] })),
     email: vi.fn(async () => detail()),
     attachmentUrl: vi.fn(async () => ({ url: "https://storage.example/signed?token=t", expiresIn: 60 })),
+    sync: vi.fn(async () => ({ status: "QUEUED", lastSyncAt: new Date(Date.now() - 30_000).toISOString() })),
+    syncStatus: vi.fn(async () => ({ running: false, lastSyncAt: new Date(Date.now() - 30_000).toISOString() })),
     ...overrides
   };
   return api as unknown as PortalApi & Record<keyof PortalApi, ReturnType<typeof vi.fn>>;
@@ -296,5 +298,106 @@ describe("portal session lifecycle", () => {
     });
     expect(api.me.mock.calls.length).toBeLessThanOrEqual(1);
     expect(api.inbox.mock.calls.length).toBeLessThanOrEqual(1);
+  });
+});
+
+describe("portal manual sync (Actualizar)", () => {
+  it("renders the button and the backend's last sync time", async () => {
+    renderPortal("/portal");
+    expect(await screen.findByRole("button", { name: /actualizar/i })).toBeInTheDocument();
+    const last = await screen.findByText(/Última sincronización: hace 30 segundos/);
+    expect(last.className).toMatch(/hidden/); // compact on mobile
+    expect(last.className).toMatch(/sm:inline/);
+  });
+
+  it("click: one sync request (no body, no ids), 'Actualizando...', then 'Bandeja actualizada' when new mail arrived", async () => {
+    let synced = false;
+    const inbox = vi.fn(async () => page(synced ? [item({ deliveryId: "d-new", subject: "Correo nuevo" }), item()] : [item()]));
+    const sync = vi.fn(async () => {
+      synced = true;
+      return { status: "QUEUED" as const, lastSyncAt: null };
+    });
+    // The status stays pending until released, so the running state can be observed deterministically.
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const syncStatus = vi.fn(async () => {
+      await gate;
+      return { running: false, lastSyncAt: null };
+    });
+    const { api } = renderPortal("/portal", fakeApi({ inbox, sync, syncStatus }));
+    await screen.findByText("Tu código de acceso");
+    fireEvent.click(screen.getByRole("button", { name: /actualizar/i }));
+    const running = await screen.findByRole("button", { name: /actualizando/i });
+    expect(running).toBeDisabled();
+    expect(running).toHaveAttribute("aria-busy", "true");
+    release();
+    expect(await screen.findByText("Bandeja actualizada")).toBeInTheDocument();
+    expect(await screen.findByText("Correo nuevo")).toBeInTheDocument(); // inbox refreshed through the query, no reload
+    expect(api.sync).toHaveBeenCalledTimes(1);
+    expect(api.sync).toHaveBeenCalledWith();
+    expect(api.inbox.mock.calls.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("'No hay correos nuevos' when the newest email did not change (also with nothing to sync)", async () => {
+    const first = renderPortal("/portal");
+    await within(first.container).findByText("Tu código de acceso");
+    fireEvent.click(within(first.container).getByRole("button", { name: /actualizar/i }));
+    expect(await within(first.container).findByText("No hay correos nuevos")).toBeInTheDocument();
+    first.unmount();
+
+    const second = renderPortal("/portal", fakeApi({ sync: vi.fn(async () => ({ status: "NOTHING_TO_SYNC" as const, lastSyncAt: null })) }));
+    await within(second.container).findByText("Tu código de acceso");
+    fireEvent.click(within(second.container).getByRole("button", { name: /actualizar/i }));
+    expect(await within(second.container).findByText("No hay correos nuevos")).toBeInTheDocument();
+  });
+
+  it("repeated clicks while running produce a single request", async () => {
+    let finishStatus!: () => void;
+    const statusGate = new Promise<void>((resolve) => (finishStatus = resolve));
+    const syncStatus = vi.fn(async () => {
+      await statusGate;
+      return { running: false, lastSyncAt: null };
+    });
+    const { api } = renderPortal("/portal", fakeApi({ syncStatus }));
+    await screen.findByText("Tu código de acceso");
+    const button = screen.getByRole("button", { name: /actualizar/i });
+    fireEvent.click(button);
+    fireEvent.click(button);
+    fireEvent.click(await screen.findByRole("button", { name: /actualizando/i }));
+    await waitFor(() => expect(api.sync).toHaveBeenCalledTimes(1));
+    finishStatus();
+  });
+
+  it("429: 'Espera unos segundos antes de volver a actualizar.'", async () => {
+    renderPortal("/portal", fakeApi({ sync: vi.fn(async () => Promise.reject(new ApiError(429, "RATE_LIMITED", "Too many"))) }));
+    await screen.findByText("Tu código de acceso");
+    fireEvent.click(screen.getByRole("button", { name: /actualizar/i }));
+    expect(await screen.findByText("Espera unos segundos antes de volver a actualizar.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /actualizar/i })).toBeEnabled();
+  });
+
+  it("other errors: 'No pudimos actualizar la bandeja.' without internal details", async () => {
+    renderPortal("/portal", fakeApi({ sync: vi.fn(async () => Promise.reject(new ApiError(500, "DATABASE_ERROR", "account 1111 failed"))) }));
+    await screen.findByText("Tu código de acceso");
+    fireEvent.click(screen.getByRole("button", { name: /actualizar/i }));
+    expect(await screen.findByText("No pudimos actualizar la bandeja.")).toBeInTheDocument();
+    expect(document.body.textContent).not.toContain("1111");
+  });
+
+  it("an expired session during sync goes back to the login page", async () => {
+    renderPortal("/portal", fakeApi({ sync: vi.fn(async () => Promise.reject(new ApiError(401, "UNAUTHORIZED", "x"))) }));
+    await screen.findByText("Tu código de acceso");
+    fireEvent.click(screen.getByRole("button", { name: /actualizar/i }));
+    expect(await screen.findByLabelText("Access ID")).toBeInTheDocument();
+  });
+
+  it("nothing is stored in the browser while syncing", async () => {
+    const setItem = vi.spyOn(Storage.prototype, "setItem");
+    renderPortal("/portal");
+    await screen.findByText("Tu código de acceso");
+    fireEvent.click(screen.getByRole("button", { name: /actualizar/i }));
+    await screen.findByText("No hay correos nuevos");
+    expect(setItem).not.toHaveBeenCalled();
+    expect(document.cookie).toBe("");
   });
 });

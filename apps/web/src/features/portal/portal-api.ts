@@ -31,6 +31,20 @@ export interface PortalApi {
   filters(): Promise<PortalFilters>;
   email(deliveryId: string): Promise<PortalEmailDetail>;
   attachmentUrl(deliveryId: string, attachmentId: string): Promise<{ url: string; expiresIn: number }>;
+  /** Asks the backend to sync the mailboxes behind this session now (returns immediately). */
+  sync(): Promise<PortalSyncRequest>;
+  /** Whether a sync is still running and when the last one finished (server time). */
+  syncStatus(): Promise<PortalSyncStatus>;
+}
+
+export interface PortalSyncRequest {
+  status: "QUEUED" | "ALREADY_RUNNING" | "NOTHING_TO_SYNC";
+  lastSyncAt: string | null;
+}
+
+export interface PortalSyncStatus {
+  running: boolean;
+  lastSyncAt: string | null;
 }
 
 export function createPortalApi(options: { baseUrl: string; fetch?: typeof fetch }): PortalApi {
@@ -83,7 +97,10 @@ export function createPortalApi(options: { baseUrl: string; fetch?: typeof fetch
       ),
     filters: () => request("GET", "/api/portal/filters"),
     email: async (deliveryId) => (await request<{ email: PortalEmailDetail }>("GET", `/api/portal/email/${id(deliveryId)}`)).email,
-    attachmentUrl: (deliveryId, attachmentId) => request("GET", `/api/portal/email/${id(deliveryId)}/attachments/${id(attachmentId)}`)
+    attachmentUrl: (deliveryId, attachmentId) => request("GET", `/api/portal/email/${id(deliveryId)}/attachments/${id(attachmentId)}`),
+    // No body: the session decides the scope (no customer / organization / bot / account ids are ever sent).
+    sync: () => request("POST", "/api/portal/sync"),
+    syncStatus: () => request("GET", "/api/portal/sync")
   };
 }
 

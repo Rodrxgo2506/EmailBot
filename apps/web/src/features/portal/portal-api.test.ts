@@ -30,6 +30,19 @@ describe("portal API client", () => {
     expect(fetch.mock.calls[2]?.[0]).toBe("/api/portal/email/d1/attachments/a1");
   });
 
+  it("manual sync: POST /api/portal/sync with no body and no ids; status with GET", async () => {
+    const fetch = vi.fn(async (_url: string, _init?: RequestInit) => ok({ status: "QUEUED", lastSyncAt: null }, 202));
+    const api = createPortalApi({ baseUrl: "https://api.example", fetch: fetch as unknown as typeof globalThis.fetch });
+    await api.sync();
+    await api.syncStatus();
+    const [postUrl, postInit] = fetch.mock.calls[0] as [string, RequestInit];
+    expect(postUrl).toBe("https://api.example/api/portal/sync");
+    expect(postInit).toMatchObject({ method: "POST", credentials: "include" });
+    expect(postInit.body).toBeUndefined();
+    expect(JSON.stringify(postInit)).not.toMatch(/customerId|organizationId|botId|emailAccountId|authorization/i);
+    expect(fetch.mock.calls[1]?.[1]).toMatchObject({ method: "GET", credentials: "include" });
+  });
+
   it("errors become ApiError with the status; network failures are status 0", async () => {
     const api = createPortalApi({ baseUrl: "", fetch: vi.fn(async () => ok({ error: { code: "NOT_FOUND", message: "Email not found" } }, 404)) });
     await expect(api.email("x")).rejects.toMatchObject({ status: 404, code: "NOT_FOUND" });

@@ -10,6 +10,7 @@ import { cn, formatShortDate } from "@/lib/utils";
 import { portalErrorMessage } from "./portal-api";
 import { EMPTY_FILTERS, hasActiveFilters, toInboxParams, type InboxFilterState, type InboxView } from "./portal-inbox-model";
 import { usePortalFilters, usePortalInbox } from "./portal-queries";
+import { PortalSyncButton } from "./portal-sync-button";
 import { useDebouncedValue } from "./use-debounced-value";
 
 const VIEWS: Array<{ value: InboxView; label: string }> = [
@@ -88,6 +89,10 @@ export function PortalInboxPage() {
     <div className="space-y-4">
       <div className="flex flex-wrap items-center gap-2">
         <h1 className="mr-auto text-xl font-semibold tracking-tight">Bandeja</h1>
+        <PortalSyncButton
+          latestDeliveryId={items[0]?.deliveryId}
+          refreshInbox={async () => (await inbox.refetch()).data?.pages[0]?.items[0]?.deliveryId}
+        />
         <div className="inline-flex rounded-md border bg-background p-0.5" role="tablist" aria-label="Vista">
           {VIEWS.map((view) => (
             <button

@@ -10,7 +10,8 @@ export const portalKeys = {
   filters: ["portal", "filters"] as const,
   inbox: (params: Omit<PortalInboxParams, "cursor">) => ["portal", "inbox", params] as const,
   inboxAll: ["portal", "inbox"] as const,
-  email: (deliveryId: string) => ["portal", "email", deliveryId] as const
+  email: (deliveryId: string) => ["portal", "email", deliveryId] as const,
+  syncStatus: ["portal", "sync"] as const
 };
 
 export const PORTAL_PAGE_SIZE = 25;
