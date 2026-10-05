@@ -11,7 +11,7 @@ Producción no se modifica sin autorización explícita por fase.
 | 1 | Bots (tabla, `bot_id` en reglas y correos, motor de reglas) + `organizations.status` | completada |
 | 2 | Customers, identificadores, asignaciones | completada |
 | 3 | Routing: Customer Resolver + `email_deliveries` | completada |
-| 4 | Customer Access ID + sesiones | pendiente |
+| 4 | Customer Access ID + sesiones | completada |
 | 5 | API del portal | pendiente |
 | 6 | UI del portal | pendiente |
 | 7 | Super Admin | pendiente |
@@ -274,6 +274,126 @@ Correos V1 y de reglas generales (`bot_id` NULL): mismo comportamiento, sin entr
 ni asignación retroactiva. Un correo que quedó sin asignar no se reasigna solo cuando después se crea el
 cliente (la entrega manual es una fase posterior).
 
+### Decisiones cerradas tras la fase 3
+
+1. **Entregas MANUAL: sí, en una fase posterior** (no forman parte de la fase 4). Mismas fronteras que las
+   automáticas: bot ACTIVE, cliente ACTIVE, asignación bot ↔ cliente activa y misma organización (el trigger
+   `validate_email_delivery_eligibility` ya lo exige para toda entrega nueva). Si el cliente no está asignado, la
+   operación primero crea/activa la asignación y después la entrega; nunca es una forma de saltarse la
+   asignación. `resolution = MANUAL`, permiso `deliveries:manage` (VIEWER no), auditada.
+2. **Correos sin asignar:** no se reasignan automáticamente cuando después se crea un cliente compatible. La
+   entrega será manual. Un futuro «reprocesar correo» sería una acción explícita y auditada (ni fase 3 ni 4).
+3. **RECIPIENT = To + Cc**, nunca Bcc, con el modelo normalizado actual.
+4. **Auditoría de routing *at-least-once*** aceptada: en concurrencia o reanudación puede registrarse más de una
+   entrada para el mismo evento lógico. Las operaciones reales (correos, entregas, adjuntos, notificaciones) siguen
+   siendo idempotentes. Los eventos no llevan datos personales innecesarios.
+
+## Fase 4: decisiones implementadas
+
+Identidad y sesión del cliente final (sin Supabase Auth). Sin UI del portal todavía (fase 5); en el panel, la
+ficha del cliente tiene la tarjeta «Acceso al portal».
+
+### Access ID
+
+- Formato `SP-XXXXXXXXXXXX`: 12 caracteres Crockford base32 = 60 bits de `crypto.randomBytes`. El prefijo es
+  cosmético (por ahora fijo `SP`, guardado en `display_prefix`) y no forma parte del secreto.
+- **Nunca se guarda** (ni en claro ni cifrado): solo `secret_hash = hex(HMAC-SHA256(k, secreto normalizado))` con
+  `k = HKDF-SHA256(TOKEN_ENCRYPTION_KEY, info "emailbot:customer-access:v1")`, más `last4`. Se muestra completo
+  **una vez** (respuesta de la generación, `Cache-Control: no-store`); después solo `SP-••••••••XXXX`.
+- **Normalización única** (`normalizeAccessId`, `@emailbot/validation`): NFKC, mayúsculas, sin espacios ni
+  guiones, prefijo ignorado (primer segmento separado si el resto tiene 12 caracteres, o letras iniciales de una
+  entrada sin separadores), O→0, I/L→1; una entrada truncada se rechaza, nunca se reinterpreta. Nota: el ejemplo
+  `SP-7KQ9X82MP4L7` contiene una L, que no pertenece al alfabeto: se normaliza a 1. Los IDs generados nunca
+  contienen I, L, O ni U.
+- Una sola credencial ACTIVE por cliente (índice único parcial). Generar con una ACTIVE = **regenerar**: en una
+  transacción (bloqueo de la fila del cliente) se revoca la anterior (`REGENERATED`), se revocan todas las
+  sesiones del cliente y se crea la nueva. Revocar: credencial `REVOKED` + sesiones revocadas. Caducidad opcional
+  (`expires_at`). Nada se borra.
+
+### Sesiones
+
+- Token de 256 bits (base64url) solo en la cookie `__Host-emailbot_portal`: `HttpOnly; Secure; SameSite=Strict;
+  Path=/`, sin `Domain`, `Max-Age` hasta la caducidad absoluta. La base guarda `SHA-256(token)`. El frontend nunca
+  recibe el token (ni en el cuerpo ni accesible a JavaScript); nada en localStorage/sessionStorage/IndexedDB.
+- Inactividad 7 días, máximo absoluto 30 (y nunca más allá de la caducidad de la credencial). `last_seen_at` y la
+  inactividad se deslizan como mucho cada 5 minutos.
+- `requirePortalSession` (API) → `portal.validate_session`: sesión no revocada ni caducada, credencial ACTIVE y no
+  caducada, cliente ACTIVE, organización ACTIVE. **La sesión es la única autoridad**: el cliente no aporta
+  `customerId`, `organizationId` ni rol (cuerpos estrictos; cabeceras y query ignoradas).
+- Cliente SUSPENDED: un trigger revoca sus sesiones abiertas en la misma transacción (`CUSTOMER_SUSPENDED`); al
+  reactivarlo debe volver a entrar. Organización suspendida: login rechazado y sesiones inválidas mientras dure
+  (no se revocan ni borran; vuelven a valer al reactivarla).
+
+### Endpoints
+
+| Método y ruta | Acceso | Notas |
+|---|---|---|
+| `POST /api/portal/session` | público | `{ accessId }`; 5/min/IP + bloqueo de 15 min tras 10 fallos; error único `401 INVALID_CREDENTIALS` «Las credenciales no son válidas.» |
+| `GET /api/portal/me` | sesión | nombre y estado del cliente, nombre de la organización, bots activos asignados con su `portalSettings`, caducidades; sin ids internos |
+| `POST /api/portal/logout` | sesión | revoca solo la sesión actual (`LOGOUT`), limpia la cookie; idempotente (204) |
+| `GET/POST/DELETE /api/customers/:id/access` | `customer-access:manage` | estado y `last4` / generar o regenerar (`{ expiresAt? }`) / revocar |
+| `GET/DELETE /api/customers/:id/sessions[/:sessionId]` | `customer-access:manage` | listar (sin hashes) / revocar todas / revocar una |
+
+`customer-access:manage` = OWNER, ADMIN, OPERATOR (nunca VIEWER). Ids de la ruta resueltos dentro de la
+organización activa (404 si no: IDOR).
+
+### Login: enumeración, tiempos y fuerza bruta
+
+- Desconocido, malformado, revocado, caducado, cliente suspendido y organización suspendida → misma respuesta
+  (estado, código, mensaje, sin cookie). La categoría solo va a logs estructurados (sin el Access ID) y, si la
+  credencial existe, a la auditoría de su organización. La auditoría se escribe fuera del camino de la
+  respuesta. Un ID desconocido no se puede atribuir a ninguna organización: solo logs.
+- Búsqueda por `secret_hash` con índice único (sin comparación de secretos en la aplicación).
+- Rate limit de ruta (5/min/IP) y bloqueo (10 fallos en 15 min → IP bloqueada 15 min; un login correcto
+  reinicia el contador) con el **mismo mecanismo resiliente** existente: Redis (scripts Lua atómicos) y, si Redis
+  falla, los mismos contadores locales acotados por instancia. Las claves solo contienen la IP.
+- CSRF: `SameSite=Strict`; `POST /api/portal/*` exige `application/json` (login) y rechaza un `Origin` fuera de
+  `CORS_ORIGINS`. CORS con credenciales **solo** para `/api/portal/*`; el resto de la API sigue sin cookies.
+
+### Base de datos
+
+| Pregunta | customer_access_credentials | customer_sessions |
+|---|---|---|
+| SELECT | OWNER/ADMIN/OPERATOR, todas las columnas **salvo** `secret_hash` | OWNER/ADMIN/OPERATOR, todas **salvo** `token_hash` |
+| INSERT / UPDATE / DELETE | nadie directamente (funciones) | nadie directamente (funciones) |
+| ¿Cruza organización? | no: RLS + FK `(organization_id, customer_id)` | no: RLS + FK `(organization_id, customer_id, credential_id)` |
+| ¿Customer (portal)? | nunca la lee; `portal.create_session` | solo vía `portal.*` con su token |
+| ¿Super Admin? | sin excepción RLS | sin excepción RLS |
+| service_role | **sin privilegios de tabla** | **sin privilegios de tabla** |
+
+Funciones `SECURITY DEFINER` (`search_path = ''`, nombres calificados, EXECUTE revocado a PUBLIC/anon y concedido
+a un único rol):
+
+- `authenticated` (miembros, vía API con su JWT): `public.issue_customer_access`,
+  `public.revoke_customer_access`, `public.revoke_customer_sessions`. Autoridad: `auth.uid()` con rol
+  OWNER/ADMIN/OPERATOR en la organización **del cliente** (leída de la base); `customer_id` es solo el objetivo.
+  Cliente ajeno o inexistente → mismo error.
+- `service_role` (API del portal): `portal.create_session`, `portal.validate_session`, `portal.end_session`.
+  Autoridad: el secreto (hash del Access ID o del token); no aceptan `customer_id` ni `organization_id`.
+  `create_session` usa `FOR SHARE` sobre la credencial para no crear una sesión de una credencial revocada en
+  paralelo.
+
+Ningún rol de la API puede leer `secret_hash` ni `token_hash`. Lista de funciones permitidas a `authenticated`
+ampliada en la guarda V1; matriz del service role sin cambios para estas tablas.
+
+**Schema `portal` expuesto en PostgREST** (`supabase/config.toml [api].schemas`), con `USAGE` solo para
+`service_role`. En producción habrá que añadir `portal` a *Exposed schemas* (Dashboard → API) en el despliegue
+de V2; sin ello el login del portal fallaría (fallo cerrado).
+
+### Auditoría
+
+| Evento | Acción | Actor |
+|---|---|---|
+| `customer.access.generated` / `customer.access.regenerated` | CREATE | miembro |
+| `customer.access.revoked` | UPDATE | miembro |
+| `customer.session.revoked` (una sesión: admin o logout) | UPDATE / LOGOUT | miembro / SYSTEM |
+| `customer.sessions.revoked` | UPDATE | miembro |
+| `portal.login.succeeded` (incluye la creación de la sesión) | LOGIN | SYSTEM |
+| `portal.login.failed` (solo `reason` categórico) | FAIL | SYSTEM |
+
+Nunca se registran el Access ID, `secret_hash`, el token, su hash ni tokens OAuth. Política actual: la IP no se
+guarda en `audit_logs` (sí en `customer_sessions.ip` y en los logs).
+
 ## Deuda de QA
 
 - **TODO antes del lanzamiento**: añadir `jsdom` + `@testing-library/react` para tener tests de
@@ -282,11 +402,9 @@ cliente (la entrega manual es una fase posterior).
 
 ## Decisiones pendientes
 
-Las cuatro de la fase 0 se aprobaron (empate = AMBIGUOUS, estado de la organización en la fase 1, migraciones
-en la fase que las usa, rutas en la raíz). Abiertas tras la fase 3:
+Fases 0 a 3: todas cerradas. Abiertas tras la fase 4:
 
-1. Entregas MANUAL (asignar/quitar un cliente a un correo desde el panel): API, UI, roles y si exigen asignación
-   activa al bot (hoy el trigger la exige para toda entrega nueva).
-2. Correos sin asignar cuando el cliente se crea después: ¿solo entrega manual o reprocesado explícito?
-3. RECIPIENT usa To + Cc (no Bcc): confirmar.
-4. Auditoría de routing *at-least-once* (puede repetirse en reanudaciones concurrentes): aceptar o deduplicar.
+1. Prefijo del Access ID: hoy fijo `SP`. ¿Configurable por organización (`customer_access_prefix`, diseño
+   aprobado como cosmético)? Requiere una columna nueva, fuera del alcance de la fase 4.
+2. Despliegue: exponer el schema `portal` en PostgREST de producción (Dashboard → API → Exposed schemas).
+3. Entregas MANUAL (decididas, ver fase 3): ¿en qué fase se implementan?
