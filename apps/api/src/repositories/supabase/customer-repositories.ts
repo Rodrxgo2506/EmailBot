@@ -1,3 +1,4 @@
+import { normalizeIdentifierFragment } from "@emailbot/validation";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { unwrap } from "../../lib/errors.js";
 import type {
@@ -33,6 +34,21 @@ export function sanitizeSearchTerm(term: string): string {
     .trim();
 }
 
+/**
+ * PostgREST `or` filter matching identifiers for an already sanitized term:
+ * the term in the canonical text form (emails, usernames, ids) OR, for PHONE
+ * identifiers, the canonical phone fragment ("+51 987" -> "+51987"). Both
+ * forms come from the shared normalizer (normalizeIdentifierFragment); the
+ * phone form only contains "+" and digits.
+ */
+export function identifierSearchFilter(term: string): string {
+  const text = normalizeIdentifierFragment("CUSTOM", term) ?? term.toLowerCase();
+  const filters = [`normalized_value.ilike."*${text}*"`];
+  const phone = normalizeIdentifierFragment("PHONE", term);
+  if (phone && phone !== text) filters.push(`and(type.eq.PHONE,normalized_value.ilike."*${phone}*")`);
+  return filters.join(",");
+}
+
 /** Identifier matches considered by a customer search (bounded). */
 const SEARCH_IDENTIFIER_LIMIT = 200;
 
@@ -59,7 +75,7 @@ export function customerRepository(db: SupabaseClient): CustomerRepository {
             .from("customer_identifiers")
             .select("customer_id")
             .eq("organization_id", organizationId)
-            .ilike("normalized_value", `%${term.toLowerCase()}%`)
+            .or(identifierSearchFilter(term))
             .limit(SEARCH_IDENTIFIER_LIMIT)
         ) as Row[];
         const ids = [...new Set(matches.map((row) => row.customer_id as string))];

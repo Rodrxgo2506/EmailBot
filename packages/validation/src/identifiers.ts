@@ -26,6 +26,12 @@ export type IdentifierNormalization =
 const EMAIL_SHAPE = /^[^@\s]+@[^@\s]+$/u;
 const PHONE_ALLOWED = /^\+?[\d\s().\-/]+$/u;
 
+/** Canonical form of an already-trimmed value (the one place the per-type rules live). */
+function canonical(type: CustomerIdentifierType, value: string): string {
+  if (type === "PHONE") return `${value.startsWith("+") ? "+" : ""}${value.replace(/\D/gu, "")}`;
+  return value.toLowerCase();
+}
+
 export function normalizeIdentifier(type: CustomerIdentifierType, raw: string): IdentifierNormalization {
   const value = raw.normalize("NFC").trim();
   if (value.length === 0) return { ok: false, problem: "must not be empty" };
@@ -33,17 +39,31 @@ export function normalizeIdentifier(type: CustomerIdentifierType, raw: string): 
 
   switch (type) {
     case "EMAIL": {
-      const normalized = value.toLowerCase();
+      const normalized = canonical(type, value);
       if (!EMAIL_SHAPE.test(normalized)) return { ok: false, problem: "must be an email address" };
       return { ok: true, value, normalized };
     }
     case "PHONE": {
       if (!PHONE_ALLOWED.test(value)) return { ok: false, problem: "may only contain digits, spaces, (, ), ., -, / and a leading +" };
-      const digits = value.replace(/\D/gu, "");
-      if (digits.length < 6 || digits.length > 15) return { ok: false, problem: "must contain 6 to 15 digits" };
-      return { ok: true, value, normalized: `${value.startsWith("+") ? "+" : ""}${digits}` };
+      const normalized = canonical(type, value);
+      const digits = normalized.replace("+", "").length;
+      if (digits < 6 || digits > 15) return { ok: false, problem: "must contain 6 to 15 digits" };
+      return { ok: true, value, normalized };
     }
     default:
-      return { ok: true, value, normalized: value.toLowerCase() };
+      return { ok: true, value, normalized: canonical(type, value) };
   }
+}
+
+/**
+ * Canonical form of a PARTIAL value typed in a search box ("+51 987"), with
+ * the same per-type rules as normalizeIdentifier but without its completeness
+ * checks (an email fragment has no "@", a phone fragment may have < 6 digits).
+ * Returns null when the fragment cannot be part of a value of that type.
+ */
+export function normalizeIdentifierFragment(type: CustomerIdentifierType, raw: string): string | null {
+  const value = raw.normalize("NFC").trim();
+  if (value.length === 0 || value.length > MAX_IDENTIFIER_LENGTH) return null;
+  if (type === "PHONE" && (!PHONE_ALLOWED.test(value) || !/\d/u.test(value))) return null;
+  return canonical(type, value);
 }

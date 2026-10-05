@@ -8,6 +8,7 @@ import {
   customerListQuerySchema,
   customerUpdateSchema,
   normalizeIdentifier,
+  normalizeIdentifierFragment,
   botUpdateSchema,
   categoryUpdateSchema,
   customerResolutionSchema,
@@ -293,6 +294,19 @@ describe("normalizeIdentifier (single implementation for API, web and worker)", 
     const decomposed = "Jose\u0301";
     expect(norm("USERNAME", decomposed)).toBe(norm("USERNAME", composed));
     expect(norm("USERNAME", composed)).toBe(norm("USERNAME", composed));
+  });
+
+  it("fragments (search) use the same rules without completeness checks", () => {
+    expect(normalizeIdentifierFragment("PHONE", "+51 987")).toBe("+51987");
+    expect(normalizeIdentifierFragment("PHONE", "987 654 321")).toBe("987654321");
+    expect(normalizeIdentifierFragment("PHONE", "(01) 23")).toBe("0123");
+    expect(normalizeIdentifierFragment("PHONE", "juan")).toBeNull();
+    expect(normalizeIdentifierFragment("PHONE", " + ")).toBeNull();
+    expect(normalizeIdentifierFragment("EMAIL", " John.Smith+Netf ")).toBe("john.smith+netf");
+    expect(normalizeIdentifierFragment("CUSTOM", "   ")).toBeNull();
+    // A complete value gives the same result as normalizeIdentifier (one implementation).
+    const full = normalizeIdentifier("PHONE", "+51 987-654-321");
+    expect(full.ok && full.normalized).toBe(normalizeIdentifierFragment("PHONE", "+51 987-654-321"));
   });
 
   it("rejects empty and overlong values", () => {

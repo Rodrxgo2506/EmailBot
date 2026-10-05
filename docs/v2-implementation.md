@@ -180,6 +180,19 @@ identificador activo.
 | ¿Super Admin? | sin excepción RLS | sin excepción RLS | sin excepción RLS |
 | service_role | sin acceso (fase 3) | sin acceso (fase 3) | sin acceso (fase 3) |
 
+### Búsqueda de clientes por teléfono (corrección)
+
+La búsqueda compara los identificadores por su forma normalizada: el texto en minúsculas **o**, para `PHONE`,
+el fragmento de teléfono normalizado (`+51 987` → `+51987`, `987 654 321` → `987654321`). Ambas formas salen de
+`normalizeIdentifierFragment`, que reutiliza la misma canonicalización que `normalizeIdentifier` (sin las
+comprobaciones de valor completo). Valores almacenados y semántica de `PHONE` sin cambios.
+
+## Deuda de QA
+
+- **TODO antes del lanzamiento**: añadir `jsdom` + `@testing-library/react` para tener tests de
+  componentes/render reales en la aplicación web (hoy la suite web solo cubre lógica sin DOM). No instalado
+  todavía.
+
 ## Decisiones pendientes
 
 Ninguna abierta tras la fase 1 (las cuatro de la fase 0 se aprobaron: empate = AMBIGUOUS, estado de la

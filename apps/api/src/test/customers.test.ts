@@ -1,6 +1,6 @@
 import type { Bot, Customer, CustomerIdentifier } from "@emailbot/types";
 import { describe, expect, it } from "vitest";
-import { sanitizeSearchTerm } from "../repositories/supabase/customer-repositories.js";
+import { identifierSearchFilter, sanitizeSearchTerm } from "../repositories/supabase/customer-repositories.js";
 import { authHeaders, createTestApp, makeUser, ORG_A, ORG_B } from "./helpers.js";
 
 /* EmailBot V2 phase 2: customers, identifiers and bot assignments (API layer). */
@@ -176,6 +176,18 @@ describe("customers API: IDOR and organization isolation", () => {
     expect([patch.statusCode, remove.statusCode]).toEqual([404, 404]);
     expect(repos.customerIdentifiers.get).toHaveBeenCalledWith(ORG_A, CUSTOMER_ID, IDENTIFIER_ID);
     expect(repos.customerIdentifiers.remove).not.toHaveBeenCalled();
+  });
+
+  it("phone searches match the normalized phone fragment (+51 987 -> +51987)", () => {
+    expect(identifierSearchFilter(sanitizeSearchTerm("+51 987"))).toBe(
+      'normalized_value.ilike."*+51 987*",and(type.eq.PHONE,normalized_value.ilike."*+51987*")'
+    );
+    expect(identifierSearchFilter(sanitizeSearchTerm("(01) 234-5678"))).toContain('and(type.eq.PHONE,normalized_value.ilike."*012345678*")');
+    expect(identifierSearchFilter("Juan@Gmail")).toBe('normalized_value.ilike."*juan@gmail*"');
+    expect(identifierSearchFilter("987654321")).toBe('normalized_value.ilike."*987654321*"');
+    // The phone form only ever contains "+" and digits, whatever the term.
+    const injected = identifierSearchFilter(sanitizeSearchTerm("98,and(type.eq.EMAIL)*7"));
+    expect(injected).not.toContain("type.eq.EMAIL)*");
   });
 
   it("the search term cannot inject PostgREST filters or wildcards", () => {
