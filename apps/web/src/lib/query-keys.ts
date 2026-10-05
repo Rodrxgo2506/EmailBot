@@ -20,6 +20,7 @@ export const queryKeys = {
   customer: (organizationId: string, id: string) => ["org", organizationId, "customers", "detail", id] as const,
   customerIdentifiers: (organizationId: string, id: string) => ["org", organizationId, "customers", "detail", id, "identifiers"] as const,
   customerBots: (organizationId: string, id: string) => ["org", organizationId, "customers", "detail", id, "bots"] as const,
+  customerAccess: (organizationId: string, id: string) => ["org", organizationId, "customers", "detail", id, "access"] as const,
   rules: (organizationId: string) => ["org", organizationId, "rules"] as const,
   rule: (organizationId: string, id: string) => ["org", organizationId, "rules", id] as const,
   accounts: (organizationId: string) => ["org", organizationId, "email-accounts"] as const,

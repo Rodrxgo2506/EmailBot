@@ -14,6 +14,7 @@ import { useOrganization } from "@/providers/organization-provider";
 import { useCustomer, useCustomerBots, useCustomerIdentifiers, useCustomerMutations, useIdentifierMutations } from "./api";
 import { CustomerDialog } from "./customer-dialog";
 import { identifierPreview } from "./customer-form-model";
+import { PortalAccessCard } from "./portal-access-card";
 
 function IdentifiersCard({ customerId, canManage }: { customerId: string; canManage: boolean }) {
   const identifiers = useCustomerIdentifiers(customerId);
@@ -164,6 +165,7 @@ export function CustomerDetailPage() {
   const { customerId } = useParams();
   const { can } = useOrganization();
   const canManage = can("customers:manage");
+  const canManageAccess = can("customer-access:manage");
   const customer = useCustomer(customerId);
   const { update } = useCustomerMutations();
   const [editing, setEditing] = useState(false);
@@ -213,6 +215,7 @@ export function CustomerDetailPage() {
       <div className="grid gap-6 lg:grid-cols-2">
         <IdentifiersCard customerId={current.id} canManage={canManage} />
         <CustomerBotsCard customerId={current.id} />
+        {canManageAccess ? <PortalAccessCard customerId={current.id} customerActive={!suspended} /> : null}
       </div>
 
       <CustomerDialog open={editing} onOpenChange={setEditing} customer={current} />

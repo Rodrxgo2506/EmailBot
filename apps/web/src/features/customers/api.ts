@@ -1,4 +1,13 @@
-import type { BotCustomerAssignment, Customer, CustomerIdentifier, CustomerIdentifierType, CustomerStatus, Paginated } from "@emailbot/types";
+import type {
+  BotCustomerAssignment,
+  Customer,
+  CustomerAccessCredential,
+  CustomerIdentifier,
+  CustomerIdentifierType,
+  CustomerSession,
+  CustomerStatus,
+  Paginated
+} from "@emailbot/types";
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, buildQuery } from "@/lib/api";
 import { queryKeys } from "@/lib/query-keys";
@@ -117,6 +126,48 @@ export function useAssignmentMutations(botId: string) {
     }),
     unassign: useMutation({
       mutationFn: (customerId: string) => api.delete(`/api/bots/${botId}/customers/${customerId}`),
+      onSuccess: invalidate
+    })
+  };
+}
+
+/* ------------------------------------------------------------ portal access (EmailBot V2 phase 4) */
+
+export function useCustomerAccess(customerId: string | undefined, enabled: boolean) {
+  const organizationId = useOrganizationId();
+  return useQuery({
+    queryKey: queryKeys.customerAccess(organizationId, customerId ?? "none"),
+    queryFn: async () => {
+      const [access, sessions] = await Promise.all([
+        api.get<{ credential: CustomerAccessCredential | null }>(`/api/customers/${customerId}/access`),
+        api.get<{ items: CustomerSession[] }>(`/api/customers/${customerId}/sessions?active=true`)
+      ]);
+      return { credential: access.credential, activeSessions: sessions.items };
+    },
+    enabled: Boolean(customerId) && enabled
+  });
+}
+
+export function useCustomerAccessMutations(customerId: string) {
+  const organizationId = useOrganizationId();
+  const queryClient = useQueryClient();
+  const invalidate = () => queryClient.invalidateQueries({ queryKey: queryKeys.customerAccess(organizationId, customerId) });
+  return {
+    /** The response carries the full Access ID: shown once, never cached in the query client. */
+    generate: useMutation({
+      mutationFn: (input: { expiresAt: string | null }) =>
+        api.post<{ accessId: string; credential: CustomerAccessCredential; regenerated: boolean; revokedSessions: number }>(
+          `/api/customers/${customerId}/access`,
+          input
+        ),
+      onSuccess: invalidate
+    }),
+    revoke: useMutation({
+      mutationFn: () => api.delete<{ revoked: boolean; revokedSessions: number }>(`/api/customers/${customerId}/access`),
+      onSuccess: invalidate
+    }),
+    revokeSessions: useMutation({
+      mutationFn: () => api.delete<{ revokedSessions: number }>(`/api/customers/${customerId}/sessions`),
       onSuccess: invalidate
     })
   };
