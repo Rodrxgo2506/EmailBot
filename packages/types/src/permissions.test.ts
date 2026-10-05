@@ -21,6 +21,13 @@ describe("hasPermission", () => {
     expect(hasPermission("OWNER", "bots:manage")).toBe(true);
   });
 
+  it("deliveries: OWNER/ADMIN/OPERATOR manage manual deliveries, never VIEWER", () => {
+    expect(hasPermission("VIEWER", "deliveries:manage")).toBe(false);
+    expect(hasPermission("OPERATOR", "deliveries:manage")).toBe(true);
+    expect(hasPermission("ADMIN", "deliveries:manage")).toBe(true);
+    expect(hasPermission("OWNER", "deliveries:manage")).toBe(true);
+  });
+
   it("customer-access: OWNER/ADMIN/OPERATOR only, never VIEWER (same as the credentials/sessions RLS policies)", () => {
     expect(hasPermission("VIEWER", "customer-access:manage")).toBe(false);
     expect(hasPermission("OPERATOR", "customer-access:manage")).toBe(true);

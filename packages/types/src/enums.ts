@@ -35,6 +35,10 @@ export type CustomerStatus = (typeof CUSTOMER_STATUSES)[number];
 export const CUSTOMER_IDENTIFIER_TYPES = ["EMAIL", "PHONE", "USERNAME", "EXTERNAL_ID", "CUSTOM"] as const;
 export type CustomerIdentifierType = (typeof CUSTOMER_IDENTIFIER_TYPES)[number];
 
+/** EmailBot V2 phase 3/5: how a delivery was created. */
+export const DELIVERY_RESOLUTIONS = ["AUTOMATIC", "MANUAL"] as const;
+export type DeliveryResolution = (typeof DELIVERY_RESOLUTIONS)[number];
+
 /** EmailBot V2 phase 4: customer Access ID credential. Expiration is a date, not a status. */
 export const CUSTOMER_ACCESS_STATUSES = ["ACTIVE", "REVOKED"] as const;
 export type CustomerAccessStatus = (typeof CUSTOMER_ACCESS_STATUSES)[number];

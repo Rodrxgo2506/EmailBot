@@ -7,6 +7,7 @@ import type {
   CustomerResolutionSource,
   CustomerSessionRevokedReason,
   CustomerStatus,
+  DeliveryResolution,
   EmailAccountStatus,
   EmailDirection,
   EmailProcessingStatus,
@@ -196,8 +197,69 @@ export interface CustomerSession {
 export interface PortalProfile {
   customer: { displayName: string; status: CustomerStatus };
   organization: { name: string };
-  bots: Array<{ name: string; portalSettings: PortalSettings }>;
+  bots: Array<{ name: string; slug: string; portalSettings: PortalSettings }>;
   session: { idleExpiresAt: string; absoluteExpiresAt: string };
+}
+
+/** A configured portal field (bots.portal_settings.fields) resolved for one email; missing value = null. */
+export interface PortalFieldValue {
+  key: string;
+  label: string;
+  value: string | null;
+}
+
+/** GET /api/portal/inbox item. The delivery id is the only handle; no other internal id. */
+export interface PortalInboxItem {
+  deliveryId: string;
+  deliveredAt: string;
+  receivedAt: string;
+  subject: string | null;
+  sender: { email: string; name: string | null };
+  bot: { name: string; slug: string };
+  category: { name: string; slug: string } | null;
+  important: boolean;
+  /** Read by this customer in the portal (not the panel's read flag). */
+  read: boolean;
+  hasAttachments: boolean;
+  fields: PortalFieldValue[];
+}
+
+export interface PortalInboxPage {
+  items: PortalInboxItem[];
+  /** Opaque keyset cursor for the next page, or null. */
+  nextCursor: string | null;
+}
+
+export interface PortalAttachmentSummary {
+  id: string;
+  filename: string;
+  contentType: string | null;
+  size: number | null;
+  /** Content stored and downloadable. */
+  available: boolean;
+}
+
+/** GET /api/portal/email/:deliveryId. body / attachments are null when the bot's portal settings hide them. */
+export interface PortalEmailDetail extends Omit<PortalInboxItem, "hasAttachments"> {
+  /** html is untrusted email HTML: render only in a sandboxed iframe. */
+  body: { text: string | null; html: string | null } | null;
+  attachments: PortalAttachmentSummary[] | null;
+}
+
+/** Email -> customer delivery as members see it (EmailBot V2 phases 3 and 5). */
+export interface EmailDelivery {
+  id: string;
+  emailId: string;
+  customerId: string;
+  botId: string;
+  resolution: DeliveryResolution;
+  createdBy: string | null;
+  createdAt: string;
+  /** Soft removal of a MANUAL delivery. */
+  removedAt: string | null;
+  removedBy: string | null;
+  customerReadAt: string | null;
+  customer?: Pick<Customer, "id" | "displayName" | "status">;
 }
 
 export interface Category {
