@@ -12,10 +12,10 @@ Producción no se modifica sin autorización explícita por fase.
 | 2 | Customers, identificadores, asignaciones | completada |
 | 3 | Routing: Customer Resolver + `email_deliveries` | completada |
 | 4 | Customer Access ID + sesiones | completada |
-| 5 | API del portal | pendiente |
-| 6 | UI del portal | pendiente |
-| 7 | Super Admin | pendiente |
-| 8 | Hardening, E2E, documentación, preparación de producción | pendiente |
+| 5 | API del portal (bandeja, detalle, adjuntos) + entregas MANUAL | completada |
+| 6 | Super Admin (orden fijado al aprobar la fase 4) | pendiente |
+| — | UI del portal | pendiente (fase por decidir) |
+| — | Hardening, E2E, documentación, preparación de producción | pendiente |
 
 ## Convenciones
 
@@ -394,6 +394,91 @@ de V2; sin ello el login del portal fallaría (fallo cerrado).
 Nunca se registran el Access ID, `secret_hash`, el token, su hash ni tokens OAuth. Política actual: la IP no se
 guarda en `audit_logs` (sí en `customer_sessions.ip` y en los logs).
 
+### Decisiones cerradas tras la fase 4
+
+1. Prefijo del Access ID fijo `SP` (`SP-XXXXXXXXXXXX`); sin `customer_access_prefix` ni columna nueva en V2.
+2. Entregas MANUAL: fase 5 (implementadas, ver abajo), sin ninguna excepción de seguridad.
+3. Schema `portal` en producción: no se toca ahora; forma parte del checklist de despliegue de V2.
+
+## Fase 5: decisiones implementadas
+
+API y control de acceso del portal del cliente, y entregas manuales. Sin UI del portal (el frontend no tiene
+todavía la parte del portal; la validación end-to-end se hace contra la API real) ni UI de entregas manuales
+en el panel.
+
+### Principio
+
+`sesión → cliente → entrega → correo → bot → organización`. Las funciones `portal.list_inbox`,
+`portal.get_email` y `portal.get_attachment` (SECURITY DEFINER, solo `service_role`) reciben únicamente el hash
+del token de sesión y lo validan con `private.portal_session_scope` (la misma definición de sesión válida que
+`portal.validate_session`: no revocada, sin caducar, credencial ACTIVE, cliente ACTIVE, organización ACTIVE). No
+aceptan `customer_id`, `organization_id` ni `bot_id`; los filtros de bot y categoría son *slugs* aplicados
+dentro del alcance del cliente. Una entrega, correo o adjunto ajeno es indistinguible de uno inexistente (404).
+
+### Endpoints del portal
+
+| Método y ruta | Notas |
+|---|---|
+| `GET /api/portal/inbox` | paginación *keyset* por `(delivered_at, delivery_id)` con cursor opaco; `limit` 1-50 (25); filtros `bot`, `category` (slugs), `unread`, `important`, `from`, `to` (fecha de recepción), `search` (asunto/remitente, comodines escapados); parámetros desconocidos (`customerId`, `organizationId`, `botId`…) se descartan sin efecto |
+| `GET /api/portal/email/:deliveryId` | detalle por **id de entrega** (nunca por id de correo); marca la entrega como leída por el cliente |
+| `GET /api/portal/email/:deliveryId/attachments/:attachmentId` | URL firmada temporal (`ATTACHMENT_URL_TTL_SECONDS`) de ese objeto concreto; el bucket sigue privado; se comprueba que la ruta es la que escribe el worker para ese adjunto |
+
+Elemento de bandeja: `deliveryId`, `deliveredAt`, `receivedAt`, `subject`, `sender`, `bot {name, slug}`,
+`category {name, slug} | null`, `important`, `read` (lectura **del cliente**, `email_deliveries.customer_read_at`;
+no el `is_read` de los operadores), `hasAttachments`, `fields`. `GET /api/portal/me` incluye ahora el `slug` de
+cada bot. Límites por IP con el mecanismo existente: lecturas 120/min, descargas 30/min. Sin realtime propio
+del portal: *polling* (no se crea otra infraestructura WebSocket).
+
+### `portal_settings` (servidor)
+
+- `fields`: solo las claves configuradas, en su orden, `{ key, label, value }`; valor ausente → `null`;
+  `fields = []` → nada de `extracted_data`.
+- `showBody = false` → `body = null` (no se devuelve). `true` → `{ text, html }` del correo autorizado. El
+  `html` es HTML de correo no confiable: la UI debe mostrarlo en un iframe *sandbox* (como el panel).
+- `showAttachments = false` → `attachments = null` y la descarga responde 404. `true` → adjuntos no *inline*;
+  solo los almacenados son descargables (`available`).
+- Nunca: regla coincidente, reglas, auditoría, ajustes, tokens, identificadores ni ids internos (salvo
+  `deliveryId` y el id de adjunto, necesarios como manejadores).
+
+### Visibilidad del historial
+
+Una entrega es visible mientras exista y no esté retirada. **Bot PAUSED** no crea entregas nuevas pero no
+oculta el historial (el detalle sigue usando los `portal_settings` vigentes del bot). Lo mismo con una
+**asignación desactivada**: corta entregas nuevas, no el historial (ver decisiones pendientes). Cliente o
+organización suspendidos: el portal entero responde 401 (fase 4); nada se borra.
+
+### Entregas MANUAL
+
+| Método y ruta | Permiso |
+|---|---|
+| `GET /api/emails/:id/deliveries` | `emails:read` |
+| `POST /api/emails/:id/deliveries` `{ customerId }` | `deliveries:manage` (OWNER/ADMIN/OPERATOR) |
+| `DELETE /api/emails/:id/deliveries/:deliveryId` | `deliveries:manage` |
+
+- Organización del operador (sesión); correo, cliente y entrega resueltos dentro de ella (404 si no).
+- `public.add_manual_delivery`: mismas reglas que las automáticas (correo con bot, bot ACTIVE, cliente ACTIVE de
+  la organización, asignación activa); el trigger `validate_email_delivery_eligibility` lo vuelve a exigir.
+  Resultado `CREATED`, `REACTIVATED` o `EXISTING` (nunca duplica; una entrega AUTOMATIC existente se respeta).
+  `resolution = MANUAL`, `created_by` = operador. Si el cliente no está asignado, se rechaza: la asignación se
+  crea/activa primero desde la gestión de bots (no hay atajo).
+- Retirada **lógica** (`removed_at`, `removed_by`), solo de entregas MANUAL (las AUTOMATIC no se retiran). Se
+  conservan la fila, el correo, el cliente y el historial; el cliente deja de ver el correo. Volver a entregarlo
+  reactiva la misma fila (y vuelve a pasar el trigger de elegibilidad).
+- Auditoría: `delivery.created.manual` (CREATE) y `delivery.removed.manual` (UPDATE), entidad `email_delivery`,
+  metadatos solo con ids (`emailId`, `deliveryId`, `customerId`, `botId`, `reactivated`).
+
+### RLS de `email_deliveries` (actualizada)
+
+| Pregunta | Respuesta |
+|---|---|
+| SELECT | miembros de la organización (incluye entregas retiradas: historial del panel) |
+| INSERT / UPDATE / DELETE directos | nadie; MANUAL solo mediante `add_manual_delivery` / `remove_manual_delivery` (rol comprobado dentro) |
+| Customer (portal) | solo sus entregas no retiradas, mediante `portal.*` |
+| service_role | sin cambios (worker: INSERT/SELECT por columnas; portal: `portal.*`) |
+
+Índices: `email_deliveries_portal_inbox_idx (customer_id, created_at desc, id desc) where removed_at is null`
+(la bandeja usa un *index only scan*) y `email_deliveries_email_idx (email_id)`.
+
 ## Deuda de QA
 
 - **TODO antes del lanzamiento**: añadir `jsdom` + `@testing-library/react` para tener tests de
@@ -402,9 +487,12 @@ guarda en `audit_logs` (sí en `customer_sessions.ip` y en los logs).
 
 ## Decisiones pendientes
 
-Fases 0 a 3: todas cerradas. Abiertas tras la fase 4:
+Fases 0 a 4: todas cerradas. Abiertas tras la fase 5:
 
-1. Prefijo del Access ID: hoy fijo `SP`. ¿Configurable por organización (`customer_access_prefix`, diseño
-   aprobado como cosmético)? Requiere una columna nueva, fuera del alcance de la fase 4.
-2. Despliegue: exponer el schema `portal` en PostgREST de producción (Dashboard → API → Exposed schemas).
-3. Entregas MANUAL (decididas, ver fase 3): ¿en qué fase se implementan?
+1. Historial tras **desactivar la asignación** bot ↔ cliente (o retirar al cliente de un bot): hoy el cliente
+   sigue viendo las entregas existentes (igual que con un bot PAUSED). ¿Debe ocultarse ese historial?
+2. **UI del portal**: ¿en qué fase? (la fase 6 es Super Admin). Al construirla, añadir `jsdom` +
+   `@testing-library/react` (deuda de QA).
+3. UI del panel para entregas manuales (la API ya existe).
+4. Retirada de entregas **AUTOMATIC**: hoy no permitida. ¿Hace falta?
+5. Despliegue: exponer el schema `portal` en PostgREST de producción (checklist de V2).
