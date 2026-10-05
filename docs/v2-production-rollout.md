@@ -348,7 +348,7 @@ Qué cambia en producción:
 | 0 | Comprobaciones previas (solo lectura): `supabase migration list --linked` debe mostrar las 24 migraciones de `main`; ajustes de auto-deploy de API y web. Copia de seguridad (`supabase db dump`) fuera del repositorio | — |
 | 1 | `supabase db push --linked --dry-run` (debe listar **exactamente** las 2 migraciones de la fase 6) → autorización → `supabase db push --linked` | 26 migraciones; *advisors* sin hallazgos nuevos; `has_function_privilege('anon', 'admin.platform_stats(uuid)', 'execute')` = false (ídem `authenticated`); el worker sigue sincronizando y el panel carga |
 | 2 | Exponer `admin` en Data API → *Exposed schemas* (mantener `public`, `graphql_public`, `portal`) | Data API sin errores; `anon` no tiene `USAGE` en `admin` |
-| 3 | Merge de la rama de la fase 6 en `main` + push (con el auto-deploy de la web desactivado si está activo) | — |
+| 3 | ~~Merge de la rama de la fase 6 en `main`~~: ya hecho (`main` = `5f0d6f2`). Verificar qué commit tienen desplegado API y web (si la web tiene auto-deploy, ya puede servir la consola: sin `isPlatformAdmin` muestra «Acceso denegado») | — |
 | 4 | Desplegar la **API** | `/health` 200; `GET /api/me` incluye `isPlatformAdmin: false`; `GET /api/admin/stats` → 403 `PLATFORM_ADMIN_REQUIRED` para un usuario normal |
 | 5 | Desplegar la **web** | `/admin` muestra «Acceso denegado» a un usuario normal; el panel y el portal no cambian |
 | 6 | Crear el primer administrador (SQL Editor, propietario de la base): `insert into public.platform_admins (user_id) select id from public.profiles where email = '<correo confirmado>';` | `isPlatformAdmin: true`; `/admin` carga; `/api/admin/stats` 200 |
@@ -365,3 +365,44 @@ Orden y riesgos:
 Rollback: las migraciones no se revierten (aditivas, el código anterior funciona sobre ellas). Se revierte el
 código de API y web; para retirar el acceso al instante basta con borrar las filas de `platform_admins`. Quitar
 `admin` de *Exposed schemas* es opcional (sin `USAGE` para `anon` ni `authenticated`, no expone nada).
+
+## 13. Fase 7 (calidad y lanzamiento): pendiente de despliegue
+
+**No aplicado.** Requiere autorización explícita. Detalle en
+[`v2-implementation.md`](v2-implementation.md#fase-7-calidad-y-lanzamiento).
+
+Qué cambia en producción:
+
+- Base de datos: **nada** (sin migraciones). Variables de entorno: **ninguna nueva**.
+- API: namespace Socket.IO `/portal` en el endpoint `/realtime` existente; las entregas manuales publican una señal
+  en Redis.
+- Worker: publica `portal.deliveries` (ids de clientes) tras cada correo entregado.
+- Web: política de privacidad y términos V2, enlaces legales en el login del portal y realtime del portal.
+
+| # | Paso | Verificación |
+|---|---|---|
+| 0 | Gates en la rama (`pnpm typecheck`, `lint`, `test`, `build`) y el E2E de aislamiento contra el Supabase local | Todo PASS |
+| 1 | Revisión legal de `/privacy` y `/terms` por el titular (los textos describen el código, no sustituyen esa revisión) | Aprobados |
+| 2 | Merge de `feat/emailbot-f7-quality-launch` en `main` + push, con el auto-deploy de la web desactivado si está activo | — |
+| 3 | Desplegar la **API** primero | `/health` 200; el panel en tiempo real sigue funcionando; un WebSocket a `/portal` con otro `Origin` es rechazado |
+| 4 | Desplegar el **worker** | Log de arranque normal; un correo entregado produce la señal (el portal abierto se refresca sin pulsar «Actualizar») |
+| 5 | Desplegar la **web** | `/privacy` y `/terms` con fecha «5 de octubre de 2026» y dominio `emailbot.app`; el login del portal enlaza ambos |
+| 6 | Google Cloud → pantalla de consentimiento OAuth: URL de la política (`https://emailbot.app/privacy`) y de los términos; si se pide la verificación de `gmail.readonly`, describir el portal (datos de Gmail mostrados a los clientes finales que configura la organización) | Pantalla actualizada |
+
+Por qué la API va antes que el worker: una API anterior reenviaría `portal.deliveries` (ids de clientes de la propia
+organización) a la sala de la organización, donde el panel lo ignora. No expone datos, pero el orden lo evita.
+
+Rollback: revertir web, worker y API (en ese orden) al deploy anterior. Sin cambios de base de datos. Sin
+realtime, el portal sigue funcionando con «Actualizar».
+
+## 14. Checklist de lanzamiento de V2
+
+| Estado | Elemento |
+|---|---|
+| Hecho | V2 fases 0–5.7 en producción (migraciones, schema `portal`, Gmail push con OIDC; ver «Estado en producción» en `v2-implementation.md`) |
+| Pendiente | Fase 6: migraciones `20261005120000` y `20261005120100`, schema `admin`, deploy de API y web, primer administrador (§12) |
+| Pendiente | Fase 7: revisión legal, deploy API → worker → web, pantalla de consentimiento de Google (§13) |
+| Pendiente | Smoke tests y medición de latencia del push en producción (§7, §8) si no se completaron al desplegar la 5.6 |
+| Pendiente | Pruebas de fallos autorizadas (§9) y alertas (§10) |
+| Pendiente | Borrar la suscripción *pull* por defecto `emailbot-gmail-sub` del topic, una vez confirmada la suscripción push |
+| Decisión | Monetización (planes, límites por plan, pagos): fase posterior |

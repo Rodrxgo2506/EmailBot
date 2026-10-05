@@ -180,3 +180,11 @@ Validación (`validationToken`) y notificaciones con `clientState`.
   - `email.processed`: `{ organizationId, emailId, emailAccountId, categoryId, matchedRuleId, subject, important }`
   - `notification`: `{ organizationId, emailId, title, body }`
   - `email-account.status`: `{ organizationId, emailAccountId, status }`
+
+Portal del cliente (V2 fase 7): namespace `/portal` en la misma ruta `/realtime`.
+
+- Handshake: solo transporte WebSocket; la credencial es la cookie de sesión del portal (la envía el navegador) y el
+  `Origin` debe estar en `CORS_ORIGINS`. Rechazos: `forbidden_origin`, `unauthorized`. El servidor une el socket a la
+  sala de su propio cliente; el cliente no envía nada.
+- Eventos (sin datos): `portal:inbox.changed` (volver a pedir la bandeja) y `portal:revoked` (sesión ya no válida; el
+  servidor cierra el socket). Revalidación de la sesión cada minuto.

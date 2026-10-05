@@ -17,8 +17,9 @@ explícita por fase.
 | 5.5 | UI del portal + cierre de decisiones de la fase 5 | completada |
 | 5.6 | Gmail casi en tiempo real (watch + Pub/Sub) + sync manual del portal | completada |
 | 5.7 | Auditoría de preparación de producción de Gmail push + portal ([runbook](v2-production-rollout.md)) | completada |
-| 6 | Super Admin (`platform_admins`, `/api/admin/*`, consola `/admin`) | completada en la rama `feat/emailbot-f6-super-admin` (sin merge en `main`, sin desplegar) |
-| — | Hardening, E2E, documentación, preparación de producción | pendiente |
+| 6 | Super Admin (`platform_admins`, `/api/admin/*`, consola `/admin`) | completada, en `main` (sin desplegar en producción) |
+| 7 | Calidad y lanzamiento: privacidad y términos V2, realtime del portal, E2E de aislamiento, documentación | completada en la rama `feat/emailbot-f7-quality-launch` (sin merge, sin desplegar) |
+| — | Monetización: planes, límites por plan, pagos | pendiente (requiere decisiones de negocio) |
 
 ## Estado en producción
 
@@ -26,8 +27,10 @@ explícita por fase.
   en tiempo real (`users.watch` + Pub/Sub con OIDC), con polling de recuperación cada 5 minutos. Se siguió
   [`v2-production-rollout.md`](v2-production-rollout.md); Gmail push está verificado con logs de producción
   (`gmail.sync.*` con `reason: PUBSUB`).
-- **No desplegado**: fase 6 (Super Admin). Implementada y revisada en `feat/emailbot-f6-super-admin`, todavía no
-  mergeada en `main`. Pasos de despliegue: [runbook §12](v2-production-rollout.md#12-fase-6-super-admin-pendiente-de-despliegue).
+- **No desplegado**: fase 6 (Super Admin), ya mergeada en `main` (`5f0d6f2`) pero sin sus migraciones ni el schema
+  `admin` en producción: [runbook §12](v2-production-rollout.md#12-fase-6-super-admin-pendiente-de-despliegue).
+  Fase 7 (calidad y lanzamiento) en `feat/emailbot-f7-quality-launch`:
+  [runbook §13](v2-production-rollout.md#13-fase-7-calidad-y-lanzamiento-pendiente-de-despliegue).
 
 ## Convenciones
 
@@ -849,21 +852,86 @@ Pasos detallados, verificaciones y rollback: [runbook §12](v2-production-rollou
 Hasta el paso 2, `/api/me` responde `isPlatformAdmin: false` y `/api/admin/*` falla; el resto de la API no se ve
 afectado.
 
+## Fase 7: calidad y lanzamiento
+
+Roadmap aprobado (§27, F7): política de privacidad V2, realtime del portal, E2E y documentación. Gmail watch ya se
+implementó en la fase 5.6. Sin migraciones ni variables de entorno nuevas.
+
+### Política de privacidad y términos V2
+
+`apps/web/src/features/legal` describe V2 tal como está implementada (antes describía V1 y el dominio
+`onrender.com`):
+
+- dominios `emailbot.app` / `api.emailbot.app`; miembros frente a clientes finales (sin cuenta, con Access ID);
+- datos de bots, clientes finales, identificadores, entregas, Access ID (solo huella + 4 últimos caracteres) y
+  sesiones del portal (7 días de inactividad, 30 como máximo; IP y navegador al iniciar);
+- portal: qué ve cada cliente según la configuración del bot, enlaces de adjuntos de 60 s, aislamiento entre clientes;
+- Gmail: `gmail.readonly`, avisos de Google Cloud Pub/Sub sin contenido, polling de recuperación, uso limitado (la
+  transferencia a los clientes finales es una función configurada por la organización);
+- administradores de la plataforma: solo metadatos y estadísticas, acciones auditadas;
+- cookies: almacenamiento local del panel y una cookie técnica del portal; sin publicidad ni analítica.
+
+Los términos añaden las responsabilidades de la organización (derecho a compartir, identificadores correctos,
+entrega segura del Access ID), las reglas del portal y la administración de la plataforma. El login del portal
+enlaza ambos documentos. `legal.test.tsx` comprueba que el texto refleja el código (dominio, scope, Pub/Sub, portal,
+duraciones, cookies). Los textos los redacta el equipo técnico a partir del código: **requieren revisión legal del
+titular** antes de usarlos para la verificación de Google.
+
+### Realtime del portal
+
+```
+worker (entrega automática) / API (entrega manual) --portal.deliveries {organizationId, customerIds}--> Redis
+  --> API --> namespace Socket.IO /portal, sala customer:<organización>:<cliente> --> "portal:inbox.changed" (sin datos)
+  --> el portal vuelve a pedir la bandeja a la API (con la autorización de siempre)
+```
+
+| Pregunta | Respuesta |
+|---|---|
+| ¿Credencial? | La cookie de sesión del portal (`__Host-`, httpOnly), que el navegador envía con el handshake del WebSocket. Nada en el código de la página ni en el almacenamiento |
+| ¿Origen? | El `Origin` del handshake debe estar en `CORS_ORIGINS` (un WebSocket no pasa por CORS: evita el *cross-site WebSocket hijacking* con la cookie del cliente) |
+| ¿Sala? | La decide el servidor a partir de la sesión validada (`portal.validate_session`); el cliente no envía ids |
+| ¿Qué recibe el navegador? | Solo `portal:inbox.changed` (sin ids ni contenido) y `portal:revoked`. Los datos llegan por la API del portal |
+| ¿Sesión revocada, caducada o cliente/organización suspendidos? | Revalidación cada minuto: el socket recibe `portal:revoked` y se cierra; el portal pide `/me` (401) y vuelve al login |
+| ¿Mezcla con el panel? | No: `portal.deliveries` nunca se reenvía a las salas de organización y la cookie del portal no da acceso al namespace del panel |
+| ¿Sin realtime? | El botón «Actualizar» y la navegación siguen funcionando igual |
+
+Implementación: `apps/api/src/infrastructure/portal-realtime.ts`, `apps/worker/src/pipeline/process-email.ts`
+(`announce`), `apps/api/src/modules/deliveries/routes.ts` (señal best effort tras añadir o retirar una entrega
+manual), `apps/web/src/features/portal/portal-realtime.ts` y `usePortalInboxRealtime`. Tests:
+`portal-realtime.test.ts` de la API (incluye WebSocket real: origen, cookie, salas, revocación) y de la web,
+`portal.test.tsx` y `pipeline.test.ts`.
+
+### E2E de aislamiento
+
+`apps/api/e2e/isolation.e2e.ts` (versionado; `pnpm --filter @emailbot/api e2e`) usa la API real, el pipeline real
+del worker (solo el proveedor de Gmail es simulado) y el Supabase local:
+
+- empresa A con clientes A1 y A2, empresa B con B1, que comparte el identificador de A1;
+- correos con identificadores cruzados (A1, A2, A1+A2, B1, nadie);
+- comprobaciones: entregas exactas y señales realtime por correo; RLS como cada usuario y como `anon`; la API del
+  panel (listados, ids de otra empresa, entregas manuales cruzadas); el portal (bandeja exacta de cada cliente,
+  detalle por id ajeno, búsqueda, suspensión de un cliente).
+
+Requisitos: `supabase start` con todas las migraciones aplicadas (lee las claves de `supabase status` o de
+`LOCAL_*`). Se niega a ejecutarse contra algo que no sea `127.0.0.1` / `localhost` y usa nombres únicos por
+ejecución (repetible sin reset). Se comprueba en `pnpm typecheck` (`tsconfig.e2e.json`).
+
 ## Deuda de QA
 
 - ~~Añadir `jsdom` + `@testing-library/react`~~: hecho en la fase 5.5 (tests de componentes del portal). El panel
   sigue con tests de lógica; ampliar los tests de componentes al panel queda como mejora.
-- Arnés de integración local (Supabase local + Valkey, scripts `wsl/*`) **no versionado**: los resultados de
-  integración de las fases 5.6 y 6 no se pueden reproducir desde el repositorio. Las garantías reproducibles son
-  `pnpm test` (incluye las migraciones reales sobre PGlite), `supabase db reset` y `supabase db diff --local`.
+- Arnés de integración local por fase (Supabase local + Valkey, scripts `wsl/*`) **no versionado**. Desde la fase
+  7 el E2E de aislamiento sí lo está (`pnpm --filter @emailbot/api e2e`, ver «Fase 7»); el resto de garantías
+  reproducibles son `pnpm test` (incluye las migraciones reales sobre PGlite), `supabase db reset` y
+  `supabase db diff --local`. Pendiente: E2E de navegador (Playwright) del panel, el portal y `/admin`.
 
 ## Decisiones pendientes
 
-Fases 0 a 6: todas cerradas. Abiertas:
+Fases 0 a 7: todas cerradas. Abiertas:
 
 1. UI del panel para entregas manuales (la API existe).
 2. Retirada de entregas **AUTOMATIC**: hoy no permitida.
-3. Despliegue de la fase 6 (Super Admin) en producción: pendiente de merge y de autorización, según
+3. Despliegue de las fases 6 (Super Admin, ya en `main`) y 7 en producción: pendiente de autorización, según
    [runbook §12](v2-production-rollout.md#12-fase-6-super-admin-pendiente-de-despliegue). (V2 hasta la fase 5.7 ya
    está desplegada.)
 4. Super Admin: cambio de OWNER desde la plataforma (reutilizando la lógica de
@@ -872,5 +940,6 @@ Fases 0 a 6: todas cerradas. Abiertas:
 5. Política de CANCELLED (¿terminal? retención o eliminación de datos).
 6. Alta de empresas: `create_organization` sigue siendo self-serve (la conmutación a alta solo por la plataforma
    es una decisión de negocio pendiente).
-7. Política de privacidad: no describe todavía las piezas de V2 (clientes, portal, entregas) ni el acceso de los
-   administradores de plataforma a metadatos; requiere revisión legal (no se cambia en código).
+7. Política de privacidad y términos V2: redactados en la fase 7 a partir del comportamiento implementado.
+   Antes de publicarlos: revisión legal por el titular y, al publicarlos, actualizar la pantalla de consentimiento
+   y la verificación de Google (`gmail.readonly` muestra datos de Gmail a los clientes finales).

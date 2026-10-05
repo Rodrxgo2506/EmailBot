@@ -66,6 +66,7 @@ Abrir http://localhost:5173, crear una cuenta, crear la organización y conectar
 | `pnpm typecheck` | TypeScript estricto en todo el monorepo |
 | `pnpm lint` | Verificación TypeScript (incluye `noUnusedLocals` / `noUnusedParameters`) |
 | `pnpm test` | Vitest en todos los paquetes (incluye tests de RLS con PGlite) |
+| `pnpm --filter @emailbot/api e2e` | E2E de aislamiento entre empresas y clientes (API, worker, portal y RLS) contra el Supabase local (`supabase start`) |
 | `pnpm --filter @emailbot/web dev` | Solo el frontend |
 
 ## Seguridad (resumen)
@@ -107,6 +108,8 @@ Funcional: autenticación, organizaciones, miembros y roles, cuentas de correo (
 
 V2 (en producción, `main`): bots, customers, entregas, portal del cliente y Gmail casi en tiempo real (Pub/Sub con OIDC + polling de recuperación cada 5 minutos).
 
-Super Admin (V2 fase 6): implementado en la rama `feat/emailbot-f6-super-admin`; todavía no está en `main` ni desplegado en producción.
+Super Admin (V2 fase 6): en `main`; su despliegue en producción (2 migraciones y el schema `admin`) está pendiente: [runbook §12](docs/v2-production-rollout.md#12-fase-6-super-admin-pendiente-de-despliegue).
+
+Calidad y lanzamiento (V2 fase 7): política de privacidad y términos V2, realtime del portal y E2E de aislamiento, en la rama `feat/emailbot-f7-quality-launch` (sin merge ni despliegue): [runbook §13](docs/v2-production-rollout.md#13-fase-7-calidad-y-lanzamiento-pendiente-de-despliegue).
 
 Pendiente: ver la sección *Pendientes* en [`docs/architecture.md`](docs/architecture.md#pendientes).
