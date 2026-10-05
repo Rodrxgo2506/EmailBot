@@ -85,6 +85,13 @@ export function registerPortalSession(app: FastifyInstance, deps: AppDeps): void
   });
 }
 
+/** Hash of the request's session token (portal data functions re-derive everything from it). */
+export function portalTokenHash(request: FastifyRequest): string {
+  const token = sessionTokenOf(request);
+  if (!request.portal || !token) throw invalidSession();
+  return hashSessionToken(token);
+}
+
 export function getPortal(request: FastifyRequest): PortalSessionContext {
   if (!request.portal) throw invalidSession();
   return request.portal;

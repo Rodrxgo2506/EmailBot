@@ -15,6 +15,7 @@ import type {
   EmailAccount,
   EmailAccountStatus,
   EmailAttachment,
+  EmailDelivery,
   EmailDetail,
   EmailProvider,
   EmailRuleRecord,
@@ -26,6 +27,8 @@ import type {
   OrganizationSettings,
   OrganizationStatus,
   Paginated,
+  PortalEmailDetail,
+  PortalInboxItem,
   PortalProfile,
   PortalSettings
 } from "@emailbot/types";
@@ -166,6 +169,19 @@ export interface CustomerAccessRepository {
   revokeSessions(customerId: string, sessionId: string | null): Promise<number>;
 }
 
+/**
+ * Deliveries of an email as members see them (EmailBot V2 phase 5). Runs as
+ * the caller (RLS); MANUAL writes are the atomic SECURITY DEFINER functions
+ * (role, organization and eligibility checked in the database).
+ */
+export interface EmailDeliveryRepository {
+  list(organizationId: string, emailId: string): Promise<EmailDelivery[]>;
+  get(organizationId: string, emailId: string, deliveryId: string): Promise<EmailDelivery | null>;
+  addManual(emailId: string, customerId: string): Promise<{ deliveryId: string; outcome: "CREATED" | "REACTIVATED" | "EXISTING"; botId: string; resolution: string }>;
+  /** Soft removal; MANUAL deliveries only. `removed` is false when it was already removed. */
+  removeManual(deliveryId: string): Promise<{ removed: boolean; emailId: string; customerId: string; botId: string }>;
+}
+
 export interface CustomerIdentifierWrite {
   value?: string;
   normalizedValue?: string;
@@ -270,6 +286,7 @@ export interface Repositories {
   customerIdentifiers: CustomerIdentifierRepository;
   botCustomers: BotCustomerAssignmentRepository;
   customerAccess: CustomerAccessRepository;
+  emailDeliveries: EmailDeliveryRepository;
   rules: RuleRepository;
   emails: EmailRepository;
   attachments: AttachmentRepository;
@@ -333,6 +350,33 @@ export interface PortalSessionContext {
   profile: PortalProfile;
 }
 
+/** Inbox page request: filters apply INSIDE the session's customer scope. */
+export interface PortalInboxFilters {
+  /** Rows requested (the route asks for page size + 1). */
+  limit: number;
+  before: { deliveredAt: string; deliveryId: string } | null;
+  bot?: string | undefined;
+  category?: string | undefined;
+  unread?: boolean | undefined;
+  important?: boolean | undefined;
+  from?: string | undefined;
+  to?: string | undefined;
+  search?: string | undefined;
+}
+
+export type PortalInboxRow = PortalInboxItem;
+
+/** Storage location of an attachment the session's customer may download. */
+export interface PortalAttachmentLocation {
+  id: string;
+  emailId: string;
+  organizationId: string;
+  filename: string;
+  contentType: string | null;
+  storageBucket: string | null;
+  storagePath: string | null;
+}
+
 export interface PrivilegedOperations {
   findProfileIdByEmail(email: string): Promise<string | null>;
   getMemberRole(organizationId: string, userId: string): Promise<OrganizationRole | null>;
@@ -347,4 +391,8 @@ export interface PrivilegedOperations {
   createPortalSession(input: { secretHash: string; tokenHash: string; ip: string | null; userAgent: string | null }): Promise<PortalLoginResult>;
   validatePortalSession(tokenHash: string): Promise<PortalSessionContext | null>;
   endPortalSession(tokenHash: string): Promise<{ sessionId: string; organizationId: string; customerId: string } | null>;
+  /* EmailBot V2 phase 5: portal data, only through portal.* functions (authority = session token hash). */
+  listPortalInbox(tokenHash: string, filters: PortalInboxFilters): Promise<PortalInboxRow[]>;
+  getPortalEmail(tokenHash: string, deliveryId: string): Promise<PortalEmailDetail | null>;
+  getPortalAttachment(tokenHash: string, deliveryId: string, attachmentId: string): Promise<PortalAttachmentLocation | null>;
 }

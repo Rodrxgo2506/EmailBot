@@ -147,7 +147,7 @@ export function portalSessionOperations(service: SupabaseClient): PortalOperatio
       const rows = unwrap(await portal().rpc("validate_session", { p_token_hash: tokenHash })) as Row[];
       const row = rows[0];
       if (!row) return null;
-      const bots = (Array.isArray(row.bots) ? row.bots : []) as Array<{ name: string; portalSettings: PortalSettings }>;
+      const bots = (Array.isArray(row.bots) ? row.bots : []) as Array<{ name: string; slug: string; portalSettings: PortalSettings }>;
       return {
         sessionId: row.session_id,
         organizationId: row.organization_id,
@@ -155,7 +155,7 @@ export function portalSessionOperations(service: SupabaseClient): PortalOperatio
         profile: {
           customer: { displayName: row.display_name, status: row.customer_status },
           organization: { name: row.organization_name },
-          bots: bots.map((bot) => ({ name: bot.name, portalSettings: bot.portalSettings })),
+          bots: bots.map((bot) => ({ name: bot.name, slug: bot.slug, portalSettings: bot.portalSettings })),
           session: { idleExpiresAt: row.idle_expires_at, absoluteExpiresAt: row.absolute_expires_at }
         }
       };

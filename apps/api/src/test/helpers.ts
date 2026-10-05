@@ -60,6 +60,7 @@ export function createFakeRepositories(): DeepMock<Repositories> {
     customerIdentifiers: ["list", "get", "create", "update", "remove"],
     botCustomers: ["listForBot", "listForCustomer", "get", "create", "update", "remove"],
     customerAccess: ["getActive", "listSessions", "issue", "revoke", "revokeSessions"],
+    emailDeliveries: ["list", "get", "addManual", "removeManual"],
     rules: ["list", "get", "create", "update", "remove"],
     emails: ["list", "get", "update", "remove"],
     attachments: ["get", "listStoredObjects"],
@@ -86,7 +87,10 @@ export function createFakePrivileged(): { [K in keyof PrivilegedOperations]: Ret
     removeStorageObjects: vi.fn(async () => ({ failed: 0 })),
     createPortalSession: unexpected("privileged.createPortalSession"),
     validatePortalSession: unexpected("privileged.validatePortalSession"),
-    endPortalSession: unexpected("privileged.endPortalSession")
+    endPortalSession: unexpected("privileged.endPortalSession"),
+    listPortalInbox: unexpected("privileged.listPortalInbox"),
+    getPortalEmail: unexpected("privileged.getPortalEmail"),
+    getPortalAttachment: unexpected("privileged.getPortalAttachment")
   };
 }
 

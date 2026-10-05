@@ -2,6 +2,7 @@ import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import type { Repositories } from "../types.js";
 import { botRepository } from "./bot-repositories.js";
 import { customerAccessRepository } from "./customer-access-repositories.js";
+import { emailDeliveryRepository } from "./delivery-repositories.js";
 import { botCustomerRepository, customerIdentifierRepository, customerRepository } from "./customer-repositories.js";
 import { attachmentRepository, auditRepository, emailRepository } from "./email-repositories.js";
 import { memberRepository, membershipRepository, organizationRepository } from "./organization-repositories.js";
@@ -52,6 +53,7 @@ export function createSupabaseRepositories(db: SupabaseClient): Repositories {
     customerIdentifiers: customerIdentifierRepository(db),
     botCustomers: botCustomerRepository(db),
     customerAccess: customerAccessRepository(db),
+    emailDeliveries: emailDeliveryRepository(db),
     rules: ruleRepository(db),
     emails: emailRepository(db),
     attachments: attachmentRepository(db),
