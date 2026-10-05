@@ -16,7 +16,7 @@ Producción no se modifica sin autorización explícita por fase.
 | 5.5 | UI del portal + cierre de decisiones de la fase 5 | completada |
 | 5.6 | Gmail casi en tiempo real (watch + Pub/Sub) + sync manual del portal | completada |
 | 5.7 | Auditoría de preparación de producción de Gmail push + portal ([runbook](v2-production-rollout.md)) | completada |
-| 6 | Super Admin | pendiente |
+| 6 | Super Admin (`platform_admins`, `/api/admin/*`, consola `/admin`) | completada |
 | — | Hardening, E2E, documentación, preparación de producción | pendiente |
 
 ## Convenciones
@@ -680,6 +680,123 @@ Auditada en la fase 5.7: Google Cloud, variables de Render, migraciones, schema 
 rollback, smoke tests y riesgos en [`v2-production-rollout.md`](v2-production-rollout.md). Sin push configurado,
 todo sigue funcionando con polling.
 
+## Fase 6: Super Admin
+
+### Modelo
+
+```
+auth.users -> profiles -> platform_admins -> requirePlatformAdmin -> /api/admin/* -> admin.* (service role)
+```
+
+- `public.platform_admins` (`id`, `user_id` único → `profiles` con cascade, `created_at`, `created_by`) es la única
+  fuente de verdad. No es un rol de organización, ni un flag del perfil, ni metadata del JWT. Se revoca al
+  instante borrando la fila. **No hay API para crear administradores de plataforma**: solo SQL del propietario de
+  la base de datos.
+- `public.platform_audit_logs`: auditoría de plataforma inmutable (mismo patrón que `audit_logs`: solo admite el
+  `SET NULL` de un actor u organización eliminados). Los `audit_logs` de las organizaciones no cambian.
+- `private.is_platform_admin(user_id default auth.uid())`: consulta solo `platform_admins`. `SECURITY INVOKER`
+  porque solo se usa dentro de las funciones `admin.*` (contexto del propietario) y nunca en una política RLS;
+  no la ejecuta ningún rol de la API.
+
+### Por qué funciones `admin.*` y no grants al service role
+
+El service role es compartido con el worker y tiene privilegios mínimos: `service-role-privileges.test.ts` prohíbe
+que lea nombres de organizaciones, bots, clientes o `audit_logs`, y esas pruebas no se relajan. Por eso el plano de
+administración usa funciones `SECURITY DEFINER` en el schema `admin` (mismo patrón que `portal.*`):
+
+- `EXECUTE` solo para `service_role` (nunca `anon` ni `authenticated`: el navegador no puede llamarlas);
+- reciben el actor (`p_actor_id`, del JWT verificado por la API) y lo **vuelven a comprobar** contra
+  `platform_admins` (`42501` si no es admin): defensa en profundidad;
+- `search_path = ''`, sin SQL dinámico, orden de lista blanca (`created_desc`, `created_asc`, `name_asc`,
+  `name_desc`), comodines de `LIKE` escapados, páginas de 100 como máximo;
+- devuelven columnas explícitas de metadatos: nunca cuerpos, HTML, `extracted_data`, adjuntos, rutas de Storage,
+  tokens, credenciales, identificadores de clientes, Access IDs ni sesiones;
+- las escrituras (`create_organization`, `update_organization`) se auditan en la misma transacción, con el
+  `request id`.
+
+**Ninguna política RLS existente cambia** y no existe ningún `or is_platform_admin()`: un administrador de
+plataforma que no es miembro no ve nada de una organización por la Data API ni por los endpoints normales
+(`403 NOT_A_MEMBER`).
+
+### Plantilla RLS (`platform_admins`, `platform_audit_logs`)
+
+| Pregunta | Respuesta |
+|---|---|
+| SELECT / INSERT / UPDATE / DELETE | nadie por la Data API (RLS sin políticas y sin grants a `anon`, `authenticated` ni `service_role`) |
+| ¿Cruza `organization_id`? | n/a (ámbito de plataforma) |
+| ¿Customer? | no |
+| ¿Super Admin? | solo mediante `admin.*` (actor comprobado en cada llamada) |
+| service_role | `EXECUTE` en `admin.*`; ningún privilegio de tabla |
+
+### API
+
+- `requirePlatformAdmin` (`plugins/platform-admin.ts`): tras `authenticate`, consulta `admin.is_platform_admin` en
+  cada petición (la revocación es inmediata) y responde `403 PLATFORM_ADMIN_REQUIRED` antes de leer ningún dato.
+  Solo se usa en `/api/admin/*`, que nunca usa `requireOrganization`.
+- `GET /api/me` añade `isPlatformAdmin` (solo para la UI; si la consulta falla, `false` sin romper el panel).
+- Endpoints: ver `docs/api.md` («Administración de plataforma»). Cuerpos estrictos (sin asignación masiva),
+  `ownerEmail` resuelto a un usuario existente con correo confirmado (`422 OWNER_NOT_FOUND`; no se crean cuentas),
+  `slug` derivado del nombre si no se envía, `409` si ya existe. Escrituras con rate limit propio (60/min).
+- Cambio de OWNER desde la plataforma: **no implementado** (ver pendientes).
+
+### `organizations.status`
+
+Los efectos ya existían desde la fase 1; la fase 6 añade quién puede cambiarlo (solo la plataforma, auditado).
+
+| Estado | API (miembros) | Worker | Portal | Datos |
+|---|---|---|---|---|
+| ACTIVE | normal | sincroniza y procesa | normal | — |
+| SUSPENDED | `403 ORGANIZATION_INACTIVE` (salvo `GET /organizations/current` y `/api/me`) | no sincroniza ni procesa; el cursor no avanza (no se pierde correo) | sesiones no válidas mientras dure (no se revocan) | **nada se borra**: correos, entregas, bots, clientes, reglas, cuentas y miembros se conservan |
+| CANCELLED | igual que SUSPENDED | igual que SUSPENDED | igual que SUSPENDED | igual que SUSPENDED |
+
+`SUSPENDED → ACTIVE` restaura todo (las sesiones del portal no caducadas vuelven a funcionar; el polling continúa
+desde el cursor guardado). El proyecto no define CANCELLED como terminal: hoy es reversible y no borra nada
+(política de retención o eliminación: pendiente). Eventos: `organization.suspended`, `organization.reactivated`,
+`organization.cancelled`, `organization.plan_changed`, `organization.created`.
+
+### Web
+
+`/admin/*` en la misma SPA y sesión, fuera del contexto de organización (un admin sin organización puede entrar;
+desde onboarding hay un acceso). `RequirePlatformAdmin` y la sección «Plataforma → Administración» del sidebar se
+basan en `isPlatformAdmin` de `/api/me`; la protección real es la API. Pantallas: resumen (estadísticas,
+actividad reciente, accesos rápidos), organizaciones (búsqueda, estado, plan, orden, paginación, editar plan,
+suspender / reactivar con confirmación), detalle (resumen, contadores, miembros, bots, clientes, cuentas,
+actividad y auditoría de plataforma) y auditoría.
+
+### Crear un Platform Admin (local)
+
+El usuario debe existir (registrarse en la web local y confirmar el correo en el buzón de pruebas local). Después,
+como propietario de la base de datos (Studio local → SQL Editor, o `psql`):
+
+```sql
+insert into public.platform_admins (user_id)
+select id from public.profiles where email = 'tu-correo@ejemplo.com';
+-- revocar:
+delete from public.platform_admins
+where user_id = (select id from public.profiles where email = 'tu-correo@ejemplo.com');
+```
+
+Probar la API con el token de acceso de Supabase de esa sesión (siempre en la cabecera, nunca en la URL):
+
+```bash
+curl -H "Authorization: Bearer $ACCESS_TOKEN" http://localhost:3000/api/admin/stats
+```
+
+Tests: `pnpm --filter @emailbot/database test` (SQL, grants, actor, suspensión, auditoría),
+`pnpm --filter @emailbot/api test` (`admin.test.ts`), `pnpm --filter @emailbot/web test` (`features/admin`).
+
+### Producción (no aplicado; requiere autorización)
+
+1. Migraciones `20261005120000_platform_admins` y `20261005120100_admin_functions` (aditivas: dos tablas nuevas,
+   funciones y un índice en `audit_logs`; ningún dato existente cambia).
+2. Después de las migraciones, añadir `admin` a *Exposed schemas* (Data API), igual que `portal`: exponerlo antes
+   de crearlo dejaría sin Data API a todo el proyecto. En local, `supabase/config.toml` ya lo incluye.
+3. Desplegar API y web.
+4. Crear el primer administrador con SQL (SQL Editor de producción), como arriba.
+
+Hasta el paso 2, `/api/me` responde `isPlatformAdmin: false` y `/api/admin/*` falla; el resto de la API no se ve
+afectado.
+
 ## Deuda de QA
 
 - ~~Añadir `jsdom` + `@testing-library/react`~~: hecho en la fase 5.5 (tests de componentes del portal). El panel
@@ -687,9 +804,15 @@ todo sigue funcionando con polling.
 
 ## Decisiones pendientes
 
-Fases 0 a 5.7: todas cerradas. Abiertas:
+Fases 0 a 6: todas cerradas. Abiertas:
 
 1. UI del panel para entregas manuales (la API existe).
 2. Retirada de entregas **AUTOMATIC**: hoy no permitida.
 3. Despliegue de V2 en producción: pendiente de autorización, según
    [`v2-production-rollout.md`](v2-production-rollout.md).
+4. Super Admin: cambio de OWNER desde la plataforma (reutilizando la lógica de
+   `transfer_organization_ownership`), edición de roles de miembros y gestión de administradores de plataforma
+   desde la UI (hoy solo SQL).
+5. Política de CANCELLED (¿terminal? retención o eliminación de datos).
+6. Alta de empresas: `create_organization` sigue siendo self-serve (la conmutación a alta solo por la plataforma
+   es una decisión de negocio pendiente).

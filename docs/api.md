@@ -20,7 +20,7 @@ prueba de reglas, alta de miembros, creación de organizaciones, OAuth, IMAP, si
 
 | Método | Ruta | Permiso |
 |---|---|---|
-| GET | `/api/me` | autenticado — usuario y membresías |
+| GET | `/api/me` | autenticado — usuario, membresías e `isPlatformAdmin` |
 | POST | `/api/me/login-event` | miembro — registra `LOGIN` en auditoría |
 | POST | `/api/organizations` | autenticado — el creador queda como OWNER |
 | GET | `/api/organizations/current` | miembro — organización, rol y configuración |
@@ -99,6 +99,27 @@ El resumen de cada correo incluye `attachmentCount` y `extractedData`.
 ## Auditoría
 
 `GET /api/audit-logs?page&pageSize&action&entityType` — `audit:read` (solo lectura).
+
+## Administración de plataforma (Super Admin, V2 fase 6)
+
+Solo usuarios con fila en `platform_admins` (`requirePlatformAdmin`, comprobado en cada petición; el resto recibe
+`403 PLATFORM_ADMIN_REQUIRED` antes de leer ningún dato). No usan `X-Organization-Id`. Solo metadatos y
+estadísticas: nunca cuerpos, HTML, datos extraídos, adjuntos, credenciales, identificadores de clientes, Access IDs
+ni sesiones.
+
+| Método | Ruta | Descripción |
+|---|---|---|
+| GET | `/api/admin/stats` | Totales de la plataforma (organizaciones por estado, miembros, bots, clientes, cuentas, correos, entregas) |
+| GET | `/api/admin/organizations` | `search`, `status`, `plan`, `sort` (`created_desc`, `created_asc`, `name_asc`, `name_desc`), `page`, `pageSize` (≤ 100) |
+| POST | `/api/admin/organizations` | `{ name, ownerEmail, plan?, slug? }`: el OWNER debe ser un usuario existente con correo confirmado (`422 OWNER_NOT_FOUND`) |
+| GET | `/api/admin/organizations/:id` | Resumen, owner y contadores |
+| PATCH | `/api/admin/organizations/:id` | `{ plan?, status? }` (suspender / reactivar / cancelar) |
+| GET | `/api/admin/organizations/:id/members` | Nombre, correo, rol, fecha de alta |
+| GET | `/api/admin/organizations/:id/bots` | Estado, reglas, clientes asignados, entregas |
+| GET | `/api/admin/organizations/:id/customers` | Nombre, estado, bots, entregas (paginado) |
+| GET | `/api/admin/organizations/:id/email-accounts` | Proveedor, dirección, estado, sincronización y push |
+| GET | `/api/admin/activity` | Eventos de las organizaciones (`organizationId?`, `page`, `pageSize`; `hasMore`) |
+| GET | `/api/admin/audit` | Auditoría de plataforma (`platform_audit_logs`; mismo paginado) |
 
 ## Webhooks
 
