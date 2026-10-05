@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createTestDatabase, type TestDatabase, type Tx } from "../src/harness.js";
+import { createTestDatabase, type TestDatabase } from "../src/harness.js";
 import { count, one, seedTwoTenants, type Fixtures } from "./fixtures.js";
 
 /*
