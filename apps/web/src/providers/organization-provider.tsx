@@ -15,13 +15,17 @@ import { useAuth } from "./auth-provider";
 export interface MeResponse {
   user: { id: string; email: string | null };
   memberships: OrganizationMembership[];
+  /** EmailBot V2 phase 6: a row in platform_admins (UI only; /api/admin checks it on every request). */
+  isPlatformAdmin?: boolean;
 }
 
-interface OrganizationContextValue {
+export interface OrganizationContextValue {
   me: MeResponse | undefined;
   loading: boolean;
   error: unknown;
   memberships: OrganizationMembership[];
+  /** Shows the platform administration entry points; never a protection by itself. */
+  isPlatformAdmin: boolean;
   organization: Organization | null;
   role: OrganizationRole | null;
   can(permission: Permission): boolean;
@@ -29,7 +33,8 @@ interface OrganizationContextValue {
   refresh(): Promise<unknown>;
 }
 
-const OrganizationContext = createContext<OrganizationContextValue | null>(null);
+/** Exported for component tests that render without the Supabase session. */
+export const OrganizationContext = createContext<OrganizationContextValue | null>(null);
 
 export const meQueryKey = (userId: string | undefined) => ["me", userId] as const;
 
@@ -82,6 +87,7 @@ export function OrganizationProvider({ children }: { children: ReactNode }) {
       loading: meQuery.isPending && Boolean(userId),
       error: meQuery.error,
       memberships,
+      isPlatformAdmin: meQuery.data?.isPlatformAdmin === true,
       organization: active?.organization ?? null,
       role: active?.role ?? null,
       can: (permission) => hasPermission(active?.role, permission),

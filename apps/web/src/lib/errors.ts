@@ -27,6 +27,9 @@ const MESSAGES: Record<string, string> = {
   ALREADY_EXISTS: "Ya existe un recurso con esos datos (por ejemplo, el mismo slug o correo).",
   ATTACHMENT_NOT_STORED: "El contenido de este adjunto no fue almacenado.",
   ALREADY_OWNER: "Ya eres el propietario de esta organización.",
+  PLATFORM_ADMIN_REQUIRED: "Esta sección es solo para administradores de la plataforma.",
+  OWNER_NOT_FOUND: "No existe un usuario con ese correo confirmado. Debe registrarse y confirmar su correo primero.",
+  INVALID_SLUG: "Indica un slug: el nombre no tiene caracteres válidos para generarlo.",
   VALIDATION_ERROR: "Revisa los datos del formulario."
 };
 

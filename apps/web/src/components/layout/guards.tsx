@@ -1,7 +1,7 @@
 import type { Permission } from "@emailbot/types";
 import { Ban, ShieldAlert } from "lucide-react";
 import type { ReactNode } from "react";
-import { Navigate, Outlet, useLocation } from "react-router-dom";
+import { Link, Navigate, Outlet, useLocation } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { EmptyState, ErrorMessage, Spinner } from "@/components/ui/display";
 import { getErrorMessage } from "@/lib/errors";
@@ -83,6 +83,38 @@ export function RequireOrganization() {
   if (!organization) return <Navigate to="/onboarding" replace />;
   if (organization.status !== "ACTIVE") return <InactiveOrganization />;
   return <Outlet />;
+}
+
+/**
+ * Platform administration (/admin/*): only for users in platform_admins, with
+ * or without an organization. UX only: every /api/admin request is
+ * authorized again by the API.
+ */
+export function RequirePlatformAdmin({ children }: { children: ReactNode }) {
+  const { loading, error, isPlatformAdmin, memberships } = useOrganization();
+  if (loading) return <FullScreenLoader />;
+  if (error) {
+    return (
+      <div className="mx-auto mt-24 max-w-md p-4">
+        <ErrorMessage error={new Error(getErrorMessage(error))} />
+      </div>
+    );
+  }
+  if (!isPlatformAdmin) {
+    return (
+      <div className="mx-auto mt-24 grid max-w-md gap-4 p-4">
+        <EmptyState
+          icon={<ShieldAlert />}
+          title="Acceso denegado"
+          description="Esta sección es solo para administradores de la plataforma EmailBot."
+        />
+        <Button variant="outline" asChild>
+          <Link to={memberships.length > 0 ? "/" : "/onboarding"}>Volver</Link>
+        </Button>
+      </div>
+    );
+  }
+  return <>{children}</>;
 }
 
 /**

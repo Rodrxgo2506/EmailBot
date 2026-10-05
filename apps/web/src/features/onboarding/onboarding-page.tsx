@@ -27,7 +27,7 @@ const schema = z.object({
 export function OnboardingPage() {
   const navigate = useNavigate();
   const { signOut } = useAuth();
-  const { memberships, switchOrganization } = useOrganization();
+  const { memberships, switchOrganization, isPlatformAdmin } = useOrganization();
   const create = useCreateOrganization();
   const form = useForm({ resolver: zodResolver(schema), defaultValues: { name: "", slug: "" } });
   const name = form.watch("name");
@@ -62,6 +62,11 @@ export function OnboardingPage() {
         <div className="flex justify-center text-primary">
           <Building2 className="size-10" />
         </div>
+        {isPlatformAdmin ? (
+          <Button variant="outline" type="button" onClick={() => navigate("/admin")}>
+            Ir a Administración de plataforma
+          </Button>
+        ) : null}
         <ErrorMessage error={create.error} />
         <Field label="Nombre" htmlFor="org-name" error={form.formState.errors.name?.message}>
           <Input id="org-name" placeholder="Mi empresa" {...form.register("name")} />

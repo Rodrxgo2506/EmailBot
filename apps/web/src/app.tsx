@@ -42,6 +42,7 @@ const ProfilePage = page(() => import("@/features/profile/profile-page"), "Profi
 const PrivacyPage = page(() => import("@/features/legal/privacy-page"), "PrivacyPage");
 const TermsPage = page(() => import("@/features/legal/terms-page"), "TermsPage");
 const PortalApp = page(() => import("@/features/portal/portal-app"), "PortalApp");
+const AdminRoute = page(() => import("@/features/admin/admin-route"), "AdminRoute");
 
 function guarded(permission: Permission, element: ReactNode) {
   return (
@@ -93,6 +94,8 @@ function SessionRoutes() {
 
             <Route element={<RequireAuth />}>
               <Route path="/onboarding" element={<OnboardingPage />} />
+              {/* Platform administration: no organization needed (RequirePlatformAdmin inside). */}
+              <Route path="/admin/*" element={<AdminRoute />} />
               <Route element={<RequireOrganization />}>
                 <Route element={<AppShell />}>
                   <Route index element={guarded("emails:read", <DashboardPage />)} />
