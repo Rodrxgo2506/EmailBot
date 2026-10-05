@@ -41,6 +41,7 @@ const AuditPage = page(() => import("@/features/organization/audit-page"), "Audi
 const ProfilePage = page(() => import("@/features/profile/profile-page"), "ProfilePage");
 const PrivacyPage = page(() => import("@/features/legal/privacy-page"), "PrivacyPage");
 const TermsPage = page(() => import("@/features/legal/terms-page"), "TermsPage");
+const PortalApp = page(() => import("@/features/portal/portal-app"), "PortalApp");
 
 function guarded(permission: Permission, element: ReactNode) {
   return (
@@ -65,6 +66,8 @@ export function App() {
           {/* Public legal pages (linked from the Google OAuth consent screen). */}
           <Route path="/privacy" element={publicPage(<PrivacyPage />)} />
           <Route path="/terms" element={publicPage(<TermsPage />)} />
+          {/* Customer portal: Access ID + httpOnly session cookie, no Supabase session, no organization. */}
+          <Route path="/portal/*" element={publicPage(<PortalApp />)} />
           <Route path="*" element={<SessionRoutes />} />
         </Routes>
       </BrowserRouter>
