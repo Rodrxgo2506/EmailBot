@@ -29,6 +29,8 @@ const TABLES = [
   "organization_members",
   "organization_settings",
   "organizations",
+  "platform_admins",
+  "platform_audit_logs",
   "profiles"
 ] as const;
 
@@ -57,11 +59,14 @@ const SERVICE_ROLE_EXPECTED: Record<(typeof TABLES)[number], Privilege[]> = {
   organization_members: ["SELECT"],
   organization_settings: ["SELECT"],
   organizations: [],
+  // V2 phase 6: no table privilege; admin.* SECURITY DEFINER functions only.
+  platform_admins: [],
+  platform_audit_logs: [],
   profiles: ["SELECT"]
 };
 
 /** Tables that existed before migration 7 (V2 tables are created later). */
-const V2_TABLES: readonly string[] = ["bots", "customers", "customer_identifiers", "bot_customer_assignments", "email_deliveries", "customer_access_credentials", "customer_sessions"];
+const V2_TABLES: readonly string[] = ["bots", "customers", "customer_identifiers", "bot_customer_assignments", "email_deliveries", "customer_access_credentials", "customer_sessions", "platform_admins", "platform_audit_logs"];
 const V1_TABLES = TABLES.filter((table) => !V2_TABLES.includes(table));
 
 async function privilegeMatrix(tx: Tx, role: string, tables: readonly string[] = TABLES): Promise<Record<string, Privilege[]>> {
@@ -223,6 +228,10 @@ describe.each<DefaultPrivilegesProfile>(["production", "local"])("AFTER migratio
     ["SELECT customer_sessions.token_hash", "select token_hash from public.customer_sessions"],
     ["UPDATE customer_sessions", "update public.customer_sessions set revoked_at = now()"],
     ["UPDATE organization_members", "update public.organization_members set role = 'VIEWER'"],
+    ["SELECT platform_admins", "select user_id from public.platform_admins"],
+    ["INSERT platform_admins", "insert into public.platform_admins (user_id) values (gen_random_uuid())"],
+    ["SELECT platform_audit_logs", "select action from public.platform_audit_logs"],
+    ["INSERT platform_audit_logs", "insert into public.platform_audit_logs (action, target_type) values ('organization.created', 'organization')"],
     ["TRUNCATE emails", "truncate public.emails"]
   ])("service_role cannot %s", async (_label, sql) => {
     await expect(t.asService((tx) => tx.query(sql))).rejects.toThrow(/permission denied/);

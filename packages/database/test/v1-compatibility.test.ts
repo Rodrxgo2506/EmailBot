@@ -50,7 +50,7 @@ const AUTHENTICATED_DEFINER_ALLOWLIST = [
 ];
 
 /** Schemas owned by EmailBot (Supabase-managed schemas are out of scope). */
-const OWN_SCHEMAS = ["public", "private", "portal"];
+const OWN_SCHEMAS = ["public", "private", "portal", "admin"];
 
 const DATA_PRIVILEGES = ["SELECT", "INSERT", "UPDATE", "DELETE"] as const;
 
