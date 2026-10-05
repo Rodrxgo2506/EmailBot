@@ -1,7 +1,7 @@
 import type { AdminActivityItem, AdminAuditEntry } from "@emailbot/types";
 import { describe, expect, it, vi } from "vitest";
 import { createAdminApi } from "./admin-api";
-import { activityLabel, platformActionLabel, platformAuditDetail, statusChange } from "./admin-model";
+import { activityLabel, auditOrganizationLabel, cancelChange, platformActionLabel, platformAuditDetail, statusChange } from "./admin-model";
 
 describe("statusChange", () => {
   it("ACTIVE -> suspend: destructive, explains the real effects and that nothing is deleted", () => {
@@ -14,6 +14,46 @@ describe("statusChange", () => {
 
   it.each(["SUSPENDED", "CANCELLED"] as const)("%s -> reactivate (not destructive)", (status) => {
     expect(statusChange(status, "Acme")).toMatchObject({ target: "ACTIVE", action: "Reactivar", title: "¿Reactivar organización?", destructive: false });
+  });
+});
+
+describe("cancelChange", () => {
+  it.each(["ACTIVE", "SUSPENDED"] as const)("%s -> cancel: destructive, same effects as a suspension, nothing deleted, reversible", (status) => {
+    const change = cancelChange(status, "Acme");
+    expect(change).toMatchObject({ target: "CANCELLED", action: "Cancelar organización", title: "¿Cancelar organización?", destructive: true });
+    expect(change?.description).toMatch(/mismos efectos que una suspensión/);
+    expect(change?.description).toMatch(/No se elimina ningún dato/);
+    expect(change?.description).toMatch(/puedes reactivarla después/);
+  });
+
+  it("an already cancelled organization offers no cancellation", () => {
+    expect(cancelChange("CANCELLED", "Acme")).toBeNull();
+  });
+});
+
+describe("auditOrganizationLabel", () => {
+  const entry = (overrides: Partial<AdminAuditEntry>): AdminAuditEntry => ({
+    id: "a",
+    actor: { userId: null, email: null },
+    action: "organization.suspended",
+    targetType: "organization",
+    targetId: "11111111-1111-4111-8111-111111111111",
+    organization: { id: "11111111-1111-4111-8111-111111111111", name: "Acme" },
+    metadata: {},
+    createdAt: "2026-10-05T00:00:00.000Z",
+    ...overrides
+  });
+
+  it("existing organization: id and name", () => {
+    expect(auditOrganizationLabel(entry({}))).toEqual({ id: "11111111-1111-4111-8111-111111111111", name: "Acme" });
+  });
+
+  it("organization deleted (organization_id set to NULL, target_id kept): deleted", () => {
+    expect(auditOrganizationLabel(entry({ organization: null }))).toEqual({ deleted: true });
+  });
+
+  it("not about an organization: null", () => {
+    expect(auditOrganizationLabel(entry({ organization: null, targetType: "platform", targetId: null }))).toBeNull();
   });
 });
 

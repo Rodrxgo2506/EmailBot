@@ -75,6 +75,33 @@ export function statusChange(status: OrganizationStatus, name: string): StatusCh
   };
 }
 
+/**
+ * Cancel (from ACTIVE or SUSPENDED). The project has not made CANCELLED
+ * terminal: today the backend treats it exactly like SUSPENDED (every check
+ * is organizations.status <> 'ACTIVE'), nothing is deleted and it can be
+ * reactivated. The copy says only that; null when already cancelled.
+ */
+export function cancelChange(status: OrganizationStatus, name: string): StatusChange | null {
+  if (status === "CANCELLED") return null;
+  return {
+    target: "CANCELLED",
+    action: "Cancelar organización",
+    title: "¿Cancelar organización?",
+    description:
+      `${name} quedará marcada como cancelada. Hoy tiene los mismos efectos que una suspensión: no se sincronizarán sus buzones, sus miembros no podrán operar el panel y el portal de sus clientes quedará inaccesible. ` +
+      "No se elimina ningún dato y, por ahora, puedes reactivarla después.",
+    confirmLabel: "Cancelar organización",
+    destructive: true,
+    success: "Organización cancelada"
+  };
+}
+
+/** Status change the dialog confirms: the organization and the copy of the chosen transition. */
+export interface StatusTarget<T> {
+  organization: T;
+  change: StatusChange;
+}
+
 const PLATFORM_ACTIONS: Record<string, string> = {
   "organization.created": "Organización creada",
   "organization.plan_changed": "Plan cambiado",
@@ -92,6 +119,18 @@ export function platformAuditDetail(entry: AdminAuditEntry): string | null {
   const { from, to, plan } = entry.metadata as { from?: unknown; to?: unknown; plan?: unknown };
   if (typeof from === "string" && typeof to === "string") return `${from} → ${to}`;
   if (typeof plan === "string") return `Plan ${plan}`;
+  return null;
+}
+
+/**
+ * Organization column of a platform audit entry. organization_id becomes NULL
+ * when the organization is deleted (ON DELETE SET NULL; the record itself is
+ * immutable), while target_id keeps the id: an organization-targeted entry
+ * without organization is therefore a deleted organization.
+ */
+export function auditOrganizationLabel(entry: AdminAuditEntry): { id: string; name: string } | { deleted: true } | null {
+  if (entry.organization) return { id: entry.organization.id, name: entry.organization.name ?? "Organización eliminada" };
+  if (entry.targetType === "organization" && entry.targetId) return { deleted: true };
   return null;
 }
 

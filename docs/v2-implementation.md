@@ -1,7 +1,8 @@
 # EmailBot V2 — implementación
 
-Rama: `feat/emailbot-v2`. Evolución incremental y aditiva de V1 (ver la auditoría arquitectónica aprobada).
-Producción no se modifica sin autorización explícita por fase.
+Ramas: `feat/emailbot-v2` (fases 0 a 5.7, ya en `main`) y `feat/emailbot-f6-super-admin` (fase 6). Evolución
+incremental y aditiva de V1 (ver la auditoría arquitectónica aprobada). Producción no se modifica sin autorización
+explícita por fase.
 
 ## Fases
 
@@ -16,8 +17,17 @@ Producción no se modifica sin autorización explícita por fase.
 | 5.5 | UI del portal + cierre de decisiones de la fase 5 | completada |
 | 5.6 | Gmail casi en tiempo real (watch + Pub/Sub) + sync manual del portal | completada |
 | 5.7 | Auditoría de preparación de producción de Gmail push + portal ([runbook](v2-production-rollout.md)) | completada |
-| 6 | Super Admin (`platform_admins`, `/api/admin/*`, consola `/admin`) | completada |
+| 6 | Super Admin (`platform_admins`, `/api/admin/*`, consola `/admin`) | completada en la rama `feat/emailbot-f6-super-admin` (sin merge en `main`, sin desplegar) |
 | — | Hardening, E2E, documentación, preparación de producción | pendiente |
+
+## Estado en producción
+
+- **Desplegado**: V2 fases 0 a 5.7 (`main` = `34ce322`): bots, customers, entregas, portal del cliente y Gmail casi
+  en tiempo real (`users.watch` + Pub/Sub con OIDC), con polling de recuperación cada 5 minutos. Se siguió
+  [`v2-production-rollout.md`](v2-production-rollout.md); Gmail push está verificado con logs de producción
+  (`gmail.sync.*` con `reason: PUBSUB`).
+- **No desplegado**: fase 6 (Super Admin). Implementada y revisada en `feat/emailbot-f6-super-admin`, todavía no
+  mergeada en `main`. Pasos de despliegue: [runbook §12](v2-production-rollout.md#12-fase-6-super-admin-pendiente-de-despliegue).
 
 ## Convenciones
 
@@ -379,8 +389,8 @@ Ningún rol de la API puede leer `secret_hash` ni `token_hash`. Lista de funcion
 ampliada en la guarda V1; matriz del service role sin cambios para estas tablas.
 
 **Schema `portal` expuesto en PostgREST** (`supabase/config.toml [api].schemas`), con `USAGE` solo para
-`service_role`. En producción habrá que añadir `portal` a *Exposed schemas* (Dashboard → API) en el despliegue
-de V2; sin ello el login del portal fallaría (fallo cerrado).
+`service_role`. En producción, `portal` se añadió a *Exposed schemas* (Dashboard → API) en el despliegue de V2;
+sin ello el login del portal fallaría (fallo cerrado).
 
 ### Auditoría
 
@@ -400,7 +410,7 @@ guarda en `audit_logs` (sí en `customer_sessions.ip` y en los logs).
 
 1. Prefijo del Access ID fijo `SP` (`SP-XXXXXXXXXXXX`); sin `customer_access_prefix` ni columna nueva en V2.
 2. Entregas MANUAL: fase 5 (implementadas, ver abajo), sin ninguna excepción de seguridad.
-3. Schema `portal` en producción: no se toca ahora; forma parte del checklist de despliegue de V2.
+3. Schema `portal` en producción: no se tocó en esta fase; se expuso en el despliegue de V2.
 
 ## Fase 5: decisiones implementadas
 
@@ -674,11 +684,15 @@ Sin Gmail, OAuth, Google Cloud ni Pub/Sub reales:
 - Supabase local;
 - BullMQ sobre un Valkey local temporal (`wsl/38-phase56-local.sh`).
 
-### Configuración pendiente de producción
+### Producción
 
-Auditada en la fase 5.7: Google Cloud, variables de Render, migraciones, schema `portal`, orden de despliegue,
-rollback, smoke tests y riesgos en [`v2-production-rollout.md`](v2-production-rollout.md). Sin push configurado,
-todo sigue funcionando con polling.
+Auditada en la fase 5.7 (Google Cloud, variables de Render, migraciones, schema `portal`, orden de despliegue,
+rollback, smoke tests y riesgos) y desplegada según [`v2-production-rollout.md`](v2-production-rollout.md): el push
+está activo en producción. Sin push configurado, todo seguiría funcionando con polling.
+
+El script `wsl/38-phase56-local.sh` citado arriba (y el resto del arnés de integración local de las fases 5.6 y 6)
+**no está versionado** en el repositorio: esas pruebas de integración no se pueden reproducir desde el repo
+(ver «Deuda de QA»).
 
 ## Fase 6: Super Admin
 
@@ -737,7 +751,39 @@ plataforma que no es miembro no ve nada de una organización por la Data API ni 
 - Endpoints: ver `docs/api.md` («Administración de plataforma»). Cuerpos estrictos (sin asignación masiva),
   `ownerEmail` resuelto a un usuario existente con correo confirmado (`422 OWNER_NOT_FOUND`; no se crean cuentas),
   `slug` derivado del nombre si no se envía, `409` si ya existe. Escrituras con rate limit propio (60/min).
+- Listas paginadas (`organizations`, `customers`): `total` es siempre el total real del filtro, también en una
+  página fuera de rango (sin filas): la API lo vuelve a leer de la primera página.
 - Cambio de OWNER desde la plataforma: **no implementado** (ver pendientes).
+
+### Funciones `admin.*`
+
+Nombres reales (migración `20261005120100_admin_functions`). Todas reciben `p_actor_id` y lo comprueban con
+`private.assert_platform_admin` (`42501` si no es admin), salvo `is_platform_admin`, que es la propia consulta.
+
+| Función | Uso |
+|---|---|
+| `admin.is_platform_admin(p_user_id)` | `requirePlatformAdmin` y `isPlatformAdmin` de `GET /api/me` |
+| `admin.platform_stats` | `GET /api/admin/stats` |
+| `admin.list_organizations` | `GET /api/admin/organizations` (búsqueda, estado, plan, orden de lista blanca, página ≤ 100) |
+| `admin.get_organization` | `GET /api/admin/organizations/:id` (y comprobación de existencia de las subrutas) |
+| `admin.create_organization` | `POST /api/admin/organizations` (organización + OWNER + auditoría en una transacción) |
+| `admin.update_organization` | `PATCH /api/admin/organizations/:id` (plan / estado; un registro de auditoría por campo cambiado) |
+| `admin.list_members` | `GET /api/admin/organizations/:id/members` |
+| `admin.list_bots` | `GET /api/admin/organizations/:id/bots` |
+| `admin.list_customers` | `GET /api/admin/organizations/:id/customers` |
+| `admin.list_email_accounts` | `GET /api/admin/organizations/:id/email-accounts` |
+| `admin.list_activity` | `GET /api/admin/activity` (`audit_logs` de las organizaciones, solo nombre del evento) |
+| `admin.list_audit` | `GET /api/admin/audit` (`platform_audit_logs`) |
+
+`private.is_platform_admin(user_id default auth.uid())` y `private.assert_platform_admin(actor)` no son
+ejecutables por ningún rol de la API.
+
+### Administradores de plataforma y administradores de organización
+
+Son planos distintos. Los roles `OWNER` / `ADMIN` / `OPERATOR` / `VIEWER` (`organization_members`) solo dan
+acceso a su organización (RLS + `requireOrganization`) y nunca a `/api/admin/*`. Un administrador de plataforma
+(fila en `platform_admins`) solo ve metadatos de todas las organizaciones a través de `admin.*`; no es miembro de
+ellas, así que por la Data API y por los endpoints normales no ve nada de una organización a la que no pertenece.
 
 ### `organizations.status`
 
@@ -751,8 +797,9 @@ Los efectos ya existían desde la fase 1; la fase 6 añade quién puede cambiarl
 
 `SUSPENDED → ACTIVE` restaura todo (las sesiones del portal no caducadas vuelven a funcionar; el polling continúa
 desde el cursor guardado). El proyecto no define CANCELLED como terminal: hoy es reversible y no borra nada
-(política de retención o eliminación: pendiente). Eventos: `organization.suspended`, `organization.reactivated`,
-`organization.cancelled`, `organization.plan_changed`, `organization.created`.
+(política de retención o eliminación: pendiente). Hoy CANCELLED tiene exactamente las mismas consecuencias que
+SUSPENDED (todas las comprobaciones son `organizations.status <> 'ACTIVE'`). Eventos: `organization.suspended`,
+`organization.reactivated`, `organization.cancelled`, `organization.plan_changed`, `organization.created`.
 
 ### Web
 
@@ -761,7 +808,10 @@ desde onboarding hay un acceso). `RequirePlatformAdmin` y la sección «Platafor
 basan en `isPlatformAdmin` de `/api/me`; la protección real es la API. Pantallas: resumen (estadísticas,
 actividad reciente, accesos rápidos), organizaciones (búsqueda, estado, plan, orden, paginación, editar plan,
 suspender / reactivar con confirmación), detalle (resumen, contadores, miembros, bots, clientes, cuentas,
-actividad y auditoría de plataforma) y auditoría.
+actividad y auditoría de plataforma; además «Cancelar organización» con confirmación, que explica que hoy equivale
+a una suspensión reversible) y auditoría (una entrada cuya organización fue eliminada se muestra como
+«Organización eliminada»). Tras crear una organización o cambiar su plan o estado se refrescan la lista, el
+detalle, las estadísticas, la auditoría de plataforma y la actividad (claves `["admin", …]`, sin vaciar la caché).
 
 ### Crear un Platform Admin (local)
 
@@ -787,6 +837,8 @@ Tests: `pnpm --filter @emailbot/database test` (SQL, grants, actor, suspensión,
 
 ### Producción (no aplicado; requiere autorización)
 
+Pasos detallados, verificaciones y rollback: [runbook §12](v2-production-rollout.md#12-fase-6-super-admin-pendiente-de-despliegue).
+
 1. Migraciones `20261005120000_platform_admins` y `20261005120100_admin_functions` (aditivas: dos tablas nuevas,
    funciones y un índice en `audit_logs`; ningún dato existente cambia).
 2. Después de las migraciones, añadir `admin` a *Exposed schemas* (Data API), igual que `portal`: exponerlo antes
@@ -801,6 +853,9 @@ afectado.
 
 - ~~Añadir `jsdom` + `@testing-library/react`~~: hecho en la fase 5.5 (tests de componentes del portal). El panel
   sigue con tests de lógica; ampliar los tests de componentes al panel queda como mejora.
+- Arnés de integración local (Supabase local + Valkey, scripts `wsl/*`) **no versionado**: los resultados de
+  integración de las fases 5.6 y 6 no se pueden reproducir desde el repositorio. Las garantías reproducibles son
+  `pnpm test` (incluye las migraciones reales sobre PGlite), `supabase db reset` y `supabase db diff --local`.
 
 ## Decisiones pendientes
 
@@ -808,11 +863,14 @@ Fases 0 a 6: todas cerradas. Abiertas:
 
 1. UI del panel para entregas manuales (la API existe).
 2. Retirada de entregas **AUTOMATIC**: hoy no permitida.
-3. Despliegue de V2 en producción: pendiente de autorización, según
-   [`v2-production-rollout.md`](v2-production-rollout.md).
+3. Despliegue de la fase 6 (Super Admin) en producción: pendiente de merge y de autorización, según
+   [runbook §12](v2-production-rollout.md#12-fase-6-super-admin-pendiente-de-despliegue). (V2 hasta la fase 5.7 ya
+   está desplegada.)
 4. Super Admin: cambio de OWNER desde la plataforma (reutilizando la lógica de
    `transfer_organization_ownership`), edición de roles de miembros y gestión de administradores de plataforma
    desde la UI (hoy solo SQL).
 5. Política de CANCELLED (¿terminal? retención o eliminación de datos).
 6. Alta de empresas: `create_organization` sigue siendo self-serve (la conmutación a alta solo por la plataforma
    es una decisión de negocio pendiente).
+7. Política de privacidad: no describe todavía las piezas de V2 (clientes, portal, entregas) ni el acceso de los
+   administradores de plataforma a metadatos; requiere revisión legal (no se cambia en código).

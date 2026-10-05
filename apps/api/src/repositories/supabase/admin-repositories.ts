@@ -42,6 +42,17 @@ function toSummary(row: Row): AdminOrganizationSummary {
   };
 }
 
+/**
+ * The paged admin.* functions return the total with every row (count(*)
+ * over the filtered set). A page past the end has no rows, so the total is
+ * read again from the first row of the same filtered set: the response keeps
+ * the real total instead of 0.
+ */
+async function totalOf(rows: Row[], offset: number, firstRow: () => Promise<Row[]>): Promise<number> {
+  if (rows.length > 0 || offset <= 0) return count(rows[0]?.total_count);
+  return count((await firstRow())[0]?.total_count);
+}
+
 export function adminOperations(service: SupabaseClient): AdminOperations {
   const admin = () => service.schema("admin");
 
@@ -56,18 +67,20 @@ export function adminOperations(service: SupabaseClient): AdminOperations {
     },
 
     async listOrganizations(actorId, query) {
-      const rows = unwrap(
-        await admin().rpc("list_organizations", {
-          p_actor_id: actorId,
-          p_search: query.search ?? null,
-          p_status: query.status ?? null,
-          p_plan: query.plan ?? null,
-          p_sort: query.sort,
-          p_limit: query.limit,
-          p_offset: query.offset
-        })
-      ) as Row[];
-      return { items: rows.map(toSummary), total: count(rows[0]?.total_count) };
+      const page = async (limit: number, offset: number) =>
+        unwrap(
+          await admin().rpc("list_organizations", {
+            p_actor_id: actorId,
+            p_search: query.search ?? null,
+            p_status: query.status ?? null,
+            p_plan: query.plan ?? null,
+            p_sort: query.sort,
+            p_limit: limit,
+            p_offset: offset
+          })
+        ) as Row[];
+      const rows = await page(query.limit, query.offset);
+      return { items: rows.map(toSummary), total: await totalOf(rows, query.offset, () => page(1, 0)) };
     },
 
     async getOrganization(actorId, organizationId) {
@@ -132,9 +145,11 @@ export function adminOperations(service: SupabaseClient): AdminOperations {
     },
 
     async listCustomers(actorId, organizationId, page) {
-      const rows = unwrap(
-        await admin().rpc("list_customers", { p_actor_id: actorId, p_organization_id: organizationId, p_limit: page.limit, p_offset: page.offset })
-      ) as Row[];
+      const fetchPage = async (limit: number, offset: number) =>
+        unwrap(
+          await admin().rpc("list_customers", { p_actor_id: actorId, p_organization_id: organizationId, p_limit: limit, p_offset: offset })
+        ) as Row[];
+      const rows = await fetchPage(page.limit, page.offset);
       return {
         items: rows.map(
           (row): AdminCustomer => ({
@@ -146,7 +161,7 @@ export function adminOperations(service: SupabaseClient): AdminOperations {
             createdAt: row.created_at
           })
         ),
-        total: count(rows[0]?.total_count)
+        total: await totalOf(rows, page.offset, () => fetchPage(1, 0))
       };
     },
 

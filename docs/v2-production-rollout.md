@@ -1,10 +1,18 @@
 # V2 en producción: runbook de despliegue (Gmail casi en tiempo real + portal)
 
-Resultado de la auditoría de preparación (fase 5.7, 2026-10-05). **Nada de este documento se ha ejecutado en
-producción.** Cada paso necesita autorización explícita en su momento; los cambios de base de datos, además, un
-*dry-run* previo.
+Resultado de la auditoría de preparación (fase 5.7, 2026-10-05). Cada paso necesitó autorización explícita en su
+momento; los cambios de base de datos, además, un *dry-run* previo.
 
-## 1. Estado observado (solo lectura)
+> **Estado actual.** Este runbook ya se ejecutó: V2 hasta la fase 5.7 (`main` = `34ce322`) está desplegada en
+> producción, con el portal y Gmail push (Pub/Sub + OIDC) funcionando; los logs de producción muestran
+> `gmail.sync.started` / `gmail.sync.completed` con `reason: PUBSUB`, y el polling de 5 minutos sigue como
+> recuperación. La sección 1 conserva el estado observado **antes** del despliegue (histórico).
+>
+> **La fase 6 (Super Admin) no forma parte de ese despliegue**: está implementada en la rama
+> `feat/emailbot-f6-super-admin`, todavía **no** mergeada en `main` ni desplegada. Su despliegue es la
+> [sección 12](#12-fase-6-super-admin-pendiente-de-despliegue).
+
+## 1. Estado observado antes del despliegue de V2 (solo lectura, histórico)
 
 | Elemento | Estado |
 |---|---|
@@ -319,3 +327,41 @@ Pub/Sub en Cloud Monitoring y estas consultas periódicas):
 | LOW | El sync de seguimiento (`sync-<id>-next`) que choca con uno en curso reintenta unos 75 s y se descarta si este dura más | El siguiente push o el polling lo cubren (≤ 5 min) |
 | LOW | Al desconectar una cuenta no se llama a `users.stop`: Gmail sigue notificando hasta 7 días | La API descarta los pushes de buzones sin cuenta ACTIVE (204, sin job) |
 | LOW | Proyectos de GCP con prefijo de dominio (`example.com:proyecto`) no pasan la validación de `GMAIL_PUBSUB_TOPIC` | No aplica a proyectos nuevos |
+
+## 12. Fase 6 (Super Admin): pendiente de despliegue
+
+**No aplicado.** Requiere autorización explícita, igual que el resto del runbook. Detalle funcional en
+[`v2-implementation.md`](v2-implementation.md#fase-6-super-admin).
+
+Qué cambia en producción:
+
+- Base de datos: 2 migraciones **aditivas**, `20261005120000_platform_admins` (tablas `platform_admins` y
+  `platform_audit_logs`, vacías, con RLS y sin grants) y `20261005120100_admin_functions` (schema `admin` con 12
+  funciones `SECURITY DEFINER` solo para `service_role`, e índice `audit_logs_created_idx`). Ningún dato existente
+  cambia y ninguna política RLS existente cambia. Producción ya tiene datos reales: no se asume una base vacía.
+- Data API: añadir `admin` a *Exposed schemas* (como `portal`).
+- API y web: redeploy. El **worker no cambia** y no necesita redeploy.
+- Variables de entorno: ninguna nueva.
+
+| # | Paso | Verificación |
+|---|---|---|
+| 0 | Comprobaciones previas (solo lectura): `supabase migration list --linked` debe mostrar las 24 migraciones de `main`; ajustes de auto-deploy de API y web. Copia de seguridad (`supabase db dump`) fuera del repositorio | — |
+| 1 | `supabase db push --linked --dry-run` (debe listar **exactamente** las 2 migraciones de la fase 6) → autorización → `supabase db push --linked` | 26 migraciones; *advisors* sin hallazgos nuevos; `has_function_privilege('anon', 'admin.platform_stats(uuid)', 'execute')` = false (ídem `authenticated`); el worker sigue sincronizando y el panel carga |
+| 2 | Exponer `admin` en Data API → *Exposed schemas* (mantener `public`, `graphql_public`, `portal`) | Data API sin errores; `anon` no tiene `USAGE` en `admin` |
+| 3 | Merge de la rama de la fase 6 en `main` + push (con el auto-deploy de la web desactivado si está activo) | — |
+| 4 | Desplegar la **API** | `/health` 200; `GET /api/me` incluye `isPlatformAdmin: false`; `GET /api/admin/stats` → 403 `PLATFORM_ADMIN_REQUIRED` para un usuario normal |
+| 5 | Desplegar la **web** | `/admin` muestra «Acceso denegado» a un usuario normal; el panel y el portal no cambian |
+| 6 | Crear el primer administrador (SQL Editor, propietario de la base): `insert into public.platform_admins (user_id) select id from public.profiles where email = '<correo confirmado>';` | `isPlatformAdmin: true`; `/admin` carga; `/api/admin/stats` 200 |
+| 7 | Smoke test de solo lectura en `/admin` (resumen, organizaciones, detalle, auditoría). Cambiar plan o estado de una organización real solo con autorización | Sin errores; ningún contenido de correos visible |
+
+Orden y riesgos:
+
+- Exponer `admin` **antes** de crearlo deja sin Data API a todo el proyecto: el paso 2 va después del 1.
+- Si la API se despliega antes del paso 2, `/api/me` responde `isPlatformAdmin: false` (no rompe el panel) y
+  `/api/admin/*` falla; el resto de la API no se ve afectado.
+- Si la web sale antes que la API, la consola no aparece (sin `isPlatformAdmin`) y `/admin` muestra «Acceso
+  denegado»: degradación sin efecto para los usuarios.
+
+Rollback: las migraciones no se revierten (aditivas, el código anterior funciona sobre ellas). Se revierte el
+código de API y web; para retirar el acceso al instante basta con borrar las filas de `platform_admins`. Quitar
+`admin` de *Exposed schemas* es opcional (sin `USAGE` para `anon` ni `authenticated`, no expone nada).

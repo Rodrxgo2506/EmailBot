@@ -65,7 +65,7 @@ export function useAdminAudit(params: AdminLogParams) {
   return useQuery({ queryKey: adminKeys.audit(params), queryFn: () => api.audit(params), placeholderData: keepPreviousData });
 }
 
-/** Plan / status change: refreshes the lists, the detail, the stats and the audit trail. */
+/** Plan / status change: refreshes the lists, the detail, the stats, the audit trail and the activity. */
 export function useUpdateOrganization() {
   const api = useAdminApi();
   const client = useQueryClient();
@@ -76,6 +76,7 @@ export function useUpdateOrganization() {
       void client.invalidateQueries({ queryKey: adminKeys.organizations });
       void client.invalidateQueries({ queryKey: adminKeys.stats });
       void client.invalidateQueries({ queryKey: ["admin", "audit"] });
+      void client.invalidateQueries({ queryKey: ["admin", "activity"] });
     }
   });
 }
@@ -90,6 +91,7 @@ export function useCreateOrganization() {
       void client.invalidateQueries({ queryKey: adminKeys.organizations });
       void client.invalidateQueries({ queryKey: adminKeys.stats });
       void client.invalidateQueries({ queryKey: ["admin", "audit"] });
+      void client.invalidateQueries({ queryKey: ["admin", "activity"] });
     }
   });
 }

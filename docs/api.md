@@ -121,10 +121,56 @@ ni sesiones.
 | GET | `/api/admin/activity` | Eventos de las organizaciones (`organizationId?`, `page`, `pageSize`; `hasMore`) |
 | GET | `/api/admin/audit` | Auditoría de plataforma (`platform_audit_logs`; mismo paginado) |
 
+- Autorización: `authenticate` + `requirePlatformAdmin`, que consulta `admin.is_platform_admin` (tabla
+  `platform_admins`) en cada petición: la revocación es inmediata. Los roles de organización (`OWNER`, `ADMIN`, …)
+  no dan acceso a estas rutas, y ser administrador de plataforma no da acceso a los endpoints de una organización.
+- Cada ruta llama a una función `admin.*` con el usuario del JWT como actor, y la función lo vuelve a comprobar
+  (`platform_stats`, `list_organizations`, `get_organization`, `create_organization`, `update_organization`,
+  `list_members`, `list_bots`, `list_customers`, `list_email_accounts`, `list_activity`, `list_audit`).
+- Paginado de `organizations` y `customers`: `{ items, page, pageSize, total }`; `total` es el total real del
+  filtro también en una página fuera de rango. `activity` y `audit`: `{ items, page, pageSize, hasMore }`.
+- `PATCH` con `status`: `ACTIVE`, `SUSPENDED` o `CANCELLED`. CANCELLED hoy tiene los mismos efectos que SUSPENDED
+  y es reversible; nada se borra.
+- Errores: `400 VALIDATION_ERROR` / `INVALID_SLUG`, `403 PLATFORM_ADMIN_REQUIRED`, `404 NOT_FOUND`,
+  `409 ALREADY_EXISTS` (slug duplicado), `422 OWNER_NOT_FOUND`, `429` (escrituras: 60/min).
+- Auditoría: cada creación y cada cambio de plan o estado escribe en `platform_audit_logs` en la misma transacción
+  (`organization.created`, `organization.plan_changed`, `organization.suspended`, `organization.reactivated`,
+  `organization.cancelled`), con el request id. Los registros son inmutables.
+- `GET /api/me` incluye `isPlatformAdmin` (solo para mostrar la consola; la protección es la API).
+
 ## Webhooks
 
-- `POST /webhooks/gmail?token=…`: Pub/Sub push (requiere `GMAIL_PUBSUB_VERIFICATION_TOKEN`).
-- `POST /webhooks/microsoft`: validación (`validationToken`) y notificaciones con `clientState`.
+### `POST /webhooks/gmail` (Gmail push vía Google Cloud Pub/Sub)
+
+Gmail (`users.watch`) publica en un topic de Pub/Sub; una suscripción **push** de ese topic llama a este endpoint.
+La ruta solo existe (si no, `404`) cuando hay al menos un método de autenticación configurado en la API:
+
+- **OIDC (recomendado; el que usa producción)**: Pub/Sub envía `Authorization: Bearer <JWT firmado por Google>`.
+  La API verifica la firma RS256 con las claves públicas de Google (JWKS en caché), `iss`, la audiencia
+  `GMAIL_PUBSUB_OIDC_AUDIENCE` y que el `email` sea la cuenta de servicio de push
+  `GMAIL_PUBSUB_SERVICE_ACCOUNT`. Token ausente o inválido → `401`; claves de Google no disponibles → `503`
+  (Pub/Sub reintenta; nunca se acepta un push sin verificar).
+- **Token compartido (legado)**: `?token=` comparado en tiempo constante con `GMAIL_PUBSUB_VERIFICATION_TOKEN`.
+  Si se configuran ambos, se exigen los dos. Con OIDC la URL de la suscripción no lleva `?token=`.
+
+Después de autenticar, la API responde rápido y no llama a Gmail:
+
+1. Valida el sobre de Pub/Sub y decodifica `{ emailAddress, historyId }`. Un mensaje malformado se confirma con
+   `204` para que Pub/Sub no lo reintente sin fin.
+2. Un buzón que no corresponde a ninguna cuenta Gmail ACTIVE se confirma con `204` y se descarta (sin job).
+3. Encola **un** job deduplicado en BullMQ (`jobId` = buzón + `historyId`: los reenvíos son el mismo job) y responde
+   `204`. Si la cola no está disponible → `503` y Pub/Sub reintenta.
+
+El worker resuelve la cuenta y la sincroniza (`SYNC_ACCOUNT`, motivo `PUBSUB`) desde **su propio cursor
+guardado**, no desde el `historyId` recibido (solo es un disparador): Gmail History API paginada, `messages.get` y
+el pipeline normal (reglas, bot, cliente, entregas). El cursor avanza con *compare-and-set* bajo un *lease* por
+cuenta en Redis; un *history gap* se recupera con una búsqueda acotada. El polling cada 5 minutos sigue como
+recuperación, y `RENEW_WATCHES` renueva los `users.watch` antes de que caduquen. Los jobs solo llevan ids, nunca
+tokens ni credenciales; los logs registran el buzón con hash. Rate limit propio de webhooks (1200/min).
+
+### `POST /webhooks/microsoft`
+
+Validación (`validationToken`) y notificaciones con `clientState`.
 
 ## Tiempo real (Socket.IO)
 

@@ -8,7 +8,7 @@ import { ConfirmDialog } from "@/components/ui/feedback";
 import { Field } from "@/components/ui/field";
 import { Input, Select } from "@/components/ui/form-controls";
 import { getErrorMessage } from "@/lib/errors";
-import { PLAN_LABELS, statusChange } from "./admin-model";
+import { PLAN_LABELS, type StatusTarget } from "./admin-model";
 import { useCreateOrganization, useUpdateOrganization } from "./admin-queries";
 
 export interface OrganizationRef {
@@ -18,23 +18,23 @@ export interface OrganizationRef {
   plan: OrganizationPlan;
 }
 
-/** Suspend (ACTIVE) or reactivate (SUSPENDED / CANCELLED) after an explicit confirmation. */
-export function OrganizationStatusDialog({ organization, onOpenChange }: { organization: OrganizationRef | null; onOpenChange(open: boolean): void }) {
+/** Suspend, cancel or reactivate after an explicit confirmation (copy from admin-model). */
+export function OrganizationStatusDialog({ target, onOpenChange }: { target: StatusTarget<OrganizationRef> | null; onOpenChange(open: boolean): void }) {
   const update = useUpdateOrganization();
-  const change = organization ? statusChange(organization.status, organization.name) : null;
+  const change = target?.change ?? null;
 
   return (
     <ConfirmDialog
-      open={organization !== null}
+      open={target !== null}
       onOpenChange={onOpenChange}
       title={change?.title ?? ""}
       description={change?.description ?? ""}
       confirmLabel={change?.confirmLabel ?? "Confirmar"}
       destructive={change?.destructive ?? true}
       onConfirm={async () => {
-        if (!organization || !change) return;
-        await update.mutateAsync({ id: organization.id, patch: { status: change.target } });
-        toast.success(change.success);
+        if (!target) return;
+        await update.mutateAsync({ id: target.organization.id, patch: { status: target.change.target } });
+        toast.success(target.change.success);
       }}
     />
   );

@@ -400,6 +400,59 @@ describe("organization detail", () => {
     await waitFor(() => expect(api.updateOrganization).toHaveBeenCalledWith(ORG_A, { status: "SUSPENDED" }));
   });
 
+  it("cancel: an explicit confirmation PATCHes status CANCELLED", async () => {
+    const { api } = renderAdmin(`/admin/organizations/${ORG_A}`);
+    fireEvent.click(await screen.findByRole("button", { name: "Cancelar organización" }));
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText("¿Cancelar organización?")).toBeInTheDocument();
+    expect(dialog).toHaveTextContent("mismos efectos que una suspensión");
+    expect(dialog).toHaveTextContent("No se elimina ningún dato");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancelar organización" }));
+    await waitFor(() => expect(api.updateOrganization).toHaveBeenCalledWith(ORG_A, { status: "CANCELLED" }));
+  });
+
+  it("dismissing the cancel confirmation sends nothing", async () => {
+    const { api } = renderAdmin(`/admin/organizations/${ORG_A}`);
+    fireEvent.click(await screen.findByRole("button", { name: "Cancelar organización" }));
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancelar" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(api.updateOrganization).not.toHaveBeenCalled();
+  });
+
+  it("a cancelled organization offers 'Reactivar' and no cancellation", async () => {
+    const { api } = renderAdmin(`/admin/organizations/${ORG_A}`, fakeApi({ getOrganization: vi.fn(async () => detail({ status: "CANCELLED" })) }));
+    const reactivate = await screen.findByRole("button", { name: "Reactivar" });
+    expect(screen.queryByRole("button", { name: "Cancelar organización" })).not.toBeInTheDocument();
+    fireEvent.click(reactivate);
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Reactivar" }));
+    await waitFor(() => expect(api.updateOrganization).toHaveBeenCalledWith(ORG_A, { status: "ACTIVE" }));
+  });
+
+  it("a status change refreshes the activity and the platform audit", async () => {
+    const { api } = renderAdmin(`/admin/organizations/${ORG_A}`);
+    fireEvent.click(await screen.findByRole("button", { name: "Suspender" }));
+    await waitFor(() => expect(api.activity).toHaveBeenCalledTimes(1));
+    const audits = api.audit.mock.calls.length;
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Suspender" }));
+    await waitFor(() => expect(api.updateOrganization).toHaveBeenCalled());
+    await waitFor(() => expect(api.activity).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(api.audit.mock.calls.length).toBeGreaterThan(audits));
+  });
+
+  it("a plan change refreshes the activity", async () => {
+    const { api } = renderAdmin(`/admin/organizations/${ORG_A}`);
+    fireEvent.click(await screen.findByRole("button", { name: "Editar plan" }));
+    await waitFor(() => expect(api.activity).toHaveBeenCalledTimes(1));
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.change(within(dialog).getByLabelText("Plan"), { target: { value: "BUSINESS" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Guardar" }));
+    await waitFor(() => expect(api.updateOrganization).toHaveBeenCalledWith(ORG_A, { plan: "BUSINESS" }));
+    await waitFor(() => expect(api.activity).toHaveBeenCalledTimes(2));
+  });
+
   it("an unknown organization shows 'Organización no encontrada'", async () => {
     renderAdmin(`/admin/organizations/${ORG_B}`, fakeApi({ getOrganization: vi.fn(async () => Promise.reject(new ApiError(404, "NOT_FOUND", "Organization not found"))) }));
     expect(await screen.findByText("Organización no encontrada")).toBeInTheDocument();
@@ -423,6 +476,16 @@ describe("platform audit page", () => {
     expect(within(main).getByRole("link", { name: "Acme" })).toHaveAttribute("href", `/admin/organizations/${ORG_A}`);
     fireEvent.click(screen.getByRole("button", { name: "Siguiente" }));
     await waitFor(() => expect(api.audit).toHaveBeenLastCalledWith({ page: 2, pageSize: 25 }));
+  });
+
+  it("an entry of a deleted organization says 'Organización eliminada' (no link); other entries without organization say 'Sin organización'", async () => {
+    const deleted: AdminAuditEntry = { ...auditEntry, id: "aud-2", organization: null };
+    const platformWide: AdminAuditEntry = { ...auditEntry, id: "aud-3", organization: null, targetType: "platform", targetId: null, metadata: {} };
+    renderAdmin("/admin/audit", fakeApi({ audit: vi.fn(async () => logPage([deleted, platformWide])) }));
+    const main = await screen.findByRole("main");
+    expect(await within(main).findByText("Organización eliminada")).toBeInTheDocument();
+    expect(within(main).getByText(/Sin organización/)).toBeInTheDocument();
+    expect(within(main).queryByRole("link", { name: "Acme" })).not.toBeInTheDocument();
   });
 
   it("empty state", async () => {

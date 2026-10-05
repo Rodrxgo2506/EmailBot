@@ -36,6 +36,8 @@ Más detalle en [`docs/`](docs/):
 - [`frontend.md`](docs/frontend.md): estructura del frontend, autenticación y realtime.
 - [`development.md`](docs/development.md): entorno local, variables y validación.
 - [`security-audit.md`](docs/security-audit.md): auditoría de seguridad y preparación para producción.
+- [`v2-implementation.md`](docs/v2-implementation.md): V2 por fases (bots, customers, entregas, portal, Gmail push, Super Admin).
+- [`v2-production-rollout.md`](docs/v2-production-rollout.md): runbook de despliegue de V2 y de la fase 6.
 
 ## Requisitos
 
@@ -76,8 +78,35 @@ Abrir http://localhost:5173, crear una cuenta, crear la organización y conectar
 - Las regex de las reglas se ejecutan con límite de tiempo; hay rate limiting por IP y los sockets se revalidan periódicamente.
 - Auditoría de seguridad y checklist de producción: [`docs/security-audit.md`](docs/security-audit.md).
 
+## Administración de plataforma (Super Admin, V2 fase 6)
+
+Plano separado de los roles de organización:
+
+- **Administradores de organización** (`OWNER`, `ADMIN`, `OPERATOR`, `VIEWER` en `organization_members`): operan
+  solo su organización (RLS + `X-Organization-Id`).
+- **Administradores de plataforma**: usuarios con fila en `public.platform_admins`, la única fuente de verdad (no es
+  un flag del perfil, ni metadata del JWT, ni un rol de organización). Se dan de alta y se revocan con SQL del
+  propietario de la base; no hay API para crearlos.
+- API `/api/admin/*`: `requirePlatformAdmin` consulta `platform_admins` en cada petición y llama a funciones
+  `admin.*` (`SECURITY DEFINER`, solo `service_role`) que vuelven a comprobar el actor. Solo devuelven metadatos y
+  estadísticas, nunca contenido de correos, credenciales ni Access IDs. Ninguna política RLS tiene excepciones para
+  administradores de plataforma.
+- Consola web `/admin`: resumen, organizaciones (crear, cambiar plan, suspender, cancelar, reactivar), detalle y
+  auditoría.
+- Estado de organización: `ACTIVE`, `SUSPENDED`, `CANCELLED`. Fuera de `ACTIVE` sus miembros reciben
+  `403 ORGANIZATION_INACTIVE`, el worker no sincroniza y el portal no acepta sesiones; no se borra nada y
+  `CANCELLED` hoy es reversible.
+- Auditoría: cada acción administrativa queda en `public.platform_audit_logs` (inmutable), en la misma transacción.
+
+Detalle en [`docs/v2-implementation.md`](docs/v2-implementation.md#fase-6-super-admin) y endpoints en
+[`docs/api.md`](docs/api.md).
+
 ## Estado
 
 Funcional: autenticación, organizaciones, miembros y roles, cuentas de correo (OAuth Gmail/Microsoft), categorías, reglas (editor, prueba contra el motor real), bandeja con filtros/búsqueda/paginación, adjuntos, auditoría, realtime.
+
+V2 (en producción, `main`): bots, customers, entregas, portal del cliente y Gmail casi en tiempo real (Pub/Sub con OIDC + polling de recuperación cada 5 minutos).
+
+Super Admin (V2 fase 6): implementado en la rama `feat/emailbot-f6-super-admin`; todavía no está en `main` ni desplegado en producción.
 
 Pendiente: ver la sección *Pendientes* en [`docs/architecture.md`](docs/architecture.md#pendientes).

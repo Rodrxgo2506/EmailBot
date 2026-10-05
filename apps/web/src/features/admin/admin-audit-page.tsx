@@ -1,3 +1,4 @@
+import type { AdminAuditEntry } from "@emailbot/types";
 import { History } from "lucide-react";
 import { useState } from "react";
 import { Link } from "react-router-dom";
@@ -6,8 +7,20 @@ import { Card, EmptyState, ErrorMessage, PageHeader } from "@/components/ui/disp
 import { SkeletonRows } from "@/components/ui/feedback";
 import { getErrorMessage } from "@/lib/errors";
 import { formatDate } from "@/lib/utils";
-import { ADMIN_LOG_PAGE_SIZE, platformActionLabel, platformAuditDetail } from "./admin-model";
+import { ADMIN_LOG_PAGE_SIZE, auditOrganizationLabel, platformActionLabel, platformAuditDetail } from "./admin-model";
 import { useAdminAudit } from "./admin-queries";
+
+/** Link to the organization, "Organización eliminada" when it no longer exists, or "Sin organización". */
+function AuditOrganization({ entry }: { entry: AdminAuditEntry }) {
+  const organization = auditOrganizationLabel(entry);
+  if (!organization) return <>Sin organización</>;
+  if ("deleted" in organization) return <span className="italic">Organización eliminada</span>;
+  return (
+    <Link to={`/admin/organizations/${organization.id}`} className="hover:underline">
+      {organization.name}
+    </Link>
+  );
+}
 
 /** Platform administration audit trail (platform_audit_logs, immutable). */
 export function AdminAuditPage() {
@@ -31,13 +44,7 @@ export function AdminAuditPage() {
               <div className="min-w-0 flex-1">
                 <p className="font-medium">{platformActionLabel(entry.action)}</p>
                 <p className="text-xs text-muted-foreground">
-                  {entry.organization ? (
-                    <Link to={`/admin/organizations/${entry.organization.id}`} className="hover:underline">
-                      {entry.organization.name ?? "Organización eliminada"}
-                    </Link>
-                  ) : (
-                    "Sin organización"
-                  )}
+                  <AuditOrganization entry={entry} />
                   {platformAuditDetail(entry) ? ` · ${platformAuditDetail(entry)}` : ""}
                 </p>
               </div>

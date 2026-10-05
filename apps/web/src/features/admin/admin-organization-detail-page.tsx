@@ -16,7 +16,7 @@ import {
   ROLE_LABELS
 } from "@/lib/labels";
 import { formatDate, formatShortDate } from "@/lib/utils";
-import { ADMIN_LOG_PAGE_SIZE, ADMIN_PAGE_SIZE, activityLabel, formatCount, PLAN_LABELS, platformActionLabel, platformAuditDetail, STATUS_BADGE, statusChange } from "./admin-model";
+import { ADMIN_LOG_PAGE_SIZE, ADMIN_PAGE_SIZE, activityLabel, cancelChange, formatCount, PLAN_LABELS, platformActionLabel, platformAuditDetail, STATUS_BADGE, statusChange, type StatusTarget } from "./admin-model";
 import {
   useAdminActivity,
   useAdminAudit,
@@ -68,7 +68,7 @@ export function AdminOrganizationDetailPage() {
   const [activityPage, setActivityPage] = useState(1);
   const activity = useAdminActivity({ organizationId, page: activityPage, pageSize: ADMIN_LOG_PAGE_SIZE });
   const audit = useAdminAudit({ organizationId, page: 1, pageSize: ADMIN_LOG_PAGE_SIZE });
-  const [statusTarget, setStatusTarget] = useState<OrganizationRef | null>(null);
+  const [statusTarget, setStatusTarget] = useState<StatusTarget<OrganizationRef> | null>(null);
   const [planTarget, setPlanTarget] = useState<OrganizationRef | null>(null);
 
   const back = (
@@ -97,6 +97,7 @@ export function AdminOrganizationDetailPage() {
   const data = organization.data;
   const ref: OrganizationRef = { id: data.id, name: data.name, status: data.status, plan: data.plan };
   const change = statusChange(data.status, data.name);
+  const cancel = cancelChange(data.status, data.name);
 
   return (
     <div className="grid gap-4">
@@ -109,7 +110,12 @@ export function AdminOrganizationDetailPage() {
             <Button variant="outline" onClick={() => setPlanTarget(ref)}>
               Editar plan
             </Button>
-            <Button variant={change.destructive ? "destructive" : "default"} onClick={() => setStatusTarget(ref)}>
+            {cancel ? (
+              <Button variant="outline" className="text-destructive" onClick={() => setStatusTarget({ organization: ref, change: cancel })}>
+                {cancel.action}
+              </Button>
+            ) : null}
+            <Button variant={change.destructive ? "destructive" : "default"} onClick={() => setStatusTarget({ organization: ref, change })}>
               {change.action}
             </Button>
           </>
@@ -284,7 +290,7 @@ export function AdminOrganizationDetailPage() {
         </Section>
       </div>
 
-      <OrganizationStatusDialog organization={statusTarget} onOpenChange={(open) => (open ? undefined : setStatusTarget(null))} />
+      <OrganizationStatusDialog target={statusTarget} onOpenChange={(open) => (open ? undefined : setStatusTarget(null))} />
       <OrganizationPlanDialog organization={planTarget} onOpenChange={(open) => (open ? undefined : setPlanTarget(null))} />
     </div>
   );

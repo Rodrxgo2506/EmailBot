@@ -17,7 +17,7 @@ import { getErrorMessage } from "@/lib/errors";
 import { ORGANIZATION_STATUS_LABELS } from "@/lib/labels";
 import { formatShortDate } from "@/lib/utils";
 import type { AdminOrganizationListParams } from "./admin-api";
-import { DEFAULT_ORGANIZATION_PARAMS, formatCount, PLAN_LABELS, SORT_LABELS, STATUS_BADGE, statusChange } from "./admin-model";
+import { DEFAULT_ORGANIZATION_PARAMS, formatCount, PLAN_LABELS, SORT_LABELS, STATUS_BADGE, statusChange, type StatusTarget } from "./admin-model";
 import { useAdminOrganizations } from "./admin-queries";
 import { CreateOrganizationDialog, OrganizationPlanDialog, OrganizationStatusDialog, type OrganizationRef } from "./organization-dialogs";
 
@@ -26,7 +26,7 @@ export function AdminOrganizationsPage() {
   const [params, setParams] = useState<AdminOrganizationListParams>(DEFAULT_ORGANIZATION_PARAMS);
   const [search, setSearch] = useState("");
   const [createOpen, setCreateOpen] = useState(false);
-  const [statusTarget, setStatusTarget] = useState<OrganizationRef | null>(null);
+  const [statusTarget, setStatusTarget] = useState<StatusTarget<OrganizationRef> | null>(null);
   const [planTarget, setPlanTarget] = useState<OrganizationRef | null>(null);
   const organizations = useAdminOrganizations(params);
 
@@ -171,7 +171,7 @@ export function AdminOrganizationsPage() {
                           size="sm"
                           className={change.destructive ? "text-destructive" : undefined}
                           aria-label={`${change.action} ${organization.name}`}
-                          onClick={() => setStatusTarget(ref)}
+                          onClick={() => setStatusTarget({ organization: ref, change })}
                         >
                           {change.action}
                         </Button>
@@ -197,7 +197,7 @@ export function AdminOrganizationsPage() {
       ) : null}
 
       <CreateOrganizationDialog open={createOpen} onOpenChange={setCreateOpen} onCreated={(organization) => navigate(`/admin/organizations/${organization.id}`)} />
-      <OrganizationStatusDialog organization={statusTarget} onOpenChange={(open) => (open ? undefined : setStatusTarget(null))} />
+      <OrganizationStatusDialog target={statusTarget} onOpenChange={(open) => (open ? undefined : setStatusTarget(null))} />
       <OrganizationPlanDialog organization={planTarget} onOpenChange={(open) => (open ? undefined : setPlanTarget(null))} />
     </div>
   );
