@@ -4,12 +4,14 @@ import helmet from "@fastify/helmet";
 import rateLimit from "@fastify/rate-limit";
 import sensible from "@fastify/sensible";
 import { LOG_REDACT_PATHS, sanitizeUrl, serializeError } from "@emailbot/shared";
-import Fastify, { type FastifyServerOptions } from "fastify";
+import Fastify, { type FastifyRequest, type FastifyServerOptions } from "fastify";
 import type { AppDeps } from "./deps.js";
+import { createLoginThrottle } from "./infrastructure/login-throttle.js";
 import { createResilientRateLimitStore } from "./infrastructure/rate-limit-store.js";
 import { auditRoutes } from "./modules/audit/routes.js";
 import { registerAuditRecorder } from "./modules/audit/recorder.js";
 import { botRoutes } from "./modules/bots/routes.js";
+import { customerAccessRoutes } from "./modules/customer-access/routes.js";
 import { customerRoutes } from "./modules/customers/routes.js";
 import { categoryRoutes } from "./modules/categories/routes.js";
 import { emailAccountRoutes } from "./modules/email-accounts/routes.js";
@@ -18,6 +20,8 @@ import { healthRoutes } from "./modules/health/routes.js";
 import { meRoutes } from "./modules/me/routes.js";
 import { memberRoutes } from "./modules/members/routes.js";
 import { organizationRoutes } from "./modules/organizations/routes.js";
+import { portalRoutes } from "./modules/portal/routes.js";
+import { registerPortalSession } from "./modules/portal/session.js";
 import { ruleRoutes } from "./modules/rules/routes.js";
 import { webhookRoutes } from "./modules/webhooks/routes.js";
 import { registerAuth } from "./plugins/auth.js";
@@ -63,15 +67,18 @@ export async function buildApp(deps: AppDeps, options: BuildAppOptions = {}) {
 
   await app.register(helmet);
 
-  await app.register(cors, {
+  const corsOptions = {
     // Development: reflect the origin. Production: explicit allow-list only (env validation).
     origin: deps.config.corsOrigins,
-    // The API uses bearer tokens, never cookies.
-    credentials: false,
     methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     allowedHeaders: ["authorization", "content-type", ORGANIZATION_HEADER, "x-request-id"],
     exposedHeaders: ["x-request-id"],
     maxAge: 600
+  };
+  await app.register(cors, {
+    // The panel API uses bearer tokens, never cookies. Only the customer portal
+    // (/api/portal/*) sends its httpOnly session cookie, so only it allows credentials.
+    delegator: async (request: FastifyRequest) => ({ ...corsOptions, credentials: request.url.startsWith("/api/portal/") })
   });
 
   await app.register(sensible);
@@ -106,6 +113,17 @@ export async function buildApp(deps: AppDeps, options: BuildAppOptions = {}) {
   registerAuth(app, deps);
   registerOrganizationContext(app);
   registerAuditRecorder(app, deps);
+  registerPortalSession(app, deps);
+
+  let lastLockoutFallbackLog = 0;
+  const portalLoginThrottle = createLoginThrottle(deps.rateLimitRedis, {
+    onFallback(error) {
+      const now = Date.now();
+      if (now - lastLockoutFallbackLog < 60_000) return;
+      lastLockoutFallbackLog = now;
+      app.log.warn({ err: serializeError(error) }, "login lockout store unavailable; using per-instance counters");
+    }
+  });
 
   await app.register(healthRoutes(deps));
   await app.register(webhookRoutes(deps));
@@ -119,6 +137,8 @@ export async function buildApp(deps: AppDeps, options: BuildAppOptions = {}) {
       await api.register(categoryRoutes);
       await api.register(botRoutes);
       await api.register(customerRoutes);
+      await api.register(customerAccessRoutes(deps));
+      await api.register(portalRoutes(deps, portalLoginThrottle));
       await api.register(ruleRoutes);
       await api.register(emailRoutes(deps));
       await api.register(auditRoutes);

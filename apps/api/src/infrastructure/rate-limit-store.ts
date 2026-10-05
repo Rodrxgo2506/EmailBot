@@ -49,6 +49,10 @@ export class LocalCounters {
     entry.count += 1;
     return { current: entry.count, ttl: entry.resetAt - now };
   }
+
+  reset(key: string): void {
+    this.#entries.delete(key);
+  }
 }
 
 export interface ResilientStoreOptions {

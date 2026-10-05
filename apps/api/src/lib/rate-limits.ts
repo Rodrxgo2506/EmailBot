@@ -15,6 +15,10 @@ export const RATE_LIMITS = {
   imapCreate: { max: 10, timeWindow: "10 minutes" },
   accountSync: { max: 10, timeWindow: "1 minute" },
   loginEvent: { max: 20, timeWindow: "10 minutes" },
+  /** Customer portal login (Access ID guessing); plus a 15 min lockout after 10 failures (login-throttle.ts). */
+  portalLogin: { max: 5, timeWindow: "1 minute" },
+  /** Generating / regenerating customer Access IDs. */
+  customerAccessIssue: { max: 30, timeWindow: "10 minutes" },
   /** Provider push traffic can burst. */
   webhook: { max: 1200, timeWindow: "1 minute" }
 } as const;

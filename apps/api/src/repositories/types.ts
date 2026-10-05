@@ -6,9 +6,11 @@ import type {
   BotStatus,
   Category,
   Customer,
+  CustomerAccessCredential,
   CustomerIdentifier,
   CustomerIdentifierType,
   CustomerResolution,
+  CustomerSession,
   CustomerStatus,
   EmailAccount,
   EmailAccountStatus,
@@ -24,6 +26,7 @@ import type {
   OrganizationSettings,
   OrganizationStatus,
   Paginated,
+  PortalProfile,
   PortalSettings
 } from "@emailbot/types";
 import type { CustomerListQuery, EmailListQuery, RuleAction, RuleCondition } from "@emailbot/validation";
@@ -137,6 +140,32 @@ export interface CustomerRepository {
   update(organizationId: string, id: string, patch: CustomerWrite): Promise<Customer | null>;
 }
 
+/** Generation / regeneration of an Access ID (the API computes the hash; the plaintext never leaves it). */
+export interface CustomerAccessIssue {
+  secretHash: string;
+  last4: string;
+  displayPrefix: string;
+  expiresAt: string | null;
+}
+
+/**
+ * Customer Access IDs and portal sessions as seen by members (EmailBot V2
+ * phase 4). Runs as the caller: RLS limits reads to OWNER/ADMIN/OPERATOR and
+ * writes are the atomic SECURITY DEFINER functions (role checked inside).
+ * No method ever returns secret_hash or token_hash.
+ */
+export interface CustomerAccessRepository {
+  /** The ACTIVE credential of the customer, or null. */
+  getActive(organizationId: string, customerId: string): Promise<CustomerAccessCredential | null>;
+  /** Most recent sessions first. */
+  listSessions(organizationId: string, customerId: string, options: { activeOnly: boolean; limit: number }): Promise<CustomerSession[]>;
+  /** Revokes the ACTIVE credential and every session, then creates the new credential (one transaction). */
+  issue(customerId: string, input: CustomerAccessIssue): Promise<{ credential: CustomerAccessCredential; previousCredentialId: string | null; revokedSessions: number }>;
+  revoke(customerId: string): Promise<{ credentialId: string | null; revokedSessions: number }>;
+  /** One session (sessionId) or every open session of the customer; returns how many were revoked. */
+  revokeSessions(customerId: string, sessionId: string | null): Promise<number>;
+}
+
 export interface CustomerIdentifierWrite {
   value?: string;
   normalizedValue?: string;
@@ -240,6 +269,7 @@ export interface Repositories {
   customers: CustomerRepository;
   customerIdentifiers: CustomerIdentifierRepository;
   botCustomers: BotCustomerAssignmentRepository;
+  customerAccess: CustomerAccessRepository;
   rules: RuleRepository;
   emails: EmailRepository;
   attachments: AttachmentRepository;
@@ -280,6 +310,29 @@ export interface ImapAccountInsert {
   username: string;
 }
 
+/** Outcome categories of portal.create_session (never shown to the client). */
+export type PortalLoginFailure = "INVALID" | "REVOKED" | "EXPIRED" | "CUSTOMER_INACTIVE" | "ORGANIZATION_INACTIVE";
+
+export type PortalLoginResult =
+  | {
+      outcome: "OK";
+      organizationId: string;
+      customerId: string;
+      sessionId: string;
+      displayName: string;
+      idleExpiresAt: string;
+      absoluteExpiresAt: string;
+    }
+  | { outcome: PortalLoginFailure; organizationId: string | null; customerId: string | null };
+
+/** Authority of a portal request: derived ONLY from the session token. */
+export interface PortalSessionContext {
+  sessionId: string;
+  organizationId: string;
+  customerId: string;
+  profile: PortalProfile;
+}
+
 export interface PrivilegedOperations {
   findProfileIdByEmail(email: string): Promise<string | null>;
   getMemberRole(organizationId: string, userId: string): Promise<OrganizationRole | null>;
@@ -290,4 +343,8 @@ export interface PrivilegedOperations {
   createSignedDownloadUrl(bucket: string, path: string, expiresInSeconds: number, filename: string): Promise<string>;
   /** Deletes Storage objects; returns how many paths could not be removed. */
   removeStorageObjects(bucket: string, paths: string[]): Promise<{ failed: number }>;
+  /* EmailBot V2 phase 4: portal sessions, only through portal.* functions (no table access). */
+  createPortalSession(input: { secretHash: string; tokenHash: string; ip: string | null; userAgent: string | null }): Promise<PortalLoginResult>;
+  validatePortalSession(tokenHash: string): Promise<PortalSessionContext | null>;
+  endPortalSession(tokenHash: string): Promise<{ sessionId: string; organizationId: string; customerId: string } | null>;
 }

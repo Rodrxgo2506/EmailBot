@@ -3,6 +3,7 @@ import type { OrganizationRole } from "@emailbot/types";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { AppError, unwrap } from "../../lib/errors.js";
 import type { PrivilegedOperations } from "../types.js";
+import { portalSessionOperations } from "./customer-access-repositories.js";
 import { EMAIL_ACCOUNT_COLUMNS, toEmailAccount, type Row } from "./mappers.js";
 
 /**
@@ -23,6 +24,7 @@ export function withDownloadName(signedUrl: string, filename: string): string {
  */
 export function privilegedOperations(service: SupabaseClient): PrivilegedOperations {
   return {
+    ...portalSessionOperations(service),
     async findProfileIdByEmail(email) {
       const row = unwrap(
         await service.from("profiles").select("id").eq("email", email.trim().toLowerCase()).limit(1).maybeSingle()
