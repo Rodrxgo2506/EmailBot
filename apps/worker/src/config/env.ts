@@ -1,4 +1,4 @@
-import { encryptionKeyEnv, optionalEnv, parseEnv, type OAuthClientConfig } from "@emailbot/shared";
+import { encryptionKeyEnv, graphLifecycleUrl, optionalEnv, parseEnv, type OAuthClientConfig } from "@emailbot/shared";
 import { productionUrlProblem, PUBLIC_URL, REDIS_URL } from "@emailbot/validation";
 import { z } from "zod";
 
@@ -33,7 +33,14 @@ const envSchema = z.object({
    * Pub/Sub Publisher to gmail-api-push@system.gserviceaccount.com.
    */
   GMAIL_PUBSUB_TOPIC: optionalEnv(z.string().regex(/^projects\/[a-z][a-z0-9-]{4,28}[a-z0-9]\/topics\/[A-Za-z][\w.~+%-]{2,254}$/, "must be projects/<project>/topics/<topic>")),
-  /** How often Gmail watches close to expiry are renewed (they last 7 days). */
+  /**
+   * Microsoft push (Graph change notifications): public HTTPS URL of the
+   * API's POST /webhooks/microsoft; lifecycle notifications go to the same URL
+   * + "/lifecycle". Unset = Microsoft push disabled, mailboxes are only polled.
+   * Graph validates the URL (handshake) when a subscription is created.
+   */
+  MICROSOFT_GRAPH_NOTIFICATION_URL: optionalEnv(z.url({ protocol: /^https$/, error: "must be an https URL" })),
+  /** How often push subscriptions close to expiry are renewed (Gmail watches: 7 days; Graph subscriptions: ~70 h). */
   WORKER_WATCH_RENEW_INTERVAL_MINUTES: z.coerce.number().int().min(5).max(1440).default(60),
   /** Attachments larger than this are recorded (metadata) but not stored. */
   WORKER_MAX_ATTACHMENT_BYTES: z.coerce.number().int().min(0).default(25 * 1024 * 1024),
@@ -52,8 +59,14 @@ const envSchema = z.object({
   WORKER_HEALTH_HOST: z.string().min(1).default("0.0.0.0"),
   SENTRY_DSN: optionalEnv(z.url())
 }).superRefine((env, ctx) => {
-  if (env.NODE_ENV !== "production") return;
   const issue = (path: string, message: string) => ctx.addIssue({ code: "custom", path: [path], message });
+
+  // Every environment: subscriptions are created with the Microsoft account's delegated token.
+  if (env.MICROSOFT_GRAPH_NOTIFICATION_URL !== undefined && !(env.MICROSOFT_CLIENT_ID && env.MICROSOFT_CLIENT_SECRET && env.MICROSOFT_REDIRECT_URI)) {
+    issue("MICROSOFT_GRAPH_NOTIFICATION_URL", "requires MICROSOFT_CLIENT_ID, MICROSOFT_CLIENT_SECRET and MICROSOFT_REDIRECT_URI");
+  }
+
+  if (env.NODE_ENV !== "production") return;
 
   const supabaseProblem = productionUrlProblem(env.SUPABASE_URL, PUBLIC_URL);
   if (supabaseProblem) issue("SUPABASE_URL", supabaseProblem);
@@ -74,6 +87,11 @@ const envSchema = z.object({
       if (problem) issue(`${prefix}_REDIRECT_URI`, problem);
     }
   }
+
+  if (env.MICROSOFT_GRAPH_NOTIFICATION_URL !== undefined) {
+    const problem = productionUrlProblem(env.MICROSOFT_GRAPH_NOTIFICATION_URL, PUBLIC_URL);
+    if (problem) issue("MICROSOFT_GRAPH_NOTIFICATION_URL", problem);
+  }
 });
 
 export interface WorkerConfig {
@@ -92,6 +110,8 @@ export interface WorkerConfig {
   pollIntervalMinutes: number;
   /** null = Gmail push disabled (polling only). */
   gmailPubSubTopic: string | null;
+  /** null = Microsoft push disabled (polling only). */
+  microsoftPush: { notificationUrl: string; lifecycleNotificationUrl: string } | null;
   watchRenewIntervalMinutes: number;
   maxAttachmentBytes: number;
   /** null = health endpoint disabled. */
@@ -130,6 +150,9 @@ export function loadWorkerConfig(source: NodeJS.ProcessEnv = process.env): Worke
     processingConcurrency: env.WORKER_PROCESSING_CONCURRENCY,
     pollIntervalMinutes: env.WORKER_POLL_INTERVAL_MINUTES,
     gmailPubSubTopic: env.GMAIL_PUBSUB_TOPIC ?? null,
+    microsoftPush: env.MICROSOFT_GRAPH_NOTIFICATION_URL
+      ? { notificationUrl: env.MICROSOFT_GRAPH_NOTIFICATION_URL, lifecycleNotificationUrl: graphLifecycleUrl(env.MICROSOFT_GRAPH_NOTIFICATION_URL) }
+      : null,
     watchRenewIntervalMinutes: env.WORKER_WATCH_RENEW_INTERVAL_MINUTES,
     maxAttachmentBytes: env.WORKER_MAX_ATTACHMENT_BYTES,
     health: (env.WORKER_HEALTH_PORT ?? env.PORT) !== undefined

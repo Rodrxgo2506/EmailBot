@@ -1,5 +1,20 @@
-import { resumeProcessingJobId, SecretBoxError, serializeError, type EmailEventJob, type EmailProcessingJob, type SyncReason } from "@emailbot/shared";
+import {
+  generateClientState,
+  hashClientState,
+  isGraphSubscriptionId,
+  MICROSOFT_SUBSCRIPTION_LIFETIME_MS,
+  readMicrosoftSubscription,
+  resumeProcessingJobId,
+  SecretBoxError,
+  serializeError,
+  subscriptionLogId,
+  withMicrosoftSubscription,
+  type EmailEventJob,
+  type EmailProcessingJob,
+  type SyncReason
+} from "@emailbot/shared";
 import { ProviderHttpError } from "../providers/http.js";
+import type { MicrosoftSubscriptionClient } from "../providers/microsoft/subscriptions.js";
 import type { ProviderRegistry } from "../providers/registry.js";
 import { ProviderAuthError, ProviderTransientError, type ProviderContext, type WorkerAccount } from "../providers/types.js";
 import type { AccountStore, AuditRecorder, EmailStore, JobProducer, Logger, SyncLock } from "./ports.js";
@@ -9,6 +24,7 @@ import { AttachmentsPendingError, type ProcessEmailOutcome } from "./process-ema
  * Mailbox ingestion (EmailBot V2 phase 5.6).
  *
  *   Gmail push: users.watch -> Pub/Sub -> /webhooks/gmail -> GMAIL_NOTIFICATION
+ *   Microsoft push (F9): Graph subscription -> /webhooks/microsoft -> MICROSOFT_NOTIFICATION
  *   recovery polling: POLL_ACCOUNTS (scheduler)            -> SYNC_ACCOUNT
  *   manual sync (panel, portal)                           -> SYNC_ACCOUNT
  *
@@ -17,7 +33,8 @@ import { AttachmentsPendingError, type ProcessEmailOutcome } from "./process-ema
  * SAME pipeline (processMessage = processEmail: normalize, extractors, rule
  * engine, bot selection, CustomerResolver, deliveries, attachments) and only
  * then advances the cursor (compare-and-set). Notifications carry no
- * authority: their historyId is only a trigger, the stored cursor decides.
+ * authority: a Gmail historyId or a Graph resourceData.id is only a trigger,
+ * the stored cursor (history id / delta link) decides.
  * Polling is the recovery mechanism, not the primary ingestion.
  */
 
@@ -37,6 +54,10 @@ export interface HandleEventDeps {
   audit?: AuditRecorder;
   /** projects/<project>/topics/<topic>; null = push disabled (polling only). */
   watchTopic?: string | null;
+  /** Microsoft push (Graph change notifications); null / absent = polling only. */
+  microsoftPush?: { notificationUrl: string; lifecycleNotificationUrl: string } | null;
+  /** Graph /subscriptions client (required with microsoftPush). */
+  microsoftSubscriptions?: MicrosoftSubscriptionClient;
   now?: () => number;
   logger: Logger;
 }
@@ -73,7 +94,7 @@ export const RECOVERY_DEFAULT_WINDOW_MS = 24 * 60 * 60 * 1000;
 export const MESSAGE_CONCURRENCY = 3;
 /** Lease of the per-account sync lock (renewed by nothing: a run is bounded well below it). */
 export const SYNC_LOCK_TTL_MS = 15 * 60 * 1000;
-/** Gmail watches last 7 days; they are renewed when less than this remains. */
+/** Gmail watches last 7 days, Graph subscriptions ~70 h; both are renewed when less than this remains. */
 export const WATCH_RENEW_MARGIN_MS = 24 * 60 * 60 * 1000;
 export const WATCH_RENEW_BATCH = 100;
 
@@ -243,10 +264,12 @@ export async function syncAccount(account: WorkerAccount, deps: HandleEventDeps,
  * ones are recorded on the account (polling keeps the mailbox in sync).
  */
 export async function ensureWatch(emailAccountId: string, organizationId: string, deps: HandleEventDeps): Promise<boolean> {
-  if (!deps.watchTopic) return false;
+  if (!deps.watchTopic && !deps.microsoftPush) return false;
   const account = await deps.accounts.getAccount(emailAccountId);
   if (!account || account.organizationId !== organizationId) return false;
-  if (account.provider !== "GMAIL" || account.status !== "ACTIVE" || account.organizationStatus !== "ACTIVE") return false;
+  if (account.status !== "ACTIVE" || account.organizationStatus !== "ACTIVE") return false;
+  if (account.provider === "MICROSOFT") return ensureMicrosoftSubscription(account, deps);
+  if (account.provider !== "GMAIL" || !deps.watchTopic) return false;
 
   const now = (deps.now ?? Date.now)();
   if (account.watchExpiresAt && Date.parse(account.watchExpiresAt) > now + WATCH_RENEW_MARGIN_MS) return false;
@@ -290,6 +313,113 @@ export async function ensureWatch(emailAccountId: string, organizationId: string
   }
 }
 
+/**
+ * Creates or renews the Graph change-notification subscription of one
+ * Microsoft account (F9), the equivalent of the Gmail watch above. A
+ * subscription still valid for more than WATCH_RENEW_MARGIN_MS is left alone;
+ * a due one is renewed (PATCH); one Graph no longer has (404) is cleared and
+ * created again with a new clientState, so the account never stays without
+ * push. Only the clientState's SHA-256 is stored. Failures other than
+ * credentials / transient ones are recorded on the account: polling keeps
+ * the mailbox in sync meanwhile.
+ */
+async function ensureMicrosoftSubscription(account: WorkerAccount, deps: HandleEventDeps): Promise<boolean> {
+  const push = deps.microsoftPush;
+  const client = deps.microsoftSubscriptions;
+  if (!push || !client) return false;
+  // Disconnected accounts have no credentials (and are not ACTIVE): never subscribe them.
+  if (!account.refreshTokenEncrypted && !account.accessTokenEncrypted) return false;
+
+  const now = (deps.now ?? Date.now)();
+  const nowIso = new Date(now).toISOString();
+  const current = readMicrosoftSubscription(account.providerMetadata);
+  if (current && account.watchExpiresAt && Date.parse(account.watchExpiresAt) > now + WATCH_RENEW_MARGIN_MS) return false;
+
+  const context = deps.createContext(account);
+  const expirationDateTime = new Date(now + MICROSOFT_SUBSCRIPTION_LIFETIME_MS).toISOString();
+  let metadata = account.providerMetadata;
+  const record = (event: string, action: "UPDATE" | "FAIL", description: string, extra: Record<string, unknown>) =>
+    deps.audit
+      ?.recordAccountEvent({ organizationId: account.organizationId, emailAccountId: account.id, action, event, description, metadata: extra })
+      .catch((error: unknown) => deps.logger.warn({ err: serializeError(error) }, "could not record the subscription event"));
+
+  try {
+    if (current) {
+      try {
+        const renewed = await client.renew(context, current.id, expirationDateTime);
+        await deps.accounts.saveSubscriptionState(account.id, {
+          providerMetadata: metadata,
+          expiresAt: renewed.expirationDateTime,
+          renewedAt: nowIso,
+          errorCode: null,
+          errorAt: null
+        });
+        deps.logger.info(
+          { event: "microsoft.subscription.renewed", emailAccountId: account.id, subscription: subscriptionLogId(current.id), expiresAt: renewed.expirationDateTime },
+          "Microsoft subscription renewed"
+        );
+        await record("microsoft.subscription.renewed", "UPDATE", "Microsoft push notifications renewed", { expiresAt: renewed.expirationDateTime });
+        return true;
+      } catch (error) {
+        if (!(error instanceof ProviderHttpError && error.status === 404)) throw error;
+        // Gone at Graph (expired or removed): forget it and create a new one below.
+        metadata = withMicrosoftSubscription(metadata, null);
+        await deps.accounts.saveSubscriptionState(account.id, { providerMetadata: metadata, expiresAt: null, errorCode: "SUBSCRIPTION_NOT_FOUND", errorAt: nowIso });
+        deps.logger.warn(
+          { event: "microsoft.subscription.missing", emailAccountId: account.id, subscription: subscriptionLogId(current.id) },
+          "Microsoft subscription no longer exists; creating a new one"
+        );
+      }
+    }
+
+    const clientState = generateClientState();
+    const created = await client.create(context, {
+      notificationUrl: push.notificationUrl,
+      lifecycleNotificationUrl: push.lifecycleNotificationUrl,
+      clientState,
+      expirationDateTime
+    });
+    try {
+      await deps.accounts.saveSubscriptionState(account.id, {
+        providerMetadata: withMicrosoftSubscription(metadata, { id: created.id, clientStateHash: hashClientState(clientState) }),
+        expiresAt: created.expirationDateTime,
+        renewedAt: nowIso,
+        errorCode: null,
+        errorAt: null
+      });
+    } catch (error) {
+      // Not recorded: remove it at Graph (best effort) so no orphan subscription keeps notifying.
+      await client.remove(context, created.id).catch(() => undefined);
+      throw error;
+    }
+    deps.logger.info(
+      { event: "microsoft.subscription.created", emailAccountId: account.id, subscription: subscriptionLogId(created.id), expiresAt: created.expirationDateTime },
+      "Microsoft subscription created"
+    );
+    await record("microsoft.subscription.created", "UPDATE", "Microsoft push notifications enabled", { expiresAt: created.expirationDateTime });
+    return true;
+  } catch (error) {
+    // Credentials (account -> ERROR) and transient failures (retry) are handled by the job runner.
+    if (isAccountFatal(error) || error instanceof ProviderTransientError) throw error;
+    const errorCode = error instanceof ProviderHttpError ? `HTTP_${error.status}` : "SUBSCRIPTION_FAILED";
+    await deps.accounts.saveWatchState(account.id, { errorCode, errorAt: nowIso });
+    deps.logger.warn(
+      { event: "microsoft.subscription.failed", emailAccountId: account.id, errorCode, err: serializeError(error) },
+      "Microsoft subscription failed; polling continues"
+    );
+    await record("microsoft.subscription.failed", "FAIL", "Microsoft push notifications could not be enabled; the mailbox is still polled", { errorCode });
+    return false;
+  }
+}
+
+/** The ACTIVE Microsoft account (of an ACTIVE organization) a Graph subscription belongs to. */
+async function microsoftAccountBySubscription(subscriptionId: string, deps: HandleEventDeps): Promise<WorkerAccount | null> {
+  if (!isGraphSubscriptionId(subscriptionId)) return null;
+  const account = await deps.accounts.findAccountBySubscription(subscriptionId);
+  if (!account || account.provider !== "MICROSOFT" || account.status !== "ACTIVE" || account.organizationStatus !== "ACTIVE") return null;
+  return account;
+}
+
 export async function handleEmailEvent(job: EmailEventJob, deps: HandleEventDeps): Promise<HandleEventOutcome> {
   switch (job.type) {
     case "GMAIL_NOTIFICATION": {
@@ -301,20 +431,45 @@ export async function handleEmailEvent(job: EmailEventJob, deps: HandleEventDeps
     }
 
     case "MICROSOFT_NOTIFICATION": {
-      const account = await deps.accounts.findAccountBySubscription(job.subscriptionId);
-      if (!account || account.status !== "ACTIVE") return { accounts: 0, enqueued: 0 };
+      // Like a Gmail push: the notification only triggers the account's (coalesced, locked) sync;
+      // the delta cursor decides what is new. job.messageId is never processed directly.
+      const account = await microsoftAccountBySubscription(job.subscriptionId, deps);
+      if (!account) return { accounts: 0, enqueued: 0 };
+      await deps.enqueueSync(account, "GRAPH");
+      return { accounts: 1, enqueued: 1 };
+    }
 
-      if (job.messageId) {
-        await deps.producer.enqueueProcessing({
-          organizationId: account.organizationId,
-          emailAccountId: account.id,
-          provider: "MICROSOFT",
-          providerMessageId: job.messageId
-        });
+    case "MICROSOFT_LIFECYCLE": {
+      const account = await microsoftAccountBySubscription(job.subscriptionId, deps);
+      if (!account) return { accounts: 0, enqueued: 0 };
+      const nowIso = new Date((deps.now ?? Date.now)()).toISOString();
+      const resubscribe = () => (deps.enqueueWatch ? deps.enqueueWatch(account) : ensureWatch(account.id, account.organizationId, deps).then(() => undefined));
+      deps.logger.info(
+        { event: `microsoft.lifecycle.${job.lifecycleEvent}`, emailAccountId: account.id, subscription: subscriptionLogId(job.subscriptionId) },
+        "Microsoft lifecycle notification"
+      );
+
+      if (job.lifecycleEvent === "missed") {
+        // Never rebuild messages from the notification: the delta sync recovers every change.
+        await deps.enqueueSync(account, "GRAPH");
         return { accounts: 1, enqueued: 1 };
       }
-      await deps.enqueueSync(account, "PUBSUB");
-      return { accounts: 1, enqueued: 1 };
+      if (job.lifecycleEvent === "reauthorizationRequired") {
+        // Renewing (PATCH) reauthorizes the subscription: mark it due; the (coalesced) WATCH job renews it.
+        await deps.accounts.saveWatchState(account.id, { expiresAt: nowIso, errorCode: null });
+        await resubscribe();
+        return { accounts: 1, enqueued: 1 };
+      }
+      // subscriptionRemoved: forget it, create a new one and sync what may have arrived meanwhile.
+      await deps.accounts.saveSubscriptionState(account.id, {
+        providerMetadata: withMicrosoftSubscription(account.providerMetadata, null),
+        expiresAt: null,
+        errorCode: "SUBSCRIPTION_REMOVED",
+        errorAt: nowIso
+      });
+      await resubscribe();
+      await deps.enqueueSync(account, "GRAPH");
+      return { accounts: 1, enqueued: 2 };
     }
 
     case "SYNC_ACCOUNT": {
@@ -330,11 +485,13 @@ export async function handleEmailEvent(job: EmailEventJob, deps: HandleEventDeps
     }
 
     case "RENEW_WATCHES": {
-      if (!deps.watchTopic || !deps.enqueueWatch) return { accounts: 0, enqueued: 0 };
+      // Only the providers whose push is configured (Gmail: topic; Microsoft: notification URL).
+      const providers = [...(deps.watchTopic ? (["GMAIL"] as const) : []), ...(deps.microsoftPush ? (["MICROSOFT"] as const) : [])];
+      if (providers.length === 0 || !deps.enqueueWatch) return { accounts: 0, enqueued: 0 };
       const renewBefore = new Date((deps.now ?? Date.now)() + WATCH_RENEW_MARGIN_MS).toISOString();
-      const accounts = await deps.accounts.listAccountsNeedingWatch({ renewBefore, limit: WATCH_RENEW_BATCH });
+      const accounts = await deps.accounts.listAccountsNeedingWatch({ renewBefore, limit: WATCH_RENEW_BATCH, providers: [...providers] });
       for (const account of accounts) await deps.enqueueWatch(account);
-      if (accounts.length > 0) deps.logger.info({ accounts: accounts.length }, "Gmail watch renewals queued");
+      if (accounts.length > 0) deps.logger.info({ accounts: accounts.length, providers }, "push subscription renewals queued");
       return { accounts: accounts.length, enqueued: accounts.length };
     }
 

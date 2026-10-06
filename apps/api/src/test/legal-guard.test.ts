@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { generateSessionToken, hashSessionToken } from "../lib/customer-access.js";
 import { PORTAL_SESSION_COOKIE } from "../modules/portal/session.js";
 import { createLegalAcceptanceGate } from "../plugins/legal-acceptance.js";
-import { authHeaders, createTestApp, makeUser, ORG_A, ORG_B, type TestUser } from "./helpers.js";
+import { authHeaders, createTestApp, makeUser, MICROSOFT_OAUTH, ORG_A, ORG_B, type TestUser } from "./helpers.js";
 
 /*
  * EmailBot V2 phase 7: the API is the authority for the legal barrier. Every
@@ -160,7 +160,7 @@ describe("routes without a user session are not affected", () => {
   });
 
   it("7. Microsoft webhook (subscription validation handshake)", async () => {
-    const { privileged } = await setup({}, { microsoftWebhookClientState: "client-state-secret" });
+    const { privileged } = await setup({}, { microsoftGraphPushEnabled: true, microsoft: MICROSOFT_OAUTH });
     const response = await ctx!.app.inject({ method: "POST", url: "/webhooks/microsoft?validationToken=abc123" });
     expect(response.statusCode).toBe(200);
     expect(response.body).toBe("abc123");

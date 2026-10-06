@@ -689,14 +689,14 @@ describe("handleEmailEvent", () => {
     expect(adapter.listNewMessageIds).not.toHaveBeenCalled();
   });
 
-  it("Microsoft notification with a message id enqueues it directly", async () => {
-    const { deps, producer } = eventSetup([
-      makeAccount({ id: "acc-ms", provider: "MICROSOFT", providerMetadata: { subscriptionId: "sub-1" } })
+  it("Microsoft notification only triggers the account's sync (F9: never processes the message id directly)", async () => {
+    const subscriptionId = "11111111-2222-4333-8444-555555555555";
+    const { deps, producer, enqueueSync } = eventSetup([
+      makeAccount({ id: "acc-ms", provider: "MICROSOFT", providerMetadata: { subscriptionId } })
     ]);
-    await handleEmailEvent({ type: "MICROSOFT_NOTIFICATION", subscriptionId: "sub-1", resource: "x", messageId: "m9" }, deps);
-    expect(producer.processing).toEqual([
-      { organizationId: ORG, emailAccountId: "acc-ms", provider: "MICROSOFT", providerMessageId: "m9" }
-    ]);
+    await handleEmailEvent({ type: "MICROSOFT_NOTIFICATION", subscriptionId, resource: "x", messageId: "m9" }, deps);
+    expect(producer.processing).toEqual([]);
+    expect(enqueueSync).toHaveBeenCalledWith(expect.objectContaining({ id: "acc-ms" }), "GRAPH");
   });
 
   it("POLL_ACCOUNTS schedules a sync per active OAuth account", async () => {

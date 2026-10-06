@@ -69,8 +69,17 @@ const envSchema = z
     MICROSOFT_CLIENT_SECRET: optionalEnv(z.string().min(1)),
     MICROSOFT_REDIRECT_URI: optionalEnv(z.url()),
     MICROSOFT_TENANT: z.string().min(1).default("common"),
-    /** clientState configured on Graph subscriptions; verified on every notification. */
-    MICROSOFT_WEBHOOK_CLIENT_STATE: optionalEnv(z.string().min(16)),
+    /**
+     * Microsoft push (Graph change notifications): serves POST /webhooks/microsoft
+     * (+ /lifecycle) and monitors the subscriptions in /health/sync. Each
+     * subscription carries its own clientState (created by the worker; only its
+     * hash is stored), so there is no shared webhook secret. Requires the
+     * Microsoft OAuth client. Default false: the routes answer 404.
+     */
+    MICROSOFT_GRAPH_PUSH_ENABLED: z
+      .enum(["true", "false"], { error: "must be true or false" })
+      .default("false")
+      .transform((value) => value === "true"),
 
     /**
      * GET /health/sync: an active mailbox counts as stale when its last
@@ -94,6 +103,10 @@ const envSchema = z
     // Every environment: a half-configured push authentication would silently be disabled.
     if ((env.GMAIL_PUBSUB_OIDC_AUDIENCE === undefined) !== (env.GMAIL_PUBSUB_SERVICE_ACCOUNT === undefined)) {
       issue("GMAIL_PUBSUB_OIDC_AUDIENCE", "GMAIL_PUBSUB_OIDC_AUDIENCE and GMAIL_PUBSUB_SERVICE_ACCOUNT must be set together");
+    }
+    // Every environment: Graph subscriptions belong to connected Microsoft accounts.
+    if (env.MICROSOFT_GRAPH_PUSH_ENABLED && !(env.MICROSOFT_CLIENT_ID && env.MICROSOFT_CLIENT_SECRET && env.MICROSOFT_REDIRECT_URI)) {
+      issue("MICROSOFT_GRAPH_PUSH_ENABLED", "requires MICROSOFT_CLIENT_ID, MICROSOFT_CLIENT_SECRET and MICROSOFT_REDIRECT_URI");
     }
 
     if (env.NODE_ENV !== "production") return;
@@ -170,7 +183,8 @@ export interface ApiConfig {
   gmailPubSubVerificationToken: string | null;
   /** Pub/Sub push OIDC authentication; null = not configured. */
   gmailPubSubOidc: { audience: string; serviceAccount: string } | null;
-  microsoftWebhookClientState: string | null;
+  /** Microsoft Graph change notifications (webhook routes + subscription monitoring). */
+  microsoftGraphPushEnabled: boolean;
   /**
    * New IMAP accounts. Always false: IMAP synchronization is not implemented
    * (the worker adapter is a scaffold), so the API must not ask for or store
@@ -256,7 +270,7 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): ApiConfig {
       env.GMAIL_PUBSUB_OIDC_AUDIENCE && env.GMAIL_PUBSUB_SERVICE_ACCOUNT
         ? { audience: env.GMAIL_PUBSUB_OIDC_AUDIENCE, serviceAccount: env.GMAIL_PUBSUB_SERVICE_ACCOUNT }
         : null,
-    microsoftWebhookClientState: env.MICROSOFT_WEBHOOK_CLIENT_STATE ?? null,
+    microsoftGraphPushEnabled: env.MICROSOFT_GRAPH_PUSH_ENABLED,
     imapAccountsEnabled: false,
     syncHealthStaleMinutes: env.SYNC_HEALTH_STALE_MINUTES,
     sentryDsn: env.SENTRY_DSN ?? null

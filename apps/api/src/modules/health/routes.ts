@@ -53,7 +53,7 @@ export function healthRoutes(deps: AppDeps) {
     /*
      * Mail synchronization health (see sync-health.ts). Public and without
      * personal data, for an external uptime monitor. /health/* is exempt from
-     * rate limiting, so the result (Redis checks + 7 count queries) is cached
+     * rate limiting, so the result (Redis checks + up to 8 count queries) is cached
      * for SYNC_HEALTH_CACHE_MS and concurrent requests share one evaluation.
      */
     let cached: { at: number; result: Promise<SyncHealthResult> } | null = null;
@@ -74,7 +74,9 @@ export function healthRoutes(deps: AppDeps) {
           staleBefore: new Date(now - deps.config.syncHealthStaleMinutes * 60_000).toISOString(),
           watchExpiringBefore: gmailPushEnabled ? new Date(now + WATCH_EXPIRY_WARNING_MS).toISOString() : null,
           stuckBefore: new Date(now - STUCK_EMAIL_MS).toISOString(),
-          failedSince: new Date(now - FAILED_EMAIL_WINDOW_MS).toISOString()
+          failedSince: new Date(now - FAILED_EMAIL_WINDOW_MS).toISOString(),
+          // Graph subscriptions are renewed from 24 h before expiry (like Gmail watches): warn from 12 h.
+          microsoftSubscriptionsBefore: deps.config.microsoftGraphPushEnabled ? new Date(now + WATCH_EXPIRY_WARNING_MS).toISOString() : null
         });
         const result = evaluateSyncHealth(counts);
         if (result.statusCode !== 200 || result.body.status !== "ok") log.warn({ syncHealth: result.body, counts }, "mail synchronization is not healthy");

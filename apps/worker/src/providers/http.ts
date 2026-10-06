@@ -35,9 +35,19 @@ export async function providerPost(context: ProviderContext, url: string, body: 
   return providerRequest(context, "POST", url, body, fetchImpl, { "content-type": "application/json" });
 }
 
+/** Authenticated JSON PATCH (Graph subscription renewal); same error classification as providerGet. */
+export async function providerPatch(context: ProviderContext, url: string, body: unknown, fetchImpl: typeof fetch): Promise<unknown> {
+  return providerRequest(context, "PATCH", url, body, fetchImpl, { "content-type": "application/json" });
+}
+
+/** Authenticated DELETE (Graph subscription removal); 204 resolves to null. */
+export async function providerDelete(context: ProviderContext, url: string, fetchImpl: typeof fetch): Promise<unknown> {
+  return providerRequest(context, "DELETE", url, undefined, fetchImpl, {});
+}
+
 async function providerRequest(
   context: ProviderContext,
-  method: "GET" | "POST",
+  method: "GET" | "POST" | "PATCH" | "DELETE",
   url: string,
   body: unknown,
   fetchImpl: typeof fetch,
@@ -69,6 +79,8 @@ async function providerRequest(
     if (!response.ok) {
       throw new ProviderHttpError(`Provider returned HTTP ${response.status}`, response.status);
     }
+    // No content (DELETE); every other success has a JSON body (GET / POST / PATCH unchanged).
+    if (response.status === 204) return null;
     return response.json();
   }
 

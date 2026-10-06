@@ -138,12 +138,23 @@ export function createAccountStore(db: SupabaseClient): AccountStore {
       check(await db.from("email_accounts").update(columns).eq("id", id), "saveWatchState");
     },
 
-    async listAccountsNeedingWatch({ renewBefore, limit }) {
+    async saveSubscriptionState(id, state) {
+      const columns: Row = {
+        provider_metadata: state.providerMetadata,
+        watch_expires_at: state.expiresAt,
+        watch_error_code: state.errorCode?.slice(0, 100) ?? null
+      };
+      if (state.renewedAt !== undefined) columns.watch_renewed_at = state.renewedAt;
+      if (state.errorAt !== undefined) columns.watch_error_at = state.errorAt;
+      check(await db.from("email_accounts").update(columns).eq("id", id).eq("provider", "MICROSOFT"), "saveSubscriptionState");
+    },
+
+    async listAccountsNeedingWatch({ renewBefore, limit, providers = ["GMAIL"] }) {
       const rows = check(
         await db
           .from("email_accounts")
           .select("id,organization_id,organizations!inner(status)")
-          .eq("provider", "GMAIL")
+          .in("provider", providers)
           .eq("status", "ACTIVE")
           .eq("organizations.status", "ACTIVE")
           .or(`watch_expires_at.is.null,watch_expires_at.lt.${renewBefore}`)

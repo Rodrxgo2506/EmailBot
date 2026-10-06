@@ -565,32 +565,10 @@ describe("webhooks", () => {
     expect(response.statusCode).toBe(404);
   });
 
-  it("Microsoft: echoes the validation token and filters by clientState", async () => {
-    const clientState = "client-state-0123456789";
-    const { app, queue } = await createTestApp({ config: { microsoftWebhookClientState: clientState } });
-
-    const validation = await app.inject({ method: "POST", url: "/webhooks/microsoft?validationToken=abc%20123" });
-    expect(validation.statusCode).toBe(200);
-    expect(validation.body).toBe("abc 123");
-    expect(validation.headers["content-type"]).toContain("text/plain");
-
-    const response = await app.inject({
-      method: "POST",
-      url: "/webhooks/microsoft",
-      payload: {
-        value: [
-          { subscriptionId: "sub-1", clientState, resource: "me/messages/m1", resourceData: { id: "m1" } },
-          { subscriptionId: "sub-1", clientState: "forged", resource: "me/messages/m2", resourceData: { id: "m2" } }
-        ]
-      }
-    });
-
-    expect(response.statusCode).toBe(202);
-    expect(queue.enqueueEmailEvent).toHaveBeenCalledTimes(1);
-    expect(queue.enqueueEmailEvent).toHaveBeenCalledWith(
-      { type: "MICROSOFT_NOTIFICATION", subscriptionId: "sub-1", resource: "me/messages/m1", messageId: "m1" },
-      expect.anything()
-    );
+  it("Microsoft webhook is disabled unless MICROSOFT_GRAPH_PUSH_ENABLED (detailed tests: microsoft-webhook.test.ts)", async () => {
+    const { app } = await createTestApp();
+    expect((await app.inject({ method: "POST", url: "/webhooks/microsoft?validationToken=abc" })).statusCode).toBe(404);
+    expect((await app.inject({ method: "POST", url: "/webhooks/microsoft/lifecycle?validationToken=abc" })).statusCode).toBe(404);
   });
 });
 

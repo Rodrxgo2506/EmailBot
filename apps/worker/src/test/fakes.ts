@@ -373,11 +373,18 @@ export function makeAccountStore(accounts: WorkerAccount[]): AccountStore & Reco
       const account = accounts.find((candidate) => candidate.id === id);
       if (account && state.expiresAt !== undefined) account.watchExpiresAt = state.expiresAt;
     }),
-    listAccountsNeedingWatch: vi.fn(async ({ renewBefore }: { renewBefore: string; limit: number }) =>
+    saveSubscriptionState: vi.fn(async (id: string, state: { providerMetadata: Record<string, unknown>; expiresAt: string | null }) => {
+      const account = accounts.find((candidate) => candidate.id === id);
+      if (account) {
+        account.providerMetadata = state.providerMetadata;
+        account.watchExpiresAt = state.expiresAt;
+      }
+    }),
+    listAccountsNeedingWatch: vi.fn(async ({ renewBefore, providers = ["GMAIL"] }: { renewBefore: string; limit: number; providers?: string[] }) =>
       accounts
         .filter(
           (a) =>
-            a.provider === "GMAIL" &&
+            providers.includes(a.provider) &&
             a.status === "ACTIVE" &&
             a.organizationStatus === "ACTIVE" &&
             (!a.watchExpiresAt || a.watchExpiresAt < renewBefore)

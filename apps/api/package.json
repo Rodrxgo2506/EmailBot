@@ -10,7 +10,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc -p tsconfig.e2e.json",
     "lint": "tsc --noEmit -p tsconfig.json && tsc -p tsconfig.e2e.json",
     "test": "vitest run",
-    "e2e": "tsx e2e/isolation.e2e.ts && tsx e2e/sync-health.e2e.ts"
+    "e2e": "tsx e2e/isolation.e2e.ts && tsx e2e/sync-health.e2e.ts && tsx e2e/microsoft-subscriptions.e2e.ts"
   },
   "dependencies": {
     "@emailbot/rules-engine": "workspace:*",

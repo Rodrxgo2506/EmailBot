@@ -28,10 +28,10 @@ export function syncHealthOperations(service: SupabaseClient): SyncHealthOperati
   };
 
   return {
-    async syncHealthCounts({ staleBefore, watchExpiringBefore, stuckBefore, failedSince }) {
+    async syncHealthCounts({ staleBefore, watchExpiringBefore, stuckBefore, failedSince, microsoftSubscriptionsBefore }) {
       // Timestamps are quoted: they contain ":" and "." (PostgREST logic-filter syntax).
       const before = `"${staleBefore}"`;
-      const [monitored, errored, stale, erroring, watchExpiring, stuckEmails, failedEmails] = await Promise.all([
+      const [monitored, errored, stale, erroring, watchExpiring, subscriptionIssues, stuckEmails, failedEmails] = await Promise.all([
         count(accounts("ACTIVE")),
         count(accounts("ERROR")),
         count(accounts("ACTIVE").or(`last_synced_at.lt.${before},and(last_synced_at.is.null,created_at.lt.${before})`)),
@@ -40,6 +40,10 @@ export function syncHealthOperations(service: SupabaseClient): SyncHealthOperati
         watchExpiringBefore === null
           ? 0
           : count(accounts("ACTIVE").eq("provider", "GMAIL").not("watch_expires_at", "is", null).lt("watch_expires_at", watchExpiringBefore)),
+        // Without Microsoft push no subscription is expected.
+        microsoftSubscriptionsBefore === null
+          ? 0
+          : count(accounts("ACTIVE").eq("provider", "MICROSOFT").or(`watch_expires_at.is.null,watch_expires_at.lt."${microsoftSubscriptionsBefore}"`)),
         count(
           service
             .from("emails")
@@ -58,7 +62,7 @@ export function syncHealthOperations(service: SupabaseClient): SyncHealthOperati
             .eq("organizations.status", "ACTIVE")
         )
       ]);
-      return { monitored, errored, stale, erroring, watchExpiring, stuckEmails, failedEmails };
+      return { monitored, errored, stale, erroring, watchExpiring, subscriptionIssues, stuckEmails, failedEmails };
     }
   };
 }

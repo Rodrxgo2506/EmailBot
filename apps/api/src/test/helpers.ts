@@ -3,7 +3,7 @@ import { SecretBox } from "@emailbot/shared";
 import { CURRENT_LEGAL_VERSIONS, LEGAL_DOCUMENTS, type OrganizationRole, type OrganizationStatus } from "@emailbot/types";
 import { vi } from "vitest";
 import { buildApp } from "../app.js";
-import type { ApiConfig } from "../config/env.js";
+import type { ApiConfig, OAuthProviderConfig } from "../config/env.js";
 import { createMemoryNonceStore } from "../infrastructure/nonces.js";
 import type { RateLimitRedis } from "../infrastructure/rate-limit-store.js";
 import type { AppDeps, AuthenticatedUser } from "../deps.js";
@@ -11,6 +11,14 @@ import type { AdminOperations, PrivilegedOperations, Repositories } from "../rep
 
 export const ORG_A = "11111111-1111-4111-8111-111111111111";
 export const ORG_B = "22222222-2222-4222-8222-222222222222";
+
+/** A configured Microsoft OAuth client (test values only). */
+export const MICROSOFT_OAUTH: OAuthProviderConfig = {
+  clientId: "microsoft-client",
+  clientSecret: "microsoft-secret",
+  redirectUri: "https://api.example.com/api/oauth/microsoft/callback",
+  tenant: "common"
+};
 
 export function testConfig(overrides: Partial<ApiConfig> = {}): ApiConfig {
   return {
@@ -34,7 +42,7 @@ export function testConfig(overrides: Partial<ApiConfig> = {}): ApiConfig {
     microsoft: null,
     gmailPubSubVerificationToken: null,
     gmailPubSubOidc: null,
-    microsoftWebhookClientState: null,
+    microsoftGraphPushEnabled: false,
     imapAccountsEnabled: false,
     syncHealthStaleMinutes: 20,
     sentryDsn: null,
@@ -102,7 +110,10 @@ export function createFakePrivileged(): { [K in keyof PrivilegedOperations]: Ret
       LEGAL_DOCUMENTS.map((document) => ({ document, version: CURRENT_LEGAL_VERSIONS[document] }))
     ),
     recordLegalAcceptance: unexpected("privileged.recordLegalAcceptance"),
-    syncHealthCounts: unexpected("privileged.syncHealthCounts")
+    syncHealthCounts: unexpected("privileged.syncHealthCounts"),
+    findMicrosoftSubscription: unexpected("privileged.findMicrosoftSubscription"),
+    getMicrosoftSubscriptionCredentials: unexpected("privileged.getMicrosoftSubscriptionCredentials"),
+    clearMicrosoftSubscription: unexpected("privileged.clearMicrosoftSubscription")
   };
 }
 

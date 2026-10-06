@@ -29,7 +29,7 @@ Se evalúa en este orden:
 | 200 | `ok` / `idle` | no hay buzones sincronizables |
 | 503 | `down` / `error` | todos los buzones sincronizables están en `ERROR`: no se sincroniza nada |
 | 503 | `down` / `stale` | más de la mitad de los buzones `ACTIVE` atrasados (con uno solo, basta ese): la sincronización está parada |
-| 200 | `degraded` / `degraded` | algún buzón en `ERROR`, atrasado, con error reciente o (con push de Gmail configurado) con el *watch* a < 12 h de caducar; o correos en `RECEIVED`/`PROCESSING` hace más de 30 min (buzones `ACTIVE`); o correos `FAILED` en las últimas 24 h |
+| 200 | `degraded` / `degraded` | algún buzón en `ERROR`, atrasado, con error reciente, (con push de Gmail configurado) con el *watch* a < 12 h de caducar o (con push de Microsoft activado) sin suscripción de Graph o con ella a < 12 h de caducar; o correos en `RECEIVED`/`PROCESSING` hace más de 30 min (buzones `ACTIVE`); o correos `FAILED` en las últimas 24 h |
 | 200 | `ok` / `healthy` | todo lo anterior en orden |
 
 "Atrasado" = sin sincronización correcta en `SYNC_HEALTH_STALE_MINUTES` (20 por defecto). Un buzón roto entre
@@ -193,9 +193,32 @@ cuenta en Redis; un *history gap* se recupera con una búsqueda acotada. El poll
 recuperación, y `RENEW_WATCHES` renueva los `users.watch` antes de que caduquen. Los jobs solo llevan ids, nunca
 tokens ni credenciales; los logs registran el buzón con hash. Rate limit propio de webhooks (1200/min).
 
-### `POST /webhooks/microsoft`
+### `POST /webhooks/microsoft` y `POST /webhooks/microsoft/lifecycle` (Microsoft Graph, F9)
 
-Validación (`validationToken`) y notificaciones con `clientState`.
+Notificaciones de cambio de Microsoft Graph para buzones de Microsoft 365 / Outlook. Mismo contrato que el push de
+Gmail: autenticar, validar, encolar **un** job y responder rápido; ni la API ni el job procesan el mensaje
+notificado: el worker solo sincroniza la cuenta desde su cursor delta. Solo existen (si no, `404`) con
+`MICROSOFT_GRAPH_PUSH_ENABLED=true` y el cliente OAuth de Microsoft configurado.
+
+- **Handshake**: Graph valida cada URL al crear la suscripción con `POST …?validationToken=<texto>`. Ambas rutas
+  devuelven `200` `text/plain` con el token exacto (decodificado) y no hacen nada más. Un token vacío o de más de
+  4096 caracteres → `400` (nunca se trunca).
+- **Autenticación**: cada suscripción tiene su propio `clientState` aleatorio (256 bits), generado por el worker al
+  crearla; la base de datos solo guarda su SHA-256 (`provider_metadata.subscriptionClientStateHash`). Cada
+  notificación se acepta solo si su `subscriptionId` (GUID) corresponde a una cuenta Microsoft y el SHA-256 de su
+  `clientState` coincide (comparación en tiempo constante). No hay secreto compartido.
+- **Notificaciones** (`/webhooks/microsoft`, `changeType: created` en la Inbox): cuenta y organización `ACTIVE` →
+  job `MICROSOFT_NOTIFICATION` con `jobId` = hash(suscripción + id del mensaje) (un reenvío es el mismo job).
+  Suscripción desconocida, `clientState` incorrecto o cuenta inactiva → se ignora. Cuerpo malformado → `202` sin
+  efecto. Base de datos o cola no disponibles → `503` (Graph reintenta; nunca se acepta sin verificar). Respuesta
+  normal: `202`.
+- **Ciclo de vida** (`/webhooks/microsoft/lifecycle`): `reauthorizationRequired`, `subscriptionRemoved` y `missed`,
+  autenticados igual → job `MICROSOFT_LIFECYCLE`; otros eventos se ignoran.
+- **Logs**: nunca el `clientState`, la ruta del recurso ni el id de la suscripción en claro (hash corto).
+
+En el worker, `MICROSOFT_NOTIFICATION` (y `missed`) solo encola la sincronización coalescida de la cuenta (motivo
+`GRAPH`): delta query de la Inbox desde el cursor guardado y el pipeline normal, igual que Gmail. El polling cada 5
+minutos sigue como red de seguridad. Operación: `docs/operations.md`.
 
 ## Tiempo real (Socket.IO)
 
