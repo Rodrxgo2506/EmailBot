@@ -47,7 +47,7 @@ con Turborepo, usar `--force`: `NODE_ENV` es *pass-through* y no forma parte del
 |---|---|
 | API `GET /health` | proceso vivo (200 siempre) |
 | API `GET /health/ready` | Redis responde (200) o no (503) |
-| API `GET /health/sync` | sincronización de correo para un monitor externo: 200 `ok`/`degraded`, 503 parada o sin Redis/BD (ver `docs/api.md`). No usarlo como health check de la plataforma |
+| API `GET /health/sync` | sincronización de correo para un monitor externo: 200 `ok`/`degraded`; 503 `stalled` (worker sin consumir), `error` (todos los buzones en `ERROR`), `stale` o `unavailable` (sin Redis/BD) (ver `docs/api.md` y `docs/operations.md`). No usarlo como health check de la plataforma |
 | Worker `GET /livez` | proceso vivo |
 | Worker `GET /readyz` | 200 si colas, schedulers y workers BullMQ están inicializados **y** Redis responde a PING (≤ 1 s); 503 con `{ checks: { initialized, redis } }` si no |
 | Web `GET /healthz` | nginx sirve |

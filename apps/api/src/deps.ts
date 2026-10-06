@@ -3,6 +3,7 @@ import type { RealtimeEvent } from "@emailbot/types";
 import type { ApiConfig } from "./config/env.js";
 import type { RateLimitRedis } from "./infrastructure/rate-limit-store.js";
 import type { GoogleOidcVerifier } from "./lib/google-oidc.js";
+import type { PollSchedulerState } from "./modules/health/sync-health.js";
 import type { AdminOperations, PrivilegedOperations, Repositories } from "./repositories/types.js";
 
 export interface AuthenticatedUser {
@@ -25,6 +26,8 @@ export interface JobQueue {
   requestAccountSync(account: { id: string; organizationId: string }, reason: SyncReason, requestedBy?: string | null): Promise<"QUEUED" | "ALREADY_QUEUED">;
   /** A sync of this account is waiting, delayed or running. */
   isAccountSyncPending(emailAccountId: string): Promise<boolean>;
+  /** Read-only: next run and interval (ms) of the worker's polling job scheduler; null when it does not exist. */
+  pollSchedulerState(): Promise<PollSchedulerState | null>;
   close(): Promise<void>;
 }
 

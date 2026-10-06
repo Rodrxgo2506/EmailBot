@@ -6,3 +6,4 @@ export * from "./storage.js";
 export * from "./env.js";
 export * from "./oauth.js";
 export * from "./http.js";
+export * from "./sentry.js";

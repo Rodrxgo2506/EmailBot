@@ -1,4 +1,4 @@
-import { addCoalescedSync, DEFAULT_JOB_OPTIONS, isSyncPending, QUEUE_NAMES, type EmailEventJob } from "@emailbot/shared";
+import { addCoalescedSync, DEFAULT_JOB_OPTIONS, isSyncPending, POLL_SCHEDULER_ID, QUEUE_NAMES, type EmailEventJob } from "@emailbot/shared";
 import { Queue } from "bullmq";
 import { Redis } from "ioredis";
 import type { JobQueue } from "../deps.js";
@@ -37,6 +37,13 @@ export function createBullJobQueue(connection: Redis): JobQueue {
     },
     async isAccountSyncPending(emailAccountId) {
       return isSyncPending(emailEvents as never, emailAccountId);
+    },
+    async pollSchedulerState() {
+      // Read-only (HGETALL / ZSCORE of the scheduler): never creates or changes it.
+      const scheduler = await emailEvents.getJobScheduler(POLL_SCHEDULER_ID);
+      const next = Number(scheduler?.next);
+      const every = Number(scheduler?.every);
+      return scheduler && Number.isFinite(next) && Number.isFinite(every) && every > 0 ? { next, every } : null;
     },
     async close() {
       await emailEvents.close();

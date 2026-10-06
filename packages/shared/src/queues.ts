@@ -17,6 +17,12 @@ export const QUEUE_NAMES = {
 
 export type QueueName = (typeof QUEUE_NAMES)[keyof typeof QUEUE_NAMES];
 
+/**
+ * Job scheduler of the recovery polling (worker, email-events queue). The API
+ * reads its next run (read-only) to detect a worker that stopped consuming.
+ */
+export const POLL_SCHEDULER_ID = "poll-active-accounts";
+
 /** Gmail Pub/Sub push notification (already decoded and verified by the API). */
 export interface GmailNotificationJob {
   type: "GMAIL_NOTIFICATION";

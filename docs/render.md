@@ -1,8 +1,11 @@
-# Render (beta) — compatibilidad y configuración
+# Render — compatibilidad y configuración
 
-Estado: **preparación**. No hay servicios creados en Render. Borrador de Blueprint en
-[`deploy/render/render.yaml`](../deploy/render/render.yaml) (fuera de la raíz a propósito: Render solo lee un
-Blueprint cuando alguien lo crea en el Dashboard).
+Estado: **en producción**. Servicios: `emailbot-api` (Web Service, Docker), `emailbot-web` (Static Site,
+`https://emailbot.app`), `emailbot-worker` (Background Worker, Docker) y Redis (Key Value). Los despliegues son
+manuales desde `main` (`autoDeployTrigger: off`). La API responde en `https://api.emailbot.app`. Referencia de
+Blueprint en [`deploy/render/render.yaml`](../deploy/render/render.yaml) (fuera de la raíz a propósito: Render
+solo lee un Blueprint cuando alguien lo crea en el Dashboard). Operación e incidentes:
+[`docs/operations.md`](operations.md).
 
 | Componente | Render | Notas |
 |---|---|---|
@@ -91,7 +94,7 @@ ver el informe de compatibilidad de esta fase.
 | Servicio | Ruta en Render | Motivo |
 |---|---|---|
 | API | `/health` | liveness. **No** usar `/health/ready`: una caída de Redis haría que Render quitara tráfico (15 s) y reiniciara la API (60 s) sin arreglar nada |
-| Worker | — | Render no hace health checks a Background Workers; reinicia el proceso si termina. No definir `WORKER_HEALTH_PORT` |
+| Worker | — | Render no hace health checks a Background Workers; reinicia el proceso si termina. No definir `WORKER_HEALTH_PORT`. Un worker vivo pero sin consumir se detecta desde fuera con `GET /health/sync` de la API (`stalled` / `stale`) |
 | Web | — | sitio estático |
 
 ## Proxy e IP del cliente (WARNING)
@@ -129,7 +132,7 @@ Leyenda: **SECRET** = nunca en logs, repositorio ni bundle; se introduce con `sy
 | `MICROSOFT_TENANT` | PUBLIC · SHARED | `common` |
 | `ATTACHMENTS_BUCKET` | PUBLIC · SHARED | `email-attachments` |
 | `SUPABASE_HTTP_TIMEOUT_MS`, `PROVIDER_HTTP_TIMEOUT_MS` | PUBLIC · SHARED | opcionales |
-| `SENTRY_DSN` | SECRET · SHARED (un DSN por servicio, opcional) | |
+| `SENTRY_DSN` | SECRET · SHARED (un DSN por servicio, opcional) | sin ella Sentry queda desactivado. Los eventos salen sin cabeceras, cookies, cuerpos, *query strings*, datos de usuario ni *breadcrumbs* de red, y con direcciones y tokens enmascarados (`packages/shared/src/sentry.ts`) |
 | `LOG_LEVEL` | PUBLIC · SHARED | opcional |
 
 ### Solo API
@@ -153,7 +156,7 @@ Leyenda: **SECRET** = nunca en logs, repositorio ni bundle; se introduce con `sy
 | Variable | Clase | Notas |
 |---|---|---|
 | `WORKER_EVENTS_CONCURRENCY`, `WORKER_PROCESSING_CONCURRENCY` | PUBLIC · WORKER ONLY | 5 / 10 |
-| `WORKER_POLL_INTERVAL_MINUTES` | PUBLIC · WORKER ONLY | 5 (recuperación; no poner 0) |
+| `WORKER_POLL_INTERVAL_MINUTES` | PUBLIC · WORKER ONLY | 5 (recuperación; no poner 0: con 0 no hay *scheduler* de sondeo y `/health/sync` no puede detectar un worker parado) |
 | `GMAIL_PUBSUB_TOPIC` | PUBLIC · WORKER ONLY | push de Gmail (V2): `projects/<proyecto>/topics/<topic>`; sin ella, solo polling |
 | `WORKER_WATCH_RENEW_INTERVAL_MINUTES` | PUBLIC · WORKER ONLY | 60 por defecto; no definir |
 | `WORKER_MAX_ATTACHMENT_BYTES` | PUBLIC · WORKER ONLY | 25 MiB |
@@ -167,9 +170,23 @@ el Blueprint (`headers`). La CSP completa va en el `<meta>` de `index.html`; la 
 (contenido público). Pendiente de verificar en Render: la cabecera `Cache-Control` por defecto de `index.html`
 (nginx usaba `no-cache`; Render invalida su CDN en cada deploy).
 
-## Pendiente de verificar al crear la infraestructura
+## Variables que pone Render
 
-No verificable sin servicios reales:
+| Variable | Uso |
+|---|---|
+| `RENDER_GIT_COMMIT` | commit desplegado; API y worker lo envían como `release` a Sentry (si no existe o no parece un hash, se omite). No definirla a mano |
+
+## Monitorización y alertas (F8-B)
+
+Render no consulta `/health/ready` ni `/health/sync` (ver *Health checks*): la caída de Redis, un worker parado o
+la sincronización atrasada se detectan con un monitor externo sobre los endpoints públicos (decisión F8-B:
+Better Stack, plan gratuito, alertas por email). Configuración manual y monitores propuestos en
+[`docs/operations.md`](operations.md#monitorización-externa). En Render conviene activar las notificaciones por
+email del *workspace* para despliegues fallidos y caídas de servicio (Dashboard → Settings → Notifications).
+
+## Pendiente de verificar en producción
+
+Sin comprobar todavía en los servicios reales (no hay acceso a Render desde el repositorio):
 
 - `maxmemory_policy:noeviction` en la instancia real (comando de la sección Redis).
 - Persistencia real de Key Value (`journal-snapshot`).

@@ -1,7 +1,17 @@
 import { serializeError } from "@emailbot/shared";
 import type { FastifyBaseLogger, FastifyInstance } from "fastify";
 import type { AppDeps } from "../../deps.js";
-import { evaluateSyncHealth, SYNC_HEALTH_CACHE_MS, SYNC_UNAVAILABLE, WATCH_EXPIRY_WARNING_MS, type SyncHealthResult } from "./sync-health.js";
+import {
+  evaluateSyncHealth,
+  FAILED_EMAIL_WINDOW_MS,
+  isPollSchedulerStalled,
+  STUCK_EMAIL_MS,
+  SYNC_HEALTH_CACHE_MS,
+  SYNC_STALLED,
+  SYNC_UNAVAILABLE,
+  WATCH_EXPIRY_WARNING_MS,
+  type SyncHealthResult
+} from "./sync-health.js";
 
 /** Runs the readiness checks (Redis, ...); a failing check is logged, never thrown. */
 async function runReadinessChecks(deps: AppDeps, log: FastifyBaseLogger): Promise<Record<string, "ok" | "error">> {
@@ -43,7 +53,7 @@ export function healthRoutes(deps: AppDeps) {
     /*
      * Mail synchronization health (see sync-health.ts). Public and without
      * personal data, for an external uptime monitor. /health/* is exempt from
-     * rate limiting, so the result (Redis check + 4 count queries) is cached
+     * rate limiting, so the result (Redis checks + 7 count queries) is cached
      * for SYNC_HEALTH_CACHE_MS and concurrent requests share one evaluation.
      */
     let cached: { at: number; result: Promise<SyncHealthResult> } | null = null;
@@ -54,9 +64,17 @@ export function healthRoutes(deps: AppDeps) {
       const checks = await runReadinessChecks(deps, log);
       if (Object.values(checks).some((status) => status !== "ok")) return SYNC_UNAVAILABLE;
       try {
+        // A worker that stopped consuming leaves the polling scheduler overdue (read-only Redis lookup).
+        const scheduler = await deps.queue.pollSchedulerState();
+        if (isPollSchedulerStalled(scheduler, now)) {
+          log.warn({ syncHealth: SYNC_STALLED.body, schedulerOverdueMs: now - (scheduler?.next ?? now) }, "mail synchronization is not healthy");
+          return SYNC_STALLED;
+        }
         const counts = await deps.privileged.syncHealthCounts({
           staleBefore: new Date(now - deps.config.syncHealthStaleMinutes * 60_000).toISOString(),
-          watchExpiringBefore: gmailPushEnabled ? new Date(now + WATCH_EXPIRY_WARNING_MS).toISOString() : null
+          watchExpiringBefore: gmailPushEnabled ? new Date(now + WATCH_EXPIRY_WARNING_MS).toISOString() : null,
+          stuckBefore: new Date(now - STUCK_EMAIL_MS).toISOString(),
+          failedSince: new Date(now - FAILED_EMAIL_WINDOW_MS).toISOString()
         });
         const result = evaluateSyncHealth(counts);
         if (result.statusCode !== 200 || result.body.status !== "ok") log.warn({ syncHealth: result.body, counts }, "mail synchronization is not healthy");

@@ -1,6 +1,6 @@
 import { resolve } from "node:path";
 import { config as loadDotenv } from "dotenv";
-import { encryptionKeyFingerprint, fetchWithTimeout, SecretBox, serializeError } from "@emailbot/shared";
+import { encryptionKeyFingerprint, fetchWithTimeout, SecretBox, sentryRelease, serializeError } from "@emailbot/shared";
 import { REALTIME_REDIS_CHANNEL } from "@emailbot/types";
 import { buildApp } from "./app.js";
 import { loadConfig } from "./config/env.js";
@@ -15,7 +15,7 @@ import { adminOperations, createSupabaseClients, createSupabaseRepositories, pri
 loadDotenv({ path: [resolve(process.cwd(), ".env"), resolve(process.cwd(), "../../.env")], quiet: true });
 
 const config = loadConfig();
-initSentry(config.sentryDsn, config.env);
+initSentry(config.sentryDsn, config.env, sentryRelease(process.env));
 
 const supabase = createSupabaseClients(config.supabase, fetchWithTimeout(globalThis.fetch, config.supabaseHttpTimeoutMs));
 const producerConnection = createRedisConnection(config.redisUrl, { forProducer: true });
