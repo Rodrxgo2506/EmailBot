@@ -24,6 +24,7 @@ export const queryKeys = {
   rules: (organizationId: string) => ["org", organizationId, "rules"] as const,
   rule: (organizationId: string, id: string) => ["org", organizationId, "rules", id] as const,
   accounts: (organizationId: string) => ["org", organizationId, "email-accounts"] as const,
+  emailProviders: (organizationId: string) => ["org", organizationId, "email-accounts", "providers"] as const,
   members: (organizationId: string) => ["org", organizationId, "members"] as const,
   audit: (organizationId: string, params: Record<string, unknown>) => ["org", organizationId, "audit", params] as const,
   stats: (organizationId: string) => ["org", organizationId, "emails", "stats"] as const

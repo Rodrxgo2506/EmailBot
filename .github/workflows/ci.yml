@@ -1,0 +1,54 @@
+# Continuous integration (F8-A B-3). See docs/ci.md.
+#
+# Runs the same turbo tasks as a local `pnpm typecheck && pnpm lint && pnpm test && pnpm build`.
+# No secrets and no external infrastructure: database tests use PGlite (in-process Postgres),
+# API and worker tests use fakes. The end-to-end isolation check (apps/api/e2e, needs a local
+# Supabase stack in Docker) is not run here.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci:
+    name: typecheck, lint, test, build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      TURBO_TELEMETRY_DISABLED: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # Version taken from "packageManager" in package.json (pnpm@12.8.1).
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Test
+        run: pnpm test
+
+      - name: Build
+        run: pnpm build

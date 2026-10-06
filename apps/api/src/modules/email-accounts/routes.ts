@@ -7,6 +7,7 @@ import {
   type OAuthProvider,
   watchAccountJobId
 } from "@emailbot/shared";
+import type { EmailProviderAvailability } from "@emailbot/types";
 import {
   emailAccountUpdateSchema,
   idParamsSchema,
@@ -31,6 +32,21 @@ function providerConfig(config: ApiConfig, provider: OAuthProvider): OAuthProvid
   return provider === "GMAIL" ? config.google : config.microsoft;
 }
 
+/**
+ * Single source of which providers NEW accounts can be connected with: an
+ * OAuth provider needs its server configuration (client id, secret, redirect
+ * URI), so Microsoft becomes available just by configuring it and deploying;
+ * IMAP stays refused until its synchronization exists (config.imapAccountsEnabled).
+ * Existing accounts of any provider can always be listed, disconnected and deleted.
+ */
+export function providerAvailability(config: ApiConfig): EmailProviderAvailability {
+  return {
+    GMAIL: providerConfig(config, "GMAIL") !== null,
+    MICROSOFT: providerConfig(config, "MICROSOFT") !== null,
+    IMAP: config.imapAccountsEnabled
+  };
+}
+
 /** Longer than the state TTL (10 min) so a nonce cannot be reused before expiry. */
 const OAUTH_NONCE_TTL_SECONDS = 15 * 60;
 
@@ -50,6 +66,12 @@ export function emailAccountRoutes(deps: AppDeps) {
     const oauthStartGuards = { ...manage, config: { rateLimit: RATE_LIMITS.oauthStart } };
     const oauthCallbackOptions = { config: { rateLimit: RATE_LIMITS.oauthCallback } };
     const imapGuards = { ...manage, config: { rateLimit: RATE_LIMITS.imapCreate } };
+
+    /** Providers new accounts can be connected with (the web app only offers these). */
+    app.get("/email-accounts/providers", read, async (_request, reply) => {
+      reply.header("cache-control", "no-store");
+      return { providers: providerAvailability(deps.config) };
+    });
 
     app.get("/email-accounts", read, async (request) => {
       return { items: await getAuth(request).repos.emailAccounts.list(getOrganization(request).id) };
@@ -161,11 +183,16 @@ export function emailAccountRoutes(deps: AppDeps) {
     });
 
     /**
-     * IMAP / custom domains. Credentials are validated and stored encrypted.
-     * Synchronization is NOT implemented yet: the account is created PAUSED
-     * with an explicit error code so nobody mistakes it for a working sync.
+     * IMAP / custom domains. Synchronization is NOT implemented (the worker
+     * adapter is a scaffold), so new IMAP accounts are refused with 503
+     * IMAP_NOT_AVAILABLE before the body (and its password) is even parsed.
+     * When enabled, credentials are validated and stored encrypted and the
+     * account is created PAUSED with an explicit error code.
      */
     app.post("/email-accounts/imap", imapGuards, async (request, reply) => {
+      if (!providerAvailability(deps.config).IMAP) {
+        throw serviceUnavailable("IMAP accounts are not available yet", "IMAP_NOT_AVAILABLE");
+      }
       const input = parseWith(imapAccountCreateSchema, request.body);
       const account = await deps.privileged.createImapEmailAccount({
         organizationId: getOrganization(request).id,

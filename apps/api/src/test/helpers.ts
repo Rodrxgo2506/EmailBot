@@ -35,6 +35,8 @@ export function testConfig(overrides: Partial<ApiConfig> = {}): ApiConfig {
     gmailPubSubVerificationToken: null,
     gmailPubSubOidc: null,
     microsoftWebhookClientState: null,
+    imapAccountsEnabled: false,
+    syncHealthStaleMinutes: 20,
     sentryDsn: null,
     ...overrides
   };
@@ -99,7 +101,8 @@ export function createFakePrivileged(): { [K in keyof PrivilegedOperations]: Ret
     listLegalAcceptances: vi.fn(async (_userId: string) =>
       LEGAL_DOCUMENTS.map((document) => ({ document, version: CURRENT_LEGAL_VERSIONS[document] }))
     ),
-    recordLegalAcceptance: unexpected("privileged.recordLegalAcceptance")
+    recordLegalAcceptance: unexpected("privileged.recordLegalAcceptance"),
+    syncHealthCounts: unexpected("privileged.syncHealthCounts")
   };
 }
 

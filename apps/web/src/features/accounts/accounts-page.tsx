@@ -1,4 +1,4 @@
-import type { EmailAccount, EmailAccountStatus } from "@emailbot/types";
+import type { EmailAccount, EmailAccountStatus, EmailProviderAvailability } from "@emailbot/types";
 import { AlertCircle, Mailbox, Pause, Play, Plug, PlugZap, RefreshCw, Server, Trash2 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
@@ -10,7 +10,7 @@ import { getErrorMessage } from "@/lib/errors";
 import { ACCOUNT_ERROR_LABELS, ACCOUNT_STATUS_LABELS, PROVIDER_LABELS } from "@/lib/labels";
 import { formatDate } from "@/lib/utils";
 import { useOrganization } from "@/providers/organization-provider";
-import { useEmailAccountMutations, useEmailAccounts, type OAuthProviderSlug } from "./api";
+import { useEmailAccountMutations, useEmailAccounts, useEmailProviders, type OAuthProviderSlug } from "./api";
 import { ImapDialog } from "./imap-dialog";
 
 const STATUS_VARIANTS: Record<EmailAccountStatus, "success" | "secondary" | "destructive" | "outline"> = {
@@ -33,19 +33,29 @@ const PROVIDER_SLUG: Record<"GMAIL" | "MICROSOFT", OAuthProviderSlug> = { GMAIL:
 
 type PendingAction = { type: "disconnect" | "delete"; account: EmailAccount } | null;
 
+/** Empty-state hint naming only the providers that can actually be connected. */
+function connectHint(providers: EmailProviderAvailability | undefined): string {
+  const names = [providers?.GMAIL ? "Gmail" : null, providers?.MICROSOFT ? "Microsoft" : null].filter((name) => name !== null);
+  if (names.length === 0) return "Cuando haya un proveedor disponible podrás conectar tu buzón aquí.";
+  return `Conecta ${names.join(" o ")} para empezar a procesar correos.`;
+}
+
 function AccountCard({
   account,
+  providers,
   onConfirm,
   onReconnect
 }: {
   account: EmailAccount;
+  providers: EmailProviderAvailability | undefined;
   onConfirm(action: NonNullable<PendingAction>): void;
   onReconnect(provider: OAuthProviderSlug): void;
 }) {
   const { can } = useOrganization();
   const canManage = can("email-accounts:manage");
   const { update, sync } = useEmailAccountMutations();
-  const oauthProvider = account.provider === "IMAP" ? null : PROVIDER_SLUG[account.provider];
+  // Reconnecting goes through the provider's OAuth: only offered while that provider is available.
+  const oauthProvider = account.provider === "IMAP" || providers?.[account.provider] !== true ? null : PROVIDER_SLUG[account.provider];
 
   const run = (promise: Promise<unknown>, message: string) =>
     promise.then(() => toast.success(message)).catch((error: unknown) => toast.error(getErrorMessage(error)));
@@ -127,6 +137,7 @@ export function AccountsPage() {
   const { can } = useOrganization();
   const canManage = can("email-accounts:manage");
   const accounts = useEmailAccounts();
+  const providers = useEmailProviders();
   const { startOAuth, disconnect, remove } = useEmailAccountMutations();
   const [searchParams, setSearchParams] = useSearchParams();
   const [imapOpen, setImapOpen] = useState(false);
@@ -160,15 +171,33 @@ export function AccountsPage() {
             <CardDescription>Serás redirigido al proveedor para autorizar acceso de solo lectura.</CardDescription>
           </CardHeader>
           <CardContent className="flex flex-wrap gap-3">
-            <Button onClick={() => connect("gmail")} disabled={startOAuth.isPending}>
-              <Mailbox /> Conectar Gmail
-            </Button>
-            <Button onClick={() => connect("microsoft")} disabled={startOAuth.isPending}>
-              <Mailbox /> Conectar Microsoft / Outlook
-            </Button>
-            <Button variant="outline" onClick={() => setImapOpen(true)}>
-              <Server /> Agregar IMAP
-            </Button>
+            {providers.isPending ? (
+              <SkeletonRows rows={1} className="w-64" />
+            ) : providers.error ? (
+              <ErrorMessage error={new Error(getErrorMessage(providers.error))} />
+            ) : (
+              <>
+                {/* Only what the server can connect right now (GET /api/email-accounts/providers). */}
+                {providers.data.GMAIL ? (
+                  <Button onClick={() => connect("gmail")} disabled={startOAuth.isPending}>
+                    <Mailbox /> Conectar Gmail
+                  </Button>
+                ) : null}
+                {providers.data.MICROSOFT ? (
+                  <Button onClick={() => connect("microsoft")} disabled={startOAuth.isPending}>
+                    <Mailbox /> Conectar Microsoft / Outlook
+                  </Button>
+                ) : null}
+                {providers.data.IMAP ? (
+                  <Button variant="outline" onClick={() => setImapOpen(true)}>
+                    <Server /> Agregar IMAP
+                  </Button>
+                ) : null}
+                {!providers.data.GMAIL && !providers.data.MICROSOFT && !providers.data.IMAP ? (
+                  <p className="text-sm text-muted-foreground">No hay proveedores de correo disponibles en este momento.</p>
+                ) : null}
+              </>
+            )}
           </CardContent>
         </Card>
       ) : null}
@@ -178,16 +207,16 @@ export function AccountsPage() {
       ) : accounts.error ? (
         <ErrorMessage error={new Error(getErrorMessage(accounts.error))} />
       ) : accounts.data.length === 0 ? (
-        <EmptyState icon={<Mailbox />} title="No hay cuentas conectadas" description="Conecta Gmail o Microsoft para empezar a procesar correos." />
+        <EmptyState icon={<Mailbox />} title="No hay cuentas conectadas" description={connectHint(providers.data)} />
       ) : (
         <div className="space-y-3">
           {accounts.data.map((account) => (
-            <AccountCard key={account.id} account={account} onConfirm={setPending} onReconnect={connect} />
+            <AccountCard key={account.id} account={account} providers={providers.data} onConfirm={setPending} onReconnect={connect} />
           ))}
         </div>
       )}
 
-      <ImapDialog open={imapOpen} onOpenChange={setImapOpen} />
+      {providers.data?.IMAP ? <ImapDialog open={imapOpen} onOpenChange={setImapOpen} /> : null}
 
       <ConfirmDialog
         open={pending !== null}

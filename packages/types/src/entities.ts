@@ -79,6 +79,14 @@ export interface EmailAccount {
   updatedAt: string;
 }
 
+/**
+ * Providers NEW email accounts can be connected with, decided by the server
+ * configuration (GET /api/email-accounts/providers). The UI only offers these;
+ * existing accounts of an unavailable provider can still be listed,
+ * disconnected and deleted.
+ */
+export type EmailProviderAvailability = Record<EmailProvider, boolean>;
+
 export interface CustomerResolution {
   source: CustomerResolutionSource;
   /** Identifier type looked up in customer_identifiers (EMAIL for RECIPIENT / SENDER). */

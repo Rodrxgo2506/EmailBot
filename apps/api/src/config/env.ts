@@ -72,6 +72,13 @@ const envSchema = z
     /** clientState configured on Graph subscriptions; verified on every notification. */
     MICROSOFT_WEBHOOK_CLIENT_STATE: optionalEnv(z.string().min(16)),
 
+    /**
+     * GET /health/sync: an active mailbox counts as stale when its last
+     * successful sync is older than this. The worker polls every account every
+     * WORKER_POLL_INTERVAL_MINUTES (default 5), so 20 tolerates a few missed cycles.
+     */
+    SYNC_HEALTH_STALE_MINUTES: z.coerce.number().int().min(5).max(1440).default(20),
+
     SENTRY_DSN: optionalEnv(z.url())
   })
   .superRefine((env, ctx) => {
@@ -164,6 +171,15 @@ export interface ApiConfig {
   /** Pub/Sub push OIDC authentication; null = not configured. */
   gmailPubSubOidc: { audience: string; serviceAccount: string } | null;
   microsoftWebhookClientState: string | null;
+  /**
+   * New IMAP accounts. Always false: IMAP synchronization is not implemented
+   * (the worker adapter is a scaffold), so the API must not ask for or store
+   * mailbox passwords. Deliberately not bound to an environment variable: it
+   * changes together with a working adapter, in code.
+   */
+  imapAccountsEnabled: boolean;
+  /** GET /health/sync stale threshold (SYNC_HEALTH_STALE_MINUTES). */
+  syncHealthStaleMinutes: number;
   sentryDsn: string | null;
 }
 
@@ -241,6 +257,8 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): ApiConfig {
         ? { audience: env.GMAIL_PUBSUB_OIDC_AUDIENCE, serviceAccount: env.GMAIL_PUBSUB_SERVICE_ACCOUNT }
         : null,
     microsoftWebhookClientState: env.MICROSOFT_WEBHOOK_CLIENT_STATE ?? null,
+    imapAccountsEnabled: false,
+    syncHealthStaleMinutes: env.SYNC_HEALTH_STALE_MINUTES,
     sentryDsn: env.SENTRY_DSN ?? null
   };
 }
