@@ -1,4 +1,4 @@
-import type { EmailAccount } from "@emailbot/types";
+import type { EmailAccount, EmailProviderAvailability } from "@emailbot/types";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { queryKeys } from "@/lib/query-keys";
@@ -21,6 +21,16 @@ export function useEmailAccounts() {
   return useQuery({
     queryKey: queryKeys.accounts(organizationId),
     queryFn: async () => (await api.get<{ items: EmailAccount[] }>("/api/email-accounts")).items
+  });
+}
+
+/** Providers new accounts can be connected with, decided by the server configuration (F8-A B-1/B-2). */
+export function useEmailProviders() {
+  const organizationId = useOrganizationId();
+  return useQuery({
+    queryKey: queryKeys.emailProviders(organizationId),
+    queryFn: async () => (await api.get<{ providers: EmailProviderAvailability }>("/api/email-accounts/providers")).providers,
+    staleTime: 5 * 60_000
   });
 }
 

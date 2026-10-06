@@ -47,6 +47,7 @@ import type {
   PortalSettings
 } from "@emailbot/types";
 import type { CustomerListQuery, EmailListQuery, RuleAction, RuleCondition } from "@emailbot/validation";
+import type { SyncHealthCounts } from "../modules/health/sync-health.js";
 
 /*
  * Data-access contracts.
@@ -423,6 +424,8 @@ export interface PrivilegedOperations {
   listLegalAcceptances(userId: string): Promise<LegalAcceptanceRecord[]>;
   /** Idempotent: an already recorded (user, document, version) keeps its original row and time. */
   recordLegalAcceptance(userId: string, versions: Readonly<Record<LegalDocument, string>>): Promise<void>;
+  /** F8-A: GET /health/sync. Counts only (no ids, addresses or content) of the mailboxes the worker polls; watchExpiringBefore null = Gmail push off (watchExpiring 0). */
+  syncHealthCounts(input: { staleBefore: string; watchExpiringBefore: string | null }): Promise<SyncHealthCounts>;
 }
 
 /* ------------------------------------------------------------------ platform administration (V2 phase 6) */

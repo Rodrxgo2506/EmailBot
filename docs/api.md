@@ -15,6 +15,24 @@ prueba de reglas, alta de miembros, creación de organizaciones, OAuth, IMAP, si
 |---|---|---|
 | GET | `/health` | Liveness |
 | GET | `/health/ready` | Dependencias (Redis) |
+| GET | `/health/sync` | Sincronización de correo, para un monitor externo (ver abajo) |
+
+`/health/sync` es público y no devuelve datos personales: solo `{ status, sync }`. Cuenta los buzones
+monitorizados (Gmail/Microsoft `ACTIVE` de organizaciones `ACTIVE`, los que sondea el worker):
+
+| HTTP | `status` / `sync` | Significado |
+|---|---|---|
+| 200 | `ok` / `healthy` | todos sincronizaron hace menos de `SYNC_HEALTH_STALE_MINUTES` (20 por defecto) |
+| 200 | `ok` / `idle` | no hay buzones que monitorizar |
+| 200 | `degraded` / `degraded` | alguno atrasado, con error reciente o (con push de Gmail configurado) con el *watch* a < 12 h de caducar, pero no más de la mitad atrasados |
+| 503 | `down` / `stale` | más de la mitad atrasados (con un único buzón, basta ese): la sincronización está parada |
+| 503 | `down` / `unavailable` | Redis o la base de datos no responden |
+
+Un buzón roto entre otros sanos (dos o más) no deja el endpoint en 503 de forma permanente (queda `degraded`,
+que un monitor puede vigilar por palabra clave). El worker renueva los *watches* cuando les quedan < 24 h, así
+que solo se avisa a partir de 12 h. Supone el sondeo activo (`WORKER_POLL_INTERVAL_MINUTES` > 0 y menor que el
+umbral): con el sondeo desactivado, un buzón sin correo nuevo aparecería atrasado. El resultado se cachea 30 s en el proceso, porque `/health/*`
+no tiene rate limiting. No usarlo como health check de Render (igual que `/health/ready`).
 
 ## Usuario y organizaciones
 
@@ -36,9 +54,10 @@ prueba de reglas, alta de miembros, creación de organizaciones, OAuth, IMAP, si
 | Método | Ruta | Permiso |
 |---|---|---|
 | GET | `/api/email-accounts`, `/api/email-accounts/:id` | `email-accounts:read` |
+| GET | `/api/email-accounts/providers` | `email-accounts:read` → `{ providers: { GMAIL, MICROSOFT, IMAP } }` (booleanos: proveedor configurado en el servidor) |
 | POST | `/api/email-accounts/oauth/:provider/start` (`gmail`/`microsoft`) | `email-accounts:manage` → `{ authorizationUrl }` |
 | GET | `/api/oauth/:provider/callback` | público (state firmado) → redirige a `WEB_APP_URL/accounts?oauth=…` |
-| POST | `/api/email-accounts/imap` | `email-accounts:manage` |
+| POST | `/api/email-accounts/imap` | `email-accounts:manage` — **deshabilitado**: 503 `IMAP_NOT_AVAILABLE` (no se guardan credenciales) |
 | PATCH | `/api/email-accounts/:id` (`status: ACTIVE/PAUSED`, `displayName`) | `email-accounts:manage` |
 | POST | `/api/email-accounts/:id/disconnect` | `email-accounts:manage` |
 | POST | `/api/email-accounts/:id/sync` | `email-accounts:sync` |
