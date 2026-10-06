@@ -37,18 +37,24 @@ Para reproducirlo en local, los mismos comandos en la raíz del repo.
 
 | Prueba | Motivo | Cómo ejecutarla |
 |---|---|---|
-| E2E de aislamiento (`apps/api/e2e/isolation.e2e.ts`, `pnpm --filter @emailbot/api e2e`) | Necesita un stack local de Supabase (Docker: Postgres, Auth, PostgREST) y la API levantada contra él | En local, con `supabase start` y las variables del stack local |
+| E2E de aislamiento (`apps/api/e2e/isolation.e2e.ts`) y de `/health/sync` (`apps/api/e2e/sync-health.e2e.ts`), ambos con `pnpm --filter @emailbot/api e2e` | Necesitan un stack local de Supabase (Docker: Postgres, Auth, PostgREST); el de `/health/sync` crea sus datos con `psql` dentro del contenedor local (`docker exec`) | En local, con `supabase start` y las variables del stack local |
 
-## Protección de `main` (recomendado, no configurado)
+## Protección de `main` (aprobada, se configura a mano)
 
-La protección de rama **no está activada**: se configura a mano en GitHub → Settings → Branches → *Add branch
-protection rule* (o *Rulesets*) para `main`:
+Decisión F8-B: proteger `main` con PR y CI obligatorios. **No se activa desde el código ni desde el CI**: la
+configura a mano un administrador del repositorio en GitHub → Settings → Branches → *Add branch protection
+rule* (o *Rulesets*) para `main`. Hasta que se haga, `main` sigue sin protección. Ajustes:
 
 - **Require a pull request before merging** (sin pushes directos a `main`).
 - **Require status checks to pass before merging**, con el check `typecheck, lint, test, build` del workflow CI
   y *Require branches to be up to date before merging*.
 - **Block force pushes** (no permitir *force push*).
 - **Restrict deletions** (no permitir borrar `main`).
-- Opcional: *Do not allow bypassing the above settings* para que también aplique a administradores.
+- **Do not allow bypassing the above settings**: sin esta opción, los administradores (el propietario del
+  repositorio) quedan exentos y la protección no se aplicaría a quien hoy hace los merges.
 
-El check solo aparece en la lista después de que el workflow se haya ejecutado al menos una vez en el repo.
+El check solo aparece en la lista después de que el workflow se haya ejecutado al menos una vez en el repo
+(ya se ha ejecutado: PR #1 y el merge en `main`).
+
+Comprobación después de configurarla: un `git push` directo a `main` es rechazado y un PR no se puede fusionar
+mientras el check `typecheck, lint, test, build` no esté en verde.

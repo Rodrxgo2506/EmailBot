@@ -17,22 +17,28 @@ prueba de reglas, alta de miembros, creación de organizaciones, OAuth, IMAP, si
 | GET | `/health/ready` | Dependencias (Redis) |
 | GET | `/health/sync` | Sincronización de correo, para un monitor externo (ver abajo) |
 
-`/health/sync` es público y no devuelve datos personales: solo `{ status, sync }`. Cuenta los buzones
-monitorizados (Gmail/Microsoft `ACTIVE` de organizaciones `ACTIVE`, los que sondea el worker):
+`/health/sync` es público y no devuelve datos personales ni cifras: solo `{ status, sync }`. Mira los buzones
+sincronizables (Gmail/Microsoft de organizaciones `ACTIVE`, en estado `ACTIVE` —los que sondea el worker— o
+`ERROR` —autorización perdida—), el *scheduler* de sondeo del worker y los correos pendientes o fallidos.
+Se evalúa en este orden:
 
 | HTTP | `status` / `sync` | Significado |
 |---|---|---|
-| 200 | `ok` / `healthy` | todos sincronizaron hace menos de `SYNC_HEALTH_STALE_MINUTES` (20 por defecto) |
-| 200 | `ok` / `idle` | no hay buzones que monitorizar |
-| 200 | `degraded` / `degraded` | alguno atrasado, con error reciente o (con push de Gmail configurado) con el *watch* a < 12 h de caducar, pero no más de la mitad atrasados |
-| 503 | `down` / `stale` | más de la mitad atrasados (con un único buzón, basta ese): la sincronización está parada |
 | 503 | `down` / `unavailable` | Redis o la base de datos no responden |
+| 503 | `down` / `stalled` | el *scheduler* `poll-active-accounts` lleva más de dos intervalos sin ejecutarse: ningún worker consume la cola `email-events` (si el sondeo está desactivado y el *scheduler* no existe, no se evalúa) |
+| 200 | `ok` / `idle` | no hay buzones sincronizables |
+| 503 | `down` / `error` | todos los buzones sincronizables están en `ERROR`: no se sincroniza nada |
+| 503 | `down` / `stale` | más de la mitad de los buzones `ACTIVE` atrasados (con uno solo, basta ese): la sincronización está parada |
+| 200 | `degraded` / `degraded` | algún buzón en `ERROR`, atrasado, con error reciente o (con push de Gmail configurado) con el *watch* a < 12 h de caducar; o correos en `RECEIVED`/`PROCESSING` hace más de 30 min (buzones `ACTIVE`); o correos `FAILED` en las últimas 24 h |
+| 200 | `ok` / `healthy` | todo lo anterior en orden |
 
-Un buzón roto entre otros sanos (dos o más) no deja el endpoint en 503 de forma permanente (queda `degraded`,
-que un monitor puede vigilar por palabra clave). El worker renueva los *watches* cuando les quedan < 24 h, así
-que solo se avisa a partir de 12 h. Supone el sondeo activo (`WORKER_POLL_INTERVAL_MINUTES` > 0 y menor que el
-umbral): con el sondeo desactivado, un buzón sin correo nuevo aparecería atrasado. El resultado se cachea 30 s en el proceso, porque `/health/*`
-no tiene rate limiting. No usarlo como health check de Render (igual que `/health/ready`).
+"Atrasado" = sin sincronización correcta en `SYNC_HEALTH_STALE_MINUTES` (20 por defecto). Un buzón roto entre
+otros sanos (dos o más) no deja el endpoint en 503 de forma permanente (queda `degraded`, que un monitor puede
+vigilar por palabra clave); los correos atascados o fallidos nunca pasan de `degraded`. El worker renueva los
+*watches* cuando les quedan < 24 h, así que solo se avisa a partir de 12 h. Supone el sondeo activo
+(`WORKER_POLL_INTERVAL_MINUTES` > 0 y menor que el umbral). La lectura del *scheduler* es de solo lectura
+(no crea ni modifica nada en Redis). El resultado se cachea 30 s en el proceso, porque `/health/*` no tiene
+rate limiting. No usarlo como health check de Render (igual que `/health/ready`). Operación: `docs/operations.md`.
 
 ## Usuario y organizaciones
 

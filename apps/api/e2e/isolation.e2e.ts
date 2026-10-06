@@ -19,7 +19,6 @@
  * Every run uses unique names, so it can be repeated without a reset. It
  * refuses to run against anything but 127.0.0.1 / localhost.
  */
-import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { SecretBox } from "@emailbot/shared";
 import type { NormalizedEmail, RealtimeEvent } from "@emailbot/types";
@@ -39,24 +38,9 @@ import {
 import { processEmail, type ProcessEmailDeps } from "../../worker/src/pipeline/process-email.js";
 import type { ProviderRegistry } from "../../worker/src/providers/registry.js";
 import type { ProviderAdapter, WorkerAccount } from "../../worker/src/providers/types.js";
+import { localEnv } from "./local-supabase.js";
 
 /* ------------------------------------------------------------------ local stack only */
-
-function localEnv(): { url: string; anonKey: string; serviceKey: string } {
-  let url = process.env.LOCAL_SUPABASE_URL ?? "";
-  let anonKey = process.env.LOCAL_ANON_KEY ?? "";
-  let serviceKey = process.env.LOCAL_SERVICE_ROLE_KEY ?? "";
-  if (!url || !anonKey || !serviceKey) {
-    const status = execFileSync("supabase", ["status", "-o", "env"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], shell: process.platform === "win32" });
-    const read = (name: string) => /^(?:export )?NAME="?([^"\n]*)"?$/m.source.replace("NAME", name);
-    url ||= new RegExp(read("API_URL"), "m").exec(status)?.[1] ?? "";
-    anonKey ||= new RegExp(read("ANON_KEY"), "m").exec(status)?.[1] ?? "";
-    serviceKey ||= new RegExp(read("SERVICE_ROLE_KEY"), "m").exec(status)?.[1] ?? "";
-  }
-  if (!/^http:\/\/(127\.0\.0\.1|localhost):\d+$/.test(url)) throw new Error("refusing to run: the E2E only runs against a local Supabase stack");
-  if (!anonKey || !serviceKey) throw new Error("missing local Supabase keys (supabase start)");
-  return { url, anonKey, serviceKey };
-}
 
 const { url, anonKey, serviceKey } = localEnv();
 
@@ -101,6 +85,9 @@ const queue: JobQueue = {
   },
   async isAccountSyncPending() {
     return false;
+  },
+  async pollSchedulerState() {
+    return null;
   },
   async close() {}
 };

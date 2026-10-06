@@ -1,12 +1,13 @@
 import { resolve } from "node:path";
 import { config as loadDotenv } from "dotenv";
-import * as Sentry from "@sentry/node";
 import {
   encryptionKeyFingerprint,
   fetchWithTimeout,
   LOG_REDACT_PATHS,
+  POLL_SCHEDULER_ID,
   QUEUE_NAMES,
   SecretBox,
+  sentryRelease,
   serializeError,
   type EmailEventJob,
   type EmailProcessingJob,
@@ -20,6 +21,7 @@ import { loadWorkerConfig } from "./config/env.js";
 import { createProviderContext } from "./credentials/token-manager.js";
 import { closeServer, createHealthServer, listen, type WorkerHealthState } from "./infrastructure/health.js";
 import { createWorkerQueues } from "./infrastructure/queues.js";
+import { captureWorkerException, flushWorkerSentry, initWorkerSentry, jobType, reportJobFailure, type FailedJob } from "./infrastructure/sentry.js";
 import { createRedisSyncLock } from "./infrastructure/sync-lock.js";
 import {
   createAccountStore,
@@ -45,23 +47,7 @@ const logger = pino({
   redact: { paths: LOG_REDACT_PATHS, censor: "[REDACTED]" }
 });
 
-if (config.sentryDsn) {
-  Sentry.init({
-    dsn: config.sentryDsn,
-    environment: config.env,
-    tracesSampleRate: 0,
-    dataCollection: {
-      userInfo: false,
-      cookies: false,
-      httpHeaders: false,
-      httpBodies: [],
-      urlQueryParams: false,
-      databaseQueryData: false,
-      queues: false,
-      stackFrameVariables: false
-    }
-  });
-}
+initWorkerSentry({ dsn: config.sentryDsn, environment: config.env, release: sentryRelease(process.env) });
 
 // SERVICE ROLE client: the worker processes every tenant; it scopes all
 // writes with ids read from the database.
@@ -136,8 +122,12 @@ const eventDeps: Omit<HandleEventDeps, "logger"> = {
   watchTopic: config.gmailPubSubTopic
 };
 
-/** Maps domain failures to BullMQ semantics (UnrecoverableError = no retry). */
+/**
+ * Maps domain failures to BullMQ semantics (UnrecoverableError = no retry).
+ * Unexpected failures are reported to Sentry once, on the job's final attempt.
+ */
 async function runWithFailureHandling<T>(
+  job: FailedJob,
   account: { id: string; organizationId: string } | null,
   jobLogger: typeof logger,
   run: () => Promise<T>
@@ -151,7 +141,7 @@ async function runWithFailureHandling<T>(
       return await handleAccountFailure(error, account, { accounts, realtime, logger: jobLogger });
     } catch (handled) {
       if (handled instanceof NonRetryableError) throw new UnrecoverableError(handled.message);
-      Sentry.captureException(handled);
+      reportJobFailure(handled, job, { queue: job.queueName, type: jobType(job.data) });
       throw handled;
     }
   }
@@ -165,7 +155,7 @@ const eventsWorker = new Worker<EmailEventJob>(
       job.data.type === "SYNC_ACCOUNT" || job.data.type === "WATCH_ACCOUNT"
         ? { id: job.data.emailAccountId, organizationId: job.data.organizationId }
         : null;
-    return runWithFailureHandling(account, jobLogger, () =>
+    return runWithFailureHandling(job, account, jobLogger, () =>
       handleEmailEvent(job.data, {
         ...eventDeps,
         // Every ingestion path (push, recovery polling, manual sync) uses the same pipeline.
@@ -187,6 +177,7 @@ const processingWorker = new Worker<EmailProcessingJob>(
       emailAccountId: job.data.emailAccountId
     });
     const outcome = await runWithFailureHandling(
+      job,
       { id: job.data.emailAccountId, organizationId: job.data.organizationId },
       jobLogger,
       // Whether an email is resumed is decided by its processing_status in the
@@ -222,7 +213,7 @@ async function shutdown(signal: string) {
     connection.disconnect();
     publisherConnection.disconnect();
     if (healthServer) await closeServer(healthServer);
-    await Sentry.flush(2000);
+    await flushWorkerSentry();
     process.exit(0);
   } catch (error) {
     logger.error({ err: serializeError(error) }, "error during shutdown");
@@ -246,12 +237,12 @@ try {
   // Polling fallback for accounts without push subscriptions.
   if (config.pollIntervalMinutes > 0) {
     await queues.emailEvents.upsertJobScheduler(
-      "poll-active-accounts",
+      POLL_SCHEDULER_ID,
       { every: config.pollIntervalMinutes * 60_000 },
       { name: "POLL_ACCOUNTS", data: { type: "POLL_ACCOUNTS" }, opts: { removeOnComplete: true, removeOnFail: 100 } }
     );
   } else {
-    await queues.emailEvents.removeJobScheduler("poll-active-accounts");
+    await queues.emailEvents.removeJobScheduler(POLL_SCHEDULER_ID);
   }
 
   // Gmail push: renew watches before they expire (7 days). Polling covers accounts without a valid watch.
@@ -275,7 +266,8 @@ try {
   // Serious initialization problem (e.g. Redis rejects commands): report not ready and exit so the platform restarts it.
   health.failed = true;
   logger.fatal({ err: serializeError(error) }, "worker initialization failed");
-  await Sentry.flush(2000);
+  captureWorkerException(error, { phase: "initialization" });
+  await flushWorkerSentry();
   process.exit(1);
 }
 

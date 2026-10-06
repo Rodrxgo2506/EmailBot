@@ -161,6 +161,7 @@ export async function createTestApp(
       async (_account: { id: string; organizationId: string }, _reason: string): Promise<"QUEUED" | "ALREADY_QUEUED"> => "QUEUED"
     ),
     isAccountSyncPending: vi.fn(async (_emailAccountId: string) => false),
+    pollSchedulerState: vi.fn(async (): Promise<{ next: number; every: number } | null> => null),
     close: vi.fn(async () => undefined)
   };
   const config = testConfig(options.config);

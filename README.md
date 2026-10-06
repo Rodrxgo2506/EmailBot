@@ -38,6 +38,8 @@ Más detalle en [`docs/`](docs/):
 - [`security-audit.md`](docs/security-audit.md): auditoría de seguridad y preparación para producción.
 - [`v2-implementation.md`](docs/v2-implementation.md): V2 por fases (bots, customers, entregas, portal, Gmail push, Super Admin).
 - [`v2-production-rollout.md`](docs/v2-production-rollout.md): runbook de despliegue de V2 y de la fase 6.
+- [`operations.md`](docs/operations.md): operación de producción, estados de salud, alertas e incidentes.
+- [`ci.md`](docs/ci.md): integración continua y protección de `main`.
 
 ## Requisitos
 
