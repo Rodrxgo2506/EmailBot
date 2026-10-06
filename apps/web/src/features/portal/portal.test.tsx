@@ -311,6 +311,24 @@ describe("portal session lifecycle", () => {
     expect(api.me.mock.calls.length).toBeLessThanOrEqual(1);
     expect(api.inbox.mock.calls.length).toBeLessThanOrEqual(1);
   });
+
+  it("a 401 that arrives while the session request is still pending does not repeat any request (deterministic order)", async () => {
+    // Under load the inbox / filters 401s can arrive before /me answers: the expiry must not re-run the pending /me.
+    let rejectMe!: (error: unknown) => void;
+    const me = vi.fn(() => new Promise((_resolve, reject) => (rejectMe = reject)));
+    const unauthorized = () => Promise.reject(new ApiError(401, "UNAUTHORIZED", "La sesión no es válida."));
+    const api = fakeApi({ me, inbox: vi.fn(unauthorized), filters: vi.fn(unauthorized) });
+    renderPortal("/portal", api);
+    expect(await screen.findByRole("status")).toHaveTextContent("Tu sesión terminó. Vuelve a ingresar con tu Access ID.");
+    await act(async () => {
+      rejectMe(new ApiError(401, "UNAUTHORIZED", "La sesión no es válida."));
+    });
+    expect(screen.getByLabelText("Access ID")).toBeInTheDocument();
+    expect(screen.getAllByRole("status")).toHaveLength(1);
+    expect(api.me).toHaveBeenCalledTimes(1);
+    expect(api.inbox).toHaveBeenCalledTimes(1);
+    expect(api.filters).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("portal manual sync (Actualizar)", () => {

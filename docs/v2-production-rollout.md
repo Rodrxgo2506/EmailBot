@@ -373,27 +373,42 @@ código de API y web; para retirar el acceso al instante basta con borrar las fi
 
 Qué cambia en producción:
 
-- Base de datos: **nada** (sin migraciones). Variables de entorno: **ninguna nueva**.
+- Base de datos: 3 migraciones **aditivas**: `20261005130000_legal_acceptances` (tabla `legal_acceptances` vacía,
+  con RLS; trigger `AFTER INSERT` en `auth.users` que nunca bloquea un registro), `20261005130100_legal_reacceptance`
+  (valor `reacceptance` en `source`; `SELECT` e `INSERT` de columnas para `service_role`) y
+  `20261005130200_legal_signup_server_versions` (`private.current_legal_versions()` y el trigger de registro con las
+  versiones del servidor). Ningún dato existente cambia. Variables de entorno: **ninguna nueva**.
+- **Efecto visible**: con la API nueva, **todos los usuarios existentes** (no tienen fila) reciben 403
+  `LEGAL_ACCEPTANCE_REQUIRED` en el panel hasta aceptar, y la web nueva les muestra «Términos y privacidad». Conviene
+  avisarles. Los administradores de la plataforma también deben aceptar.
 - API: namespace Socket.IO `/portal` en el endpoint `/realtime` existente; las entregas manuales publican una señal
-  en Redis.
-- Worker: publica `portal.deliveries` (ids de clientes) tras cada correo entregado.
-- Web: política de privacidad y términos V2, enlaces legales en el login del portal y realtime del portal.
+  en Redis; `GET /api/me` incluye `legal` y nuevo `POST /api/me/legal-acceptance`; barrera legal en todas las rutas
+  con sesión de usuario y en el Socket.IO del panel; `emailRetentionDays`, `emailNotificationsEnabled` y el canal `email` de
+  `NOTIFY` salen del contrato.
+- Worker: publica `portal.deliveries` (ids de clientes) tras cada correo entregado; solo notificaciones in-app (un
+  trabajo `email` en cola se descarta, como antes).
+- Web: política de privacidad y términos 2.0, casilla de aceptación obligatoria en el registro, pantalla de
+  re-aceptación (`/legal/accept`), sin «Retención de correos» ni «Notificaciones por correo» en Ajustes, texto del
+  dashboard sin «tiempo real», enlaces legales en el login del portal y realtime del portal.
 
 | # | Paso | Verificación |
 |---|---|---|
 | 0 | Gates en la rama (`pnpm typecheck`, `lint`, `test`, `build`) y el E2E de aislamiento contra el Supabase local | Todo PASS |
 | 1 | Revisión legal de `/privacy` y `/terms` por el titular (los textos describen el código, no sustituyen esa revisión) | Aprobados |
-| 2 | Merge de `feat/emailbot-f7-quality-launch` en `main` + push, con el auto-deploy de la web desactivado si está activo | — |
-| 3 | Desplegar la **API** primero | `/health` 200; el panel en tiempo real sigue funcionando; un WebSocket a `/portal` con otro `Origin` es rechazado |
-| 4 | Desplegar el **worker** | Log de arranque normal; un correo entregado produce la señal (el portal abierto se refresca sin pulsar «Actualizar») |
-| 5 | Desplegar la **web** | `/privacy` y `/terms` con fecha «5 de octubre de 2026» y dominio `emailbot.app`; el login del portal enlaza ambos |
+| 2 | Requisito: fase 6 aplicada (§12; 26 migraciones). `supabase db push --linked --dry-run` (debe listar **exactamente** `20261005130000_legal_acceptances`, `20261005130100_legal_reacceptance` y `20261005130200_legal_signup_server_versions`) → autorización → `supabase db push --linked` | 29 migraciones; `private.current_legal_versions()` = versiones de `CURRENT_LEGAL_VERSIONS`; *advisors* sin hallazgos nuevos; `has_table_privilege('authenticated', 'public.legal_acceptances', 'select')` = false (ídem `anon`); `service_role` solo `SELECT` + `INSERT` de columnas; un registro de prueba crea su perfil |
+| 2b | Merge de `feat/emailbot-f7-quality-launch` en `main` + push, con el auto-deploy de la web desactivado si está activo | — |
+| 3 | Desplegar la **API** primero (después del paso 2: sin la migración `/api/me` falla con `permission denied`) y, **sin pausa**, el paso 4: desde aquí un usuario sin aceptación recibe 403 `LEGAL_ACCEPTANCE_REQUIRED` y la web anterior no tiene pantalla para aceptar | `/health` 200; `GET /api/me` incluye `legal`; una ruta del panel sin aceptación → 403 `LEGAL_ACCEPTANCE_REQUIRED`; tras aceptar, el panel en tiempo real funciona; un WebSocket a `/portal` con otro `Origin` es rechazado |
+| 4 | Desplegar la **web** inmediatamente después de la API | `/privacy` y `/terms` con «Versión 2.0 · Última actualización: 5 de octubre de 2026», titular y RUC; el registro no avanza sin la casilla; un registro nuevo crea 2 filas en `legal_acceptances`; un usuario existente ve `/legal/accept`, acepta y entra al panel (2 filas `reacceptance`); el login del portal enlaza ambos documentos |
+| 5 | Desplegar el **worker** | Log de arranque normal; un correo entregado produce la señal (el portal abierto se refresca sin pulsar «Actualizar») |
 | 6 | Google Cloud → pantalla de consentimiento OAuth: URL de la política (`https://emailbot.app/privacy`) y de los términos; si se pide la verificación de `gmail.readonly`, describir el portal (datos de Gmail mostrados a los clientes finales que configura la organización) | Pantalla actualizada |
 
-Por qué la API va antes que el worker: una API anterior reenviaría `portal.deliveries` (ids de clientes de la propia
+Por qué la web va justo después de la API: la barrera legal de la API rechaza a los usuarios sin aceptación y solo la
+web nueva les permite aceptar. Por qué la API va antes que el worker: una API anterior reenviaría `portal.deliveries` (ids de clientes de la propia
 organización) a la sala de la organización, donde el panel lo ignora. No expone datos, pero el orden lo evita.
 
-Rollback: revertir web, worker y API (en ese orden) al deploy anterior. Sin cambios de base de datos. Sin
-realtime, el portal sigue funcionando con «Actualizar».
+Rollback: revertir web, worker y API (en ese orden) al deploy anterior; al revertir la API desaparece la barrera legal.
+Las migraciones no se revierten (aditivas; el código anterior no envía `legal_accepted`, el trigger no graba nada y
+nadie usa los grants nuevos). Sin realtime, el portal sigue funcionando con «Actualizar».
 
 ## 14. Checklist de lanzamiento de V2
 
@@ -401,7 +416,9 @@ realtime, el portal sigue funcionando con «Actualizar».
 |---|---|
 | Hecho | V2 fases 0–5.7 en producción (migraciones, schema `portal`, Gmail push con OIDC; ver «Estado en producción» en `v2-implementation.md`) |
 | Pendiente | Fase 6: migraciones `20261005120000` y `20261005120100`, schema `admin`, deploy de API y web, primer administrador (§12) |
-| Pendiente | Fase 7: revisión legal, deploy API → worker → web, pantalla de consentimiento de Google (§13) |
+| Pendiente | Fase 7: revisión legal, migraciones `20261005130000`, `20261005130100` y `20261005130200`, deploy API → web → worker, pantalla de consentimiento de Google (§13) |
+| Pendiente | Datos legales: domicilio fiscal (`SERVICE_FISCAL_ADDRESS`, cuando SUNAT lo muestre) y región de Render en la política de privacidad |
+| Decisión | Columna sin uso `organization_settings.email_retention_days` (se conserva; borrarla requiere una migración destructiva) |
 | Pendiente | Smoke tests y medición de latencia del push en producción (§7, §8) si no se completaron al desplegar la 5.6 |
 | Pendiente | Pruebas de fallos autorizadas (§9) y alertas (§10) |
 | Pendiente | Borrar la suscripción *pull* por defecto `emailbot-gmail-sub` del topic, una vez confirmada la suscripción push |

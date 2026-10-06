@@ -217,13 +217,14 @@ describe("rate limiting when Redis fails", () => {
 
 /* ------------------------------------------------------------------ realtime sessions */
 
-function realtimeDeps(tokens: Record<string, string | null>, members: Record<string, string[]>) {
+function realtimeDeps(tokens: Record<string, string | null>, members: Record<string, string[]>, withoutLegalAcceptance: string[] = []) {
   const findRole = vi.fn(async (userId: string, organizationId: string) => (members[userId]?.includes(organizationId) ? "VIEWER" : null));
   return {
     findRole,
     deps: {
       identity: { verifyAccessToken: vi.fn(async (token: string) => (tokens[token] ? { id: tokens[token] as string, email: null } : null)) },
-      repositories: () => ({ memberships: { findRole } }) as unknown as Repositories
+      repositories: () => ({ memberships: { findRole } }) as unknown as Repositories,
+      legalAcceptance: { isAccepted: vi.fn(async (userId: string) => !withoutLegalAcceptance.includes(userId)) }
     }
   };
 }
@@ -254,6 +255,13 @@ describe("realtime sessions", () => {
     expect(await authenticateHandshake({ token: "expired", organizationId: ORG_A }, deps)).toEqual({ ok: false, error: "unauthorized" });
     expect(await authenticateHandshake({ organizationId: ORG_A }, deps)).toEqual({ ok: false, error: "unauthorized" });
     expect(await authenticateHandshake({ token: "x".repeat(9000), organizationId: ORG_A }, deps)).toEqual({ ok: false, error: "unauthorized" });
+  });
+
+  it("a member who has not accepted the current legal versions is rejected before the membership is read", async () => {
+    const { deps, findRole } = realtimeDeps(tokens, { "user-1": [ORG_A] }, ["user-1"]);
+    expect(await authenticateHandshake({ token: "token-1", organizationId: ORG_A }, deps)).toEqual({ ok: false, error: "forbidden" });
+    expect(deps.legalAcceptance.isAccepted).toHaveBeenCalledWith("user-1");
+    expect(findRole).not.toHaveBeenCalled();
   });
 
   it("a renewed token replaces the handshake token, so revalidation survives its expiry", async () => {

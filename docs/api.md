@@ -81,7 +81,7 @@ Formato de una regla:
 
 - Campos: `sender`, `recipient`, `subject`, `body`, `date`, `attachment`.
 - Operadores: `equals`, `not_equals`, `contains`, `not_contains`, `starts_with`, `ends_with`, `regex`, `exists`, `not_exists` y, solo para fechas, `before`/`after`.
-- Acciones: `MARK_IMPORTANT`, `MARK_READ`, `ARCHIVE`, `NOTIFY`, `EXTRACT` (`preset`: `verification_code`, `url`, `amount`, `email`; o `pattern`).
+- Acciones: `MARK_IMPORTANT`, `MARK_READ`, `ARCHIVE`, `NOTIFY` (`channel`: solo `in_app`, por defecto), `EXTRACT` (`preset`: `verification_code`, `url`, `amount`, `email`; o `pattern`).
 - La categoría vive en la columna `category_id` (FK) y no dentro del JSON.
 
 ## Correos y adjuntos

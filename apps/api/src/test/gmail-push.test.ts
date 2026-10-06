@@ -82,6 +82,15 @@ describe("Gmail Pub/Sub push webhook", () => {
     expect(fetch.mock.calls.map(([url]) => url)).toEqual([GOOGLE_CERTS_URL]);
   });
 
+  it("is not affected by the legal barrier (phase 7): no user session, the acceptance is never consulted", async () => {
+    const { push, queue, privileged } = await pushApp();
+    privileged.listLegalAcceptances.mockResolvedValue([]); // nobody has accepted anything
+    const response = await push(pubsub({ emailAddress: "me@gmail.com", historyId: 5 }), bearer(jwt(validClaims())));
+    expect(response.statusCode).toBe(204);
+    expect(queue.enqueueEmailEvent).toHaveBeenCalledTimes(1);
+    expect(privileged.listLegalAcceptances).not.toHaveBeenCalled();
+  });
+
   it.each([
     ["no Authorization header", undefined],
     ["another audience", jwt(validClaims({ aud: "https://evil.example/webhooks/gmail" }))],

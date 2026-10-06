@@ -108,8 +108,7 @@ export class MemoryEmailStore implements EmailStore {
   settings: OrganizationProcessingSettings = {
     autoProcessingEnabled: true,
     processAttachments: true,
-    notificationsEnabled: true,
-    emailNotificationsEnabled: true
+    notificationsEnabled: true
   };
 
   findEmail = vi.fn(async (accountId: string, messageId: string): Promise<ExistingEmail | null> => {

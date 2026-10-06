@@ -1,6 +1,6 @@
 import { Link } from "react-router-dom";
 import { ContactDetails, LegalLayout, LegalList, LegalSection, Pending } from "./legal-layout";
-import { LEGAL_CONTACT_EMAIL, SERVICE_DOMAIN, SERVICE_OPERATOR } from "./legal-info";
+import { SERVICE_DOMAIN, SERVICE_OPERATOR, SERVICE_OPERATOR_RUC, SERVICE_OPERATOR_TYPE, TERMS_VERSION } from "./legal-info";
 
 /* Public terms of service (EmailBot V2). Describes only features that exist today. */
 export function TermsPage() {
@@ -8,6 +8,7 @@ export function TermsPage() {
     <LegalLayout
       title="Términos de Servicio"
       documentTitle="Términos de Servicio | EmailBot"
+      version={TERMS_VERSION}
       summary={
         <p>
           Estos términos regulan el uso de EmailBot, incluido su portal de clientes. Léelos junto con la{" "}
@@ -20,13 +21,17 @@ export function TermsPage() {
     >
       <LegalSection id="aceptacion" number={1} title="Aceptación de los términos">
         <p>
-          Al crear una cuenta, usar EmailBot o acceder a su portal de clientes aceptas estos términos. Si los aceptas en
-          nombre de una organización, declaras que tienes autoridad para hacerlo. Si no estás de acuerdo, no uses el
-          servicio.
+          Para crear una cuenta debes aceptar expresamente estos términos y la Política de Privacidad. EmailBot registra
+          qué versión de cada documento aceptaste y la fecha. Si tu cuenta se creó de otra forma, o cuando publiquemos
+          una nueva versión, te pediremos aceptarla al iniciar sesión, antes de usar el panel. Al usar EmailBot o acceder
+          a su portal de clientes también aceptas estos términos. Si los aceptas en nombre de una organización, declaras
+          que tienes autoridad para hacerlo. Si no estás de acuerdo, no uses el servicio.
         </p>
         <p>
-          El servicio, disponible en {SERVICE_DOMAIN}, es proporcionado por{" "}
-          {SERVICE_OPERATOR ? <strong>{SERVICE_OPERATOR}</strong> : <Pending>nombre legal del titular de EmailBot</Pending>}.
+          EmailBot es el nombre del servicio, disponible en {SERVICE_DOMAIN}. Su titular es{" "}
+          {SERVICE_OPERATOR ? <strong>{SERVICE_OPERATOR}</strong> : <Pending>nombre legal del titular</Pending>}
+          {SERVICE_OPERATOR_TYPE ? `, ${SERVICE_OPERATOR_TYPE.toLowerCase()}` : null}
+          {SERVICE_OPERATOR_RUC ? `, con RUC ${SERVICE_OPERATOR_RUC}` : null}.
         </p>
       </LegalSection>
 
@@ -82,8 +87,12 @@ export function TermsPage() {
           </li>
           <li>
             Al conectar una cuenta autorizas a EmailBot a leer los mensajes nuevos de su bandeja de entrada con los
-            permisos de solo lectura que se muestran en la pantalla del proveedor, y a recibir los avisos de mensajes
-            nuevos del proveedor. EmailBot no envía, modifica ni elimina correos en tu cuenta.
+            permisos de solo lectura que se muestran en la pantalla del proveedor. EmailBot no envía, modifica ni elimina
+            correos en tu cuenta.
+          </li>
+          <li>
+            Cómo se detectan los mensajes nuevos depende del proveedor: Gmail avisa a EmailBot de los cambios del buzón,
+            mientras que las cuentas de Microsoft se consultan periódicamente.
           </li>
           <li>
             Los correos procesados quedan visibles para los miembros de la organización según su rol y, si la
@@ -156,9 +165,11 @@ export function TermsPage() {
       <LegalSection id="disponibilidad" number={10} title="Disponibilidad del servicio">
         <p>
           Procuramos que EmailBot esté disponible y funcione correctamente, pero no garantizamos un funcionamiento
-          ininterrumpido ni libre de errores, ni ofrecemos un acuerdo de nivel de servicio. Los correos se procesan casi
-          en tiempo real, pero el plazo puede variar. El servicio puede verse afectado por mantenimiento, incidencias
-          técnicas o por la disponibilidad de los proveedores de los que depende, incluidos Google y Microsoft.
+          ininterrumpido ni libre de errores, ni ofrecemos un acuerdo de nivel de servicio. La disponibilidad y la rapidez
+          del procesamiento pueden variar según el proveedor de correo y el mecanismo de sincronización que utiliza (por
+          ejemplo, las cuentas de Microsoft se consultan periódicamente y pueden tardar algunos minutos más que las de
+          Gmail). El servicio puede verse afectado por mantenimiento, incidencias técnicas o por la disponibilidad de los
+          proveedores de los que depende, incluidos Google y Microsoft.
         </p>
       </LegalSection>
 
@@ -204,14 +215,21 @@ export function TermsPage() {
 
       <LegalSection id="cambios" number={15} title="Cambios en los términos">
         <p>
-          Podemos actualizar estos términos. Publicaremos la versión vigente en esta página con su fecha de
-          actualización. Si sigues usando EmailBot después de un cambio, aceptas los términos actualizados.
+          Podemos actualizar estos términos. Publicaremos la versión vigente en esta página con su número de versión y su
+          fecha de actualización, y los miembros deberán aceptarla expresamente para seguir usando el panel.
         </p>
       </LegalSection>
 
-      <LegalSection id="contacto" number={16} title="Contacto">
+      <LegalSection id="ley-aplicable" number={16} title="Ley aplicable">
+        <p>
+          Estos términos se rigen e interpretan conforme a la legislación de la República del Perú. Nada en ellos limita
+          los derechos que la ley peruana reconoce y que no pueden renunciarse.
+        </p>
+      </LegalSection>
+
+      <LegalSection id="contacto" number={17} title="Contacto">
         <p>Para consultas sobre estos términos:</p>
-        <ContactDetails email={LEGAL_CONTACT_EMAIL} operator={SERVICE_OPERATOR} />
+        <ContactDetails />
       </LegalSection>
     </LegalLayout>
   );

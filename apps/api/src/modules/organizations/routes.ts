@@ -19,8 +19,6 @@ const SETTINGS_COLUMN_MAP = {
   autoProcessingEnabled: "auto_processing_enabled",
   processAttachments: "process_attachments",
   notificationsEnabled: "notifications_enabled",
-  emailNotificationsEnabled: "email_notifications_enabled",
-  emailRetentionDays: "email_retention_days",
   defaultInboxFilter: "default_inbox_filter"
 } as const;
 

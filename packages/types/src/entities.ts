@@ -60,8 +60,6 @@ export interface OrganizationSettings {
   autoProcessingEnabled: boolean;
   processAttachments: boolean;
   notificationsEnabled: boolean;
-  emailNotificationsEnabled: boolean;
-  emailRetentionDays: number | null;
   defaultInboxFilter: InboxFilter;
   updatedAt: string;
 }

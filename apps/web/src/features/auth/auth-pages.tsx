@@ -8,7 +8,7 @@ import { z } from "zod";
 import { Button } from "@/components/ui/button";
 import { ErrorMessage } from "@/components/ui/display";
 import { Field } from "@/components/ui/field";
-import { Input } from "@/components/ui/form-controls";
+import { FieldError, Input } from "@/components/ui/form-controls";
 import { getAuthErrorMessage } from "@/lib/errors";
 import { markPendingLoginEvent } from "@/lib/login-event";
 import { supabase } from "@/lib/supabase";
@@ -81,7 +81,9 @@ const registerSchema = z
     fullName: z.string().trim().min(2, "Ingresa tu nombre").max(200),
     email,
     password,
-    confirm: z.string()
+    confirm: z.string(),
+    // Explicit acceptance (EmailBot V2 phase 7): the database records the current versions at sign-up.
+    acceptLegal: z.boolean().refine((value) => value, "Debes aceptar los Términos y Condiciones y la Política de Privacidad")
   })
   .refine((values) => values.password === values.confirm, { path: ["confirm"], message: "Las contraseñas no coinciden" });
 
@@ -91,7 +93,7 @@ export function RegisterPage() {
   const [pendingConfirmation, setPendingConfirmation] = useState<string | null>(null);
   const form = useForm({
     resolver: zodResolver(registerSchema),
-    defaultValues: { fullName: "", email: "", password: "", confirm: "" }
+    defaultValues: { fullName: "", email: "", password: "", confirm: "", acceptLegal: false }
   });
 
   const onSubmit = form.handleSubmit(async (values) => {
@@ -99,8 +101,13 @@ export function RegisterPage() {
     const { data, error: signUpError } = await supabase.auth.signUp({
       email: values.email,
       password: values.password,
-      // Stored in raw_user_meta_data; the handle_new_user trigger copies it to profiles.
-      options: { data: { full_name: values.fullName }, emailRedirectTo: `${window.location.origin}/` }
+      // Stored in raw_user_meta_data: handle_new_user copies the name to profiles and
+      // record_signup_legal_acceptance records the acceptance. The browser only says that the user accepted:
+      // the versions are the server's (public.legal_acceptances, database time), never sent from here.
+      options: {
+        data: { full_name: values.fullName, legal_accepted: true },
+        emailRedirectTo: `${window.location.origin}/`
+      }
     });
     if (signUpError) {
       setError(new Error(getAuthErrorMessage(signUpError)));
@@ -155,6 +162,28 @@ export function RegisterPage() {
         <Field label="Confirmar contraseña" htmlFor="confirm" error={form.formState.errors.confirm?.message}>
           <Input id="confirm" type="password" autoComplete="new-password" {...form.register("confirm")} />
         </Field>
+        <div className="grid gap-1.5">
+          <label className="flex items-start gap-2 text-sm">
+            <input
+              type="checkbox"
+              className="mt-0.5 size-4 shrink-0 accent-[var(--primary)]"
+              aria-invalid={form.formState.errors.acceptLegal ? true : undefined}
+              {...form.register("acceptLegal")}
+            />
+            <span>
+              He leído y acepto los{" "}
+              <Link to="/terms" target="_blank" rel="noreferrer" className="font-medium text-primary hover:underline">
+                Términos y Condiciones
+              </Link>{" "}
+              y la{" "}
+              <Link to="/privacy" target="_blank" rel="noreferrer" className="font-medium text-primary hover:underline">
+                Política de Privacidad
+              </Link>
+              .
+            </span>
+          </label>
+          <FieldError message={form.formState.errors.acceptLegal?.message} />
+        </div>
         <Button type="submit" disabled={form.formState.isSubmitting}>
           {form.formState.isSubmitting ? "Creando cuenta…" : "Crear cuenta"}
         </Button>

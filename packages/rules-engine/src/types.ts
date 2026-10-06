@@ -38,7 +38,8 @@ export interface MatchedRuleSummary {
 
 export interface NotificationRequest {
   ruleId: string;
-  channel: "in_app" | "email";
+  /** Only in-app notifications exist (EmailBot V2 phase 7 removed the never-implemented "email" channel). */
+  channel: "in_app";
   title: string | null;
 }
 

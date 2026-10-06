@@ -10,3 +10,4 @@ export * from "./customers.js";
 export * from "./access-id.js";
 export * from "./portal.js";
 export * from "./admin.js";
+export * from "./legal.js";

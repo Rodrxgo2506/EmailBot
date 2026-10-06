@@ -1,5 +1,6 @@
 import {
   hasPermission,
+  type LegalAcceptanceStatus,
   type Organization,
   type OrganizationMembership,
   type OrganizationRole,
@@ -17,6 +18,8 @@ export interface MeResponse {
   memberships: OrganizationMembership[];
   /** EmailBot V2 phase 6: a row in platform_admins (UI only; /api/admin checks it on every request). */
   isPlatformAdmin?: boolean;
+  /** EmailBot V2 phase 7: whether the user accepted the CURRENT legal versions (decided by the API). */
+  legal?: LegalAcceptanceStatus;
 }
 
 export interface OrganizationContextValue {
@@ -26,6 +29,12 @@ export interface OrganizationContextValue {
   memberships: OrganizationMembership[];
   /** Shows the platform administration entry points; never a protection by itself. */
   isPlatformAdmin: boolean;
+  /**
+   * The API reports that the current Terms / Privacy versions are not accepted: the panel is replaced by the
+   * acceptance screen (RequireLegalAcceptance). False while the API does not report it (an API deployed before
+   * this web version), so a missing field never locks users out of a screen they could not complete.
+   */
+  legalAcceptanceRequired: boolean;
   organization: Organization | null;
   role: OrganizationRole | null;
   can(permission: Permission): boolean;
@@ -65,11 +74,13 @@ export function OrganizationProvider({ children }: { children: ReactNode }) {
     setStoredOrganizationId(activeId);
   }
 
+  // The API refuses it until the current legal versions are accepted, so it is sent after the acceptance.
+  const legalAcceptanceRequired = meQuery.data?.legal ? !meQuery.data.legal.accepted : false;
   useEffect(() => {
-    if (activeId && consumePendingLoginEvent()) {
+    if (activeId && !legalAcceptanceRequired && consumePendingLoginEvent()) {
       void api.post("/api/me/login-event").catch(() => undefined);
     }
-  }, [activeId]);
+  }, [activeId, legalAcceptanceRequired]);
 
   const switchOrganization = useCallback(
     (organizationId: string) => {
@@ -88,13 +99,14 @@ export function OrganizationProvider({ children }: { children: ReactNode }) {
       error: meQuery.error,
       memberships,
       isPlatformAdmin: meQuery.data?.isPlatformAdmin === true,
+      legalAcceptanceRequired,
       organization: active?.organization ?? null,
       role: active?.role ?? null,
       can: (permission) => hasPermission(active?.role, permission),
       switchOrganization,
       refresh: () => meQuery.refetch()
     }),
-    [meQuery, memberships, active, switchOrganization, userId]
+    [meQuery, memberships, active, switchOrganization, userId, legalAcceptanceRequired]
   );
 
   return <OrganizationContext.Provider value={value}>{children}</OrganizationContext.Provider>;

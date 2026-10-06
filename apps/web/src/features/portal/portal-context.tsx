@@ -1,5 +1,5 @@
 import { MutationCache, QueryCache, QueryClient, QueryClientProvider, useQueryClient } from "@tanstack/react-query";
-import { createContext, useContext, useRef, useState, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { ApiError } from "@/lib/api-client";
 import type { PortalApi } from "./portal-api";
@@ -63,16 +63,25 @@ export function PortalProvider({ api, realtime = null, children }: { api: Portal
   const location = useLocation();
   const pathRef = useRef(location.pathname);
   pathRef.current = location.pathname;
-  const clientRef = useRef<QueryClient | null>(null);
+  // An expired session is being redirected to the login page (set by the first 401, cleared once there).
+  const expiringRef = useRef(false);
 
   const [client] = useState(() =>
     createPortalQueryClient(() => {
-      if (pathRef.current === PORTAL_LOGIN_PATH) return;
-      clientRef.current?.clear();
+      if (pathRef.current === PORTAL_LOGIN_PATH || expiringRef.current) return;
+      expiringRef.current = true;
       navigate(`${PORTAL_LOGIN_PATH}?expired=1`, { replace: true });
     })
   );
-  clientRef.current = client;
+
+  // The portal data is cleared once the login page is rendered, not in the 401 handler. The navigation runs in a
+  // transition: clearing while the expired pages are still mounted made their queries run again (and 401 again)
+  // until the redirect was committed. The other 401s of the same expiry are ignored by expiringRef.
+  useEffect(() => {
+    if (!expiringRef.current || location.pathname !== PORTAL_LOGIN_PATH) return;
+    expiringRef.current = false;
+    client.clear();
+  }, [client, location.pathname]);
 
   return (
     <QueryClientProvider client={client}>

@@ -24,8 +24,6 @@ export const organizationSettingsUpdateSchema = z
     autoProcessingEnabled: z.boolean(),
     processAttachments: z.boolean(),
     notificationsEnabled: z.boolean(),
-    emailNotificationsEnabled: z.boolean(),
-    emailRetentionDays: z.number().int().min(1).max(36_500).nullable(),
     defaultInboxFilter: z.enum(INBOX_FILTERS)
   })
   .partial()

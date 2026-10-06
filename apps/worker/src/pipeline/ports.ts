@@ -42,7 +42,6 @@ export interface OrganizationProcessingSettings {
   autoProcessingEnabled: boolean;
   processAttachments: boolean;
   notificationsEnabled: boolean;
-  emailNotificationsEnabled: boolean;
 }
 
 /** Columns written to public.emails (snake_case, as in the migration). */

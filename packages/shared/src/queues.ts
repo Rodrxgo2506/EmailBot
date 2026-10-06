@@ -112,7 +112,8 @@ export interface NotificationJob {
   organizationId: string;
   emailId: string;
   ruleId: string;
-  channel: "in_app" | "email";
+  /** Only in-app notifications exist (the never-implemented "email" channel was removed in V2 phase 7). */
+  channel: "in_app";
   title: string;
   body: string;
 }

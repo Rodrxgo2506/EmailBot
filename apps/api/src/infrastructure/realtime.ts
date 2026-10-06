@@ -13,6 +13,7 @@ import type { FastifyInstance } from "fastify";
 import type { Redis } from "ioredis";
 import { Server } from "socket.io";
 import type { AppDeps } from "../deps.js";
+import type { LegalAcceptanceGate } from "../plugins/legal-acceptance.js";
 import { attachPortalNamespace, relayPortalEvent } from "./portal-realtime.js";
 
 /*
@@ -56,8 +57,15 @@ export type HandshakeResult =
   | { ok: true; data: Required<Pick<RealtimeSocketData, "userId" | "token" | "organizationId">> }
   | { ok: false; error: "unauthorized" | "forbidden" };
 
-/** Validates the handshake payload `{ token, organizationId }`. */
-export async function authenticateHandshake(auth: unknown, deps: AuthDeps): Promise<HandshakeResult> {
+/**
+ * Validates the handshake payload `{ token, organizationId }`. Like every
+ * authenticated API route, the socket also requires the acceptance of the
+ * current legal versions (EmailBot V2 phase 7), checked before the membership.
+ */
+export async function authenticateHandshake(
+  auth: unknown,
+  deps: AuthDeps & { legalAcceptance: Pick<LegalAcceptanceGate, "isAccepted"> }
+): Promise<HandshakeResult> {
   const { token, organizationId } = (auth ?? {}) as { token?: unknown; organizationId?: unknown };
   if (typeof token !== "string" || token.length === 0 || token.length > MAX_TOKEN_LENGTH) {
     return { ok: false, error: "unauthorized" };
@@ -67,6 +75,7 @@ export async function authenticateHandshake(auth: unknown, deps: AuthDeps): Prom
 
   const user = await deps.identity.verifyAccessToken(token);
   if (!user) return { ok: false, error: "unauthorized" };
+  if (!(await deps.legalAcceptance.isAccepted(user.id))) return { ok: false, error: "forbidden" };
 
   const role = await deps.repositories(token).memberships.findRole(user.id, org.data);
   if (!role) return { ok: false, error: "forbidden" };
@@ -157,7 +166,7 @@ export function attachRealtime(
 
   io.use(async (socket, next) => {
     try {
-      const result = await authenticateHandshake(socket.handshake.auth, deps);
+      const result = await authenticateHandshake(socket.handshake.auth, { ...deps, legalAcceptance: app.legalAcceptance });
       if (!result.ok) return next(new Error(result.error));
       Object.assign(socket.data, result.data);
       await socket.join(organizationRoom(result.data.organizationId));

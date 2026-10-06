@@ -259,7 +259,7 @@ export function createEmailStore(db: SupabaseClient): EmailStore {
       const row = check(
         await db
           .from("organization_settings")
-          .select("auto_processing_enabled,process_attachments,notifications_enabled,email_notifications_enabled")
+          .select("auto_processing_enabled,process_attachments,notifications_enabled")
           .eq("organization_id", organizationId)
           .maybeSingle(),
         "loadSettings"
@@ -269,8 +269,7 @@ export function createEmailStore(db: SupabaseClient): EmailStore {
       return {
         autoProcessingEnabled: row?.auto_processing_enabled ?? true,
         processAttachments: row?.process_attachments ?? true,
-        notificationsEnabled: row?.notifications_enabled ?? true,
-        emailNotificationsEnabled: row?.email_notifications_enabled ?? true
+        notificationsEnabled: row?.notifications_enabled ?? true
       };
     },
 

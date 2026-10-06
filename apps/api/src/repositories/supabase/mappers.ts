@@ -38,7 +38,7 @@ export function toOrganization(row: Row): Organization {
 }
 
 export const SETTINGS_COLUMNS =
-  "organization_id,timezone,language,auto_processing_enabled,process_attachments,notifications_enabled,email_notifications_enabled,email_retention_days,default_inbox_filter,updated_at";
+  "organization_id,timezone,language,auto_processing_enabled,process_attachments,notifications_enabled,default_inbox_filter,updated_at";
 
 export function toSettings(row: Row): OrganizationSettings {
   return {
@@ -48,8 +48,6 @@ export function toSettings(row: Row): OrganizationSettings {
     autoProcessingEnabled: row.auto_processing_enabled,
     processAttachments: row.process_attachments,
     notificationsEnabled: row.notifications_enabled,
-    emailNotificationsEnabled: row.email_notifications_enabled,
-    emailRetentionDays: row.email_retention_days,
     defaultInboxFilter: row.default_inbox_filter,
     updatedAt: row.updated_at
   };

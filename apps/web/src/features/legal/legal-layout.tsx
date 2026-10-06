@@ -2,7 +2,16 @@ import { Mail } from "lucide-react";
 import { useEffect, type ReactNode } from "react";
 import { Link, NavLink } from "react-router-dom";
 import { cn } from "@/lib/utils";
-import { LEGAL_LAST_UPDATED } from "./legal-info";
+import {
+  LEGAL_CONTACT_EMAIL,
+  LEGAL_CONTACT_PHONE,
+  LEGAL_LAST_UPDATED,
+  SERVICE_FISCAL_ADDRESS,
+  SERVICE_NAME,
+  SERVICE_OPERATOR,
+  SERVICE_OPERATOR_RUC,
+  SERVICE_OPERATOR_TYPE
+} from "./legal-info";
 
 /*
  * Public layout for the legal pages. Rendered outside the auth and
@@ -60,11 +69,14 @@ export function LegalLayout({
   title,
   documentTitle,
   summary,
+  version,
   children
 }: {
   title: string;
   documentTitle: string;
   summary: ReactNode;
+  /** Shown next to the date (e.g. "2.0"); signing up records the accepted versions. */
+  version?: string;
   children: ReactNode;
 }) {
   useDocumentTitle(documentTitle);
@@ -82,7 +94,9 @@ export function LegalLayout({
         <article>
           <header className="mb-10 border-b pb-8">
             <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">{title}</h1>
-            <p className="mt-2 text-sm text-muted-foreground">Última actualización: {LEGAL_LAST_UPDATED}</p>
+            <p className="mt-2 text-sm text-muted-foreground">
+              {version ? `Versión ${version} · ` : null}Última actualización: {LEGAL_LAST_UPDATED}
+            </p>
             <div className="mt-6 text-[0.95rem] leading-7 text-muted-foreground">{summary}</div>
           </header>
           <div className="flex flex-col gap-10">{children}</div>
@@ -136,18 +150,28 @@ export function Pending({ children }: { children: ReactNode }) {
   );
 }
 
-/** Contact paragraph shared by both documents. */
-export function ContactDetails({ email, operator }: { email: string | null; operator: string | null }) {
+/**
+ * Holder and contact details shared by both documents (legal-info.ts). The
+ * fiscal address line only appears once it exists: it is never invented.
+ */
+export function ContactDetails() {
   return (
-    <>
-      <p>
-        Responsable del servicio:{" "}
-        {operator ? <strong>{operator}</strong> : <Pending>nombre legal del titular de EmailBot</Pending>}
-      </p>
-      <p>
+    <LegalList>
+      <li>
+        Titular del servicio {SERVICE_NAME}:{" "}
+        {SERVICE_OPERATOR ? <strong>{SERVICE_OPERATOR}</strong> : <Pending>nombre legal del titular</Pending>}
+        {SERVICE_OPERATOR_TYPE ? ` (${SERVICE_OPERATOR_TYPE.toLowerCase()})` : null}
+      </li>
+      <li>RUC: {SERVICE_OPERATOR_RUC ?? <Pending>RUC</Pending>}</li>
+      {SERVICE_FISCAL_ADDRESS ? <li>Domicilio fiscal: {SERVICE_FISCAL_ADDRESS}</li> : null}
+      <li>
         Correo de contacto:{" "}
-        {email ? <a href={`mailto:${email}`}>{email}</a> : <Pending>dirección de correo de contacto</Pending>}
-      </p>
-    </>
+        {LEGAL_CONTACT_EMAIL ? <a href={`mailto:${LEGAL_CONTACT_EMAIL}`}>{LEGAL_CONTACT_EMAIL}</a> : <Pending>correo de contacto</Pending>}
+      </li>
+      <li>
+        Teléfono:{" "}
+        {LEGAL_CONTACT_PHONE ? <a href={`tel:${LEGAL_CONTACT_PHONE}`}>{LEGAL_CONTACT_PHONE}</a> : <Pending>teléfono de contacto</Pending>}
+      </li>
+    </LegalList>
   );
 }

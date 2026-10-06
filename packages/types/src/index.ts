@@ -5,3 +5,4 @@ export * from "./entities.js";
 export * from "./api.js";
 export * from "./realtime.js";
 export * from "./admin.js";
+export * from "./legal.js";

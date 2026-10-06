@@ -30,6 +30,8 @@ import type {
   EmailProvider,
   EmailRuleRecord,
   EmailSummary,
+  LegalAcceptanceRecord,
+  LegalDocument,
   Organization,
   OrganizationMember,
   OrganizationMembership,
@@ -414,6 +416,13 @@ export interface PrivilegedOperations {
   getPortalEmail(tokenHash: string, deliveryId: string): Promise<PortalEmailDetail | null>;
   getPortalAttachment(tokenHash: string, deliveryId: string, attachmentId: string): Promise<PortalAttachmentLocation | null>;
   listPortalFilters(tokenHash: string): Promise<PortalFilters | null>;
+  /*
+   * EmailBot V2 phase 7: legal acceptances. `userId` is ALWAYS the user of the verified access token; the
+   * versions are the server's (CURRENT_LEGAL_VERSIONS); accepted_at is the database time (no column grant).
+   */
+  listLegalAcceptances(userId: string): Promise<LegalAcceptanceRecord[]>;
+  /** Idempotent: an already recorded (user, document, version) keeps its original row and time. */
+  recordLegalAcceptance(userId: string, versions: Readonly<Record<LegalDocument, string>>): Promise<void>;
 }
 
 /* ------------------------------------------------------------------ platform administration (V2 phase 6) */

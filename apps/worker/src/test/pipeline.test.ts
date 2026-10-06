@@ -743,9 +743,28 @@ describe("notifications", () => {
 
     expect(await deliverNotification({ ...base, channel: "in_app" }, { emails, realtime, logger: silentLogger })).toBe("delivered");
     expect(realtime.events).toEqual([{ type: "notification", organizationId: ORG, emailId: "e1", title: "T", body: "B" }]);
-    expect(await deliverNotification({ ...base, channel: "email" }, { emails, realtime, logger: silentLogger })).toBe(
-      "skipped_not_implemented"
-    );
+    // A job queued before phase 7 with the removed "email" channel is skipped, never reported as sent.
+    const legacy = { ...base, channel: "email" } as unknown as Parameters<typeof deliverNotification>[0];
+    expect(await deliverNotification(legacy, { emails, realtime, logger: silentLogger })).toBe("skipped_unsupported_channel");
+    expect(realtime.events).toHaveLength(1);
+  });
+
+  it("a stored rule that still has the removed email NOTIFY keeps working (only that action is dropped)", async () => {
+    const { deps, job, emails, producer } = setup();
+    emails.rules = [
+      makeRuleRow({
+        actions: {
+          actions: [
+            { type: "MARK_IMPORTANT" },
+            { type: "NOTIFY", channel: "email" },
+            { type: "NOTIFY", channel: "in_app", title: "Nuevo" }
+          ]
+        }
+      })
+    ];
+    expect((await processEmail(job, deps)).status).toBe("processed");
+    expect(emails.rows[0]).toMatchObject({ is_important: true, matched_rule_id: "rule-1" });
+    expect(producer.notifications.map((notification) => notification.channel)).toEqual(["in_app"]);
   });
 });
 

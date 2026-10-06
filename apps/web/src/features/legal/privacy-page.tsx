@@ -1,13 +1,19 @@
 import { ContactDetails, LegalLayout, LegalList, LegalSection, LegalSubheading, Pending } from "./legal-layout";
 import {
   API_DOMAIN,
+  ATTACHMENT_MAX_MB,
   GMAIL_READONLY_SCOPE,
-  LEGAL_CONTACT_EMAIL,
+  MICROSOFT_SCOPES,
   PORTAL_ATTACHMENT_LINK_SECONDS,
   PORTAL_SESSION_IDLE_DAYS,
   PORTAL_SESSION_MAX_DAYS,
+  PRIVACY_VERSION,
+  QUEUE_COMPLETED_HOURS,
+  QUEUE_FAILED_DAYS,
   SERVICE_DOMAIN,
-  SERVICE_OPERATOR
+  SERVICE_OPERATOR,
+  SERVICE_OPERATOR_RUC,
+  SERVICE_OPERATOR_TYPE
 } from "./legal-info";
 
 /*
@@ -20,6 +26,7 @@ export function PrivacyPage() {
     <LegalLayout
       title="Política de Privacidad"
       documentTitle="Política de Privacidad | EmailBot"
+      version={PRIVACY_VERSION}
       summary={
         <p>
           Esta política explica qué información trata EmailBot, para qué la utiliza, cómo la protege, con quién la
@@ -36,10 +43,12 @@ export function PrivacyPage() {
           finales de esa organización a los que corresponde, que lo consultan en un portal.
         </p>
         <p>
-          El servicio es proporcionado por{" "}
-          {SERVICE_OPERATOR ? <strong>{SERVICE_OPERATOR}</strong> : <Pending>nombre legal del titular de EmailBot</Pending>}{" "}
-          (en adelante, «EmailBot», «nosotros»). Esta política se aplica a la aplicación disponible en {SERVICE_DOMAIN},
-          a su portal de clientes ({SERVICE_DOMAIN}/portal) y a los servicios de servidor que los acompañan ({API_DOMAIN}).
+          EmailBot es el nombre del servicio. Su titular y responsable es{" "}
+          {SERVICE_OPERATOR ? <strong>{SERVICE_OPERATOR}</strong> : <Pending>nombre legal del titular</Pending>}
+          {SERVICE_OPERATOR_TYPE ? `, ${SERVICE_OPERATOR_TYPE.toLowerCase()}` : null}
+          {SERVICE_OPERATOR_RUC ? `, con RUC ${SERVICE_OPERATOR_RUC}` : null} (en adelante, «EmailBot», «nosotros»). Esta
+          política se aplica a la aplicación disponible en {SERVICE_DOMAIN}, a su portal de clientes ({SERVICE_DOMAIN}/portal)
+          y a los servicios de servidor que los acompañan ({API_DOMAIN}).
         </p>
         <p>Hay dos tipos de personas que usan EmailBot:</p>
         <LegalList>
@@ -65,6 +74,10 @@ export function PrivacyPage() {
         <LegalList>
           <li>Dirección de correo electrónico y contraseña con las que te registras. La contraseña la gestiona el servicio de autenticación; EmailBot no la guarda en sus propias tablas.</li>
           <li>Datos de perfil, como tu nombre.</li>
+          <li>
+            Tu aceptación de los Términos y Condiciones y de esta Política de Privacidad: la versión de cada documento que
+            aceptaste y la fecha y hora en que lo hiciste, registradas por nuestros servidores.
+          </li>
         </LegalList>
 
         <LegalSubheading>Organización</LegalSubheading>
@@ -110,21 +123,28 @@ export function PrivacyPage() {
           <li>Resultados del procesamiento: categoría, bot y regla aplicados e información extraída por las reglas.</li>
           <li>Entregas: a qué clientes finales se entregó cada correo, si fue de forma automática o manual y quién la hizo.</li>
           <li>
-            Archivos adjuntos: sus metadatos (nombre, tipo y tamaño) y su contenido, cuando no superan el tamaño máximo
-            configurado en el servicio.
+            Archivos adjuntos: de todos ellos, sus metadatos (nombre, tipo y tamaño). Su contenido solo se guarda si la
+            organización tiene activada la opción «Guardar adjuntos» (activada por defecto), y únicamente de los adjuntos
+            que no van incrustados en el cuerpo del correo y no superan el tamaño máximo del servicio ({ATTACHMENT_MAX_MB} MB
+            por defecto).
           </li>
         </LegalList>
 
         <LegalSubheading>Auditoría y datos técnicos</LegalSubheading>
         <LegalList>
           <li>
-            Registros de auditoría de la organización: acciones como inicios de sesión de miembros y de clientes en el
-            portal, conexión o desconexión de cuentas y creación, modificación o eliminación de recursos, con quién las
-            realizó y la fecha.
+            Registros de auditoría de la organización: los genera el servidor de EmailBot cuando un miembro realiza una
+            acción (por ejemplo, iniciar sesión, conectar o desconectar una cuenta, o crear, modificar o eliminar un
+            recurso) y en eventos del sistema y del portal (como los inicios y cierres de sesión de los clientes, el
+            resultado de la entrega de un correo a los clientes o el estado de las notificaciones de Gmail). Guardan el tipo de acción, el recurso afectado, el miembro que la realizó (si la hizo
+            un miembro), la fecha y datos de contexto como identificadores internos o la dirección de la cuenta de correo
+            afectada. No guardan contraseñas, tokens ni el contenido de los correos. Los ven los propietarios y
+            administradores de la organización.
           </li>
           <li>
             Registros de auditoría de la plataforma: las acciones de los administradores de EmailBot sobre las
-            organizaciones (por ejemplo, crearlas, cambiar su plan o suspenderlas).
+            organizaciones (por ejemplo, crearlas, cambiar su plan o suspenderlas), con quién las realizó, la fecha y el
+            cambio aplicado.
           </li>
           <li>
             Datos técnicos necesarios para el funcionamiento y la seguridad, como la dirección IP y los datos de cada
@@ -161,11 +181,19 @@ export function PrivacyPage() {
         </LegalList>
 
         <LegalSubheading>Microsoft / Outlook</LegalSubheading>
-        <p>
-          La conexión se realiza mediante OAuth de Microsoft con permisos de lectura de correo (Mail.Read), lectura del
-          perfil básico (User.Read) y acceso sin conexión (offline_access) para seguir procesando mensajes nuevos sin
-          que tengas que volver a iniciar sesión.
-        </p>
+        <LegalList>
+          <li>
+            La conexión se realiza mediante OAuth de Microsoft con permisos de lectura de correo ({MICROSOFT_SCOPES[0]}),
+            lectura del perfil básico ({MICROSOFT_SCOPES[1]}) y acceso sin conexión ({MICROSOFT_SCOPES[2]}) para seguir
+            procesando mensajes nuevos sin que tengas que volver a iniciar sesión. EmailBot no puede enviar, modificar ni
+            eliminar correos con estos permisos.
+          </li>
+          <li>
+            EmailBot lee los mensajes nuevos de la bandeja de entrada a partir de la conexión. En las cuentas de Microsoft
+            no recibe avisos de mensajes nuevos: las consulta periódicamente, por lo que los correos pueden tardar algunos
+            minutos más que en Gmail.
+          </li>
+        </LegalList>
 
         <LegalSubheading>Credenciales y tokens</LegalSubheading>
         <LegalList>
@@ -287,7 +315,24 @@ export function PrivacyPage() {
         </p>
       </LegalSection>
 
-      <LegalSection id="comparticion" number={7} title="Compartición de información">
+      <LegalSection id="ubicacion" number={7} title="Ubicación de los datos y transferencias internacionales">
+        <p>EmailBot se opera desde el Perú, pero sus proveedores de infraestructura tratan la información fuera del Perú:</p>
+        <LegalList>
+          <li>La base de datos, la autenticación y los archivos adjuntos se alojan en Supabase, en Estados Unidos (región de Oregón).</li>
+          <li>Los servidores de la aplicación y del procesamiento de correos se alojan en Render, fuera del Perú.</li>
+          <li>
+            Las conexiones con {SERVICE_DOMAIN} y {API_DOMAIN} pasan por la red de Cloudflare que utiliza Render, que puede
+            tratarlas en distintos países.
+          </li>
+          <li>Google y Microsoft tratan la información de las cuentas conectadas en su propia infraestructura, según sus políticas.</li>
+        </LegalList>
+        <p>
+          Al usar EmailBot, la información se transfiere a esos proveedores únicamente para prestar el servicio y con las
+          medidas de seguridad descritas en la sección 6.
+        </p>
+      </LegalSection>
+
+      <LegalSection id="comparticion" number={8} title="Compartición de información">
         <LegalList>
           <li>
             <strong>Dentro de la organización</strong>: los correos procesados y sus resultados son visibles para sus
@@ -309,32 +354,53 @@ export function PrivacyPage() {
         <LegalList>
           <li><strong>Supabase</strong>: base de datos, autenticación y almacenamiento de archivos.</li>
           <li><strong>Render</strong>: alojamiento de la aplicación web, el servidor y los procesos de procesamiento.</li>
+          <li><strong>Cloudflare</strong>: red por la que pasan las conexiones con la aplicación (a través de Render).</li>
           <li>
             <strong>Google</strong>: cuando una organización conecta una cuenta de Gmail, para autorizar el acceso, leer
             los mensajes y recibir los avisos de mensajes nuevos (Google Cloud Pub/Sub).
           </li>
-          <li><strong>Microsoft</strong>: cuando una organización conecta una cuenta de Microsoft / Outlook, con el mismo fin.</li>
-          <li>Otros proveedores técnicos estrictamente necesarios para la infraestructura, como servicios de monitorización de errores cuando están habilitados.</li>
+          <li><strong>Microsoft</strong>: cuando una organización conecta una cuenta de Microsoft / Outlook, para autorizar el acceso y leer los mensajes.</li>
+          <li>Otros proveedores técnicos estrictamente necesarios para la infraestructura, como servicios de monitorización de errores si se habilitan.</li>
         </LegalList>
         <p>También podremos revelar información cuando la ley lo exija. No vendemos información personal.</p>
       </LegalSection>
 
-      <LegalSection id="retencion" number={8} title="Retención y eliminación">
+      <LegalSection id="retencion" number={9} title="Retención y eliminación">
         <p>
           No aplicamos plazos de retención fijos. La información se conserva mientras es necesaria para prestar el
           servicio a la organización:
         </p>
         <LegalList>
-          <li>Los correos procesados se conservan hasta que se eliminan desde EmailBot, ya sea individualmente o al eliminar la cuenta de correo desconectada a la que pertenecen, junto con sus entregas y adjuntos.</li>
+          <li>
+            Los correos procesados se conservan hasta que se eliminan desde EmailBot, ya sea individualmente o al eliminar
+            la cuenta de correo desconectada a la que pertenecen, junto con sus entregas y adjuntos. EmailBot no elimina
+            correos automáticamente por su antigüedad.
+          </li>
           <li>Las credenciales de una cuenta de correo se borran al desconectarla.</li>
           <li>
             Las sesiones del portal caducan como se indica en la sección 4. Una entrega retirada manualmente deja de ser
             visible para el cliente, aunque su registro se conserva.
           </li>
+          <li>Suspender o cancelar una organización detiene el procesamiento y el acceso, pero no borra sus datos.</li>
           <li>
-            Suspender o cancelar una organización detiene el procesamiento y el acceso, pero no borra sus datos.
+            Los trabajos de procesamiento en cola (que pueden incluir identificadores, la dirección del buzón y, en las
+            notificaciones, el asunto o los datos extraídos) se conservan temporalmente: hasta {QUEUE_COMPLETED_HOURS}{" "}
+            horas los completados y hasta {QUEUE_FAILED_DAYS} días los que fallaron.
           </li>
-          <li>Los datos temporales de procesamiento en cola se eliminan automáticamente tras un período breve.</li>
+          <li>
+            Los registros de auditoría se conservan sin plazo fijo y la base de datos impide modificarlos o borrarlos.
+            Solo hay dos excepciones: cuando se elimina un usuario, su identificación como autor se elimina del registro
+            (el registro se conserva), y cuando se elimina una organización se eliminan sus registros de auditoría (los
+            de la plataforma se conservan sin la referencia a ella).
+          </li>
+          <li>
+            Los registros de aceptación de los documentos legales no se pueden modificar mientras exista tu cuenta y se
+            eliminan junto con tu usuario.
+          </li>
+          <li>
+            Los registros técnicos del servidor (por ejemplo, la dirección IP de cada solicitud) se conservan durante el
+            tiempo que aplique el proveedor de alojamiento.
+          </li>
         </LegalList>
         <p>
           La aplicación todavía no permite eliminar por tu cuenta tu usuario, una organización completa ni un cliente
@@ -344,7 +410,7 @@ export function PrivacyPage() {
         </p>
       </LegalSection>
 
-      <LegalSection id="cookies" number={9} title="Cookies y almacenamiento en el navegador">
+      <LegalSection id="cookies" number={10} title="Cookies y almacenamiento en el navegador">
         <LegalList>
           <li>
             Panel de la organización: el navegador guarda la sesión iniciada y la organización activa en su
@@ -358,28 +424,32 @@ export function PrivacyPage() {
         </LegalList>
       </LegalSection>
 
-      <LegalSection id="derechos" number={10} title="Tus derechos">
+      <LegalSection id="derechos" number={11} title="Tus derechos">
         <LegalList>
           <li><strong>Acceso</strong>: los miembros pueden consultar en EmailBot su perfil, su organización y los correos a los que su rol da acceso; los clientes finales, los correos que se les entregaron.</li>
-          <li><strong>Corrección</strong>: puedes actualizar tu nombre y tu contraseña desde tu perfil, y los administradores de la organización pueden modificar sus datos y los de sus clientes finales.</li>
-          <li><strong>Eliminación</strong>: puedes eliminar correos y cuentas de correo desconectadas según tu rol, y solicitar la eliminación de tu usuario, de tu organización o de tus datos como cliente final.</li>
-          <li><strong>Revocación</strong>: puedes desconectar una cuenta de correo en EmailBot y retirar el acceso desde tu cuenta de Google o Microsoft.</li>
+          <li><strong>Rectificación</strong>: puedes actualizar tu nombre y tu contraseña desde tu perfil, y los administradores de la organización pueden modificar sus datos y los de sus clientes finales.</li>
+          <li><strong>Cancelación</strong>: puedes eliminar correos y cuentas de correo desconectadas según tu rol, y solicitar la eliminación de tu usuario, de tu organización o de tus datos como cliente final.</li>
+          <li><strong>Oposición y revocación</strong>: puedes desconectar una cuenta de correo en EmailBot, retirar el acceso desde tu cuenta de Google o Microsoft y oponerte a un tratamiento escribiéndonos.</li>
           <li><strong>Consultas</strong>: puedes enviarnos cualquier pregunta sobre privacidad a través del contacto indicado.</li>
         </LegalList>
-        <p>Según tu lugar de residencia, la ley puede reconocerte otros derechos sobre tus datos personales.</p>
-      </LegalSection>
-
-      <LegalSection id="cambios" number={11} title="Cambios en esta política">
         <p>
-          Podemos actualizar esta política cuando cambie el servicio o la normativa aplicable. Publicaremos la versión
-          vigente en esta página con su fecha de actualización. Si un cambio es importante, procuraremos avisar a los
-          usuarios dentro de la aplicación.
+          Para ejercer estos derechos escríbenos al correo de la sección 13. Si eres cliente final de una organización,
+          dirígete primero a ella, como se indica en la sección 4. La ley aplicable puede reconocerte otros derechos sobre
+          tus datos personales.
         </p>
       </LegalSection>
 
-      <LegalSection id="contacto" number={12} title="Contacto">
+      <LegalSection id="cambios" number={12} title="Cambios en esta política">
+        <p>
+          Podemos actualizar esta política cuando cambie el servicio o la normativa aplicable. Publicaremos la versión
+          vigente en esta página con su número de versión y su fecha de actualización. Cuando publiquemos una nueva
+          versión, los miembros deberán aceptarla para seguir usando el panel de EmailBot.
+        </p>
+      </LegalSection>
+
+      <LegalSection id="contacto" number={13} title="Contacto">
         <p>Para consultas o solicitudes sobre privacidad:</p>
-        <ContactDetails email={LEGAL_CONTACT_EMAIL} operator={SERVICE_OPERATOR} />
+        <ContactDetails />
       </LegalSection>
     </LegalLayout>
   );

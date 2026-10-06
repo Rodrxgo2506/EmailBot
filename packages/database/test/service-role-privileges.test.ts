@@ -26,6 +26,7 @@ const TABLES = [
   "email_deliveries",
   "email_rules",
   "emails",
+  "legal_acceptances",
   "organization_members",
   "organization_settings",
   "organizations",
@@ -56,6 +57,8 @@ const SERVICE_ROLE_EXPECTED: Record<(typeof TABLES)[number], Privilege[]> = {
   email_deliveries: [],
   email_rules: ["SELECT"],
   emails: ["SELECT", "INSERT"],
+  // V2 phase 7: SELECT plus column INSERT (user_id, document, version, source; never accepted_at), checked below.
+  legal_acceptances: ["SELECT"],
   organization_members: ["SELECT"],
   organization_settings: ["SELECT"],
   organizations: [],
@@ -66,7 +69,7 @@ const SERVICE_ROLE_EXPECTED: Record<(typeof TABLES)[number], Privilege[]> = {
 };
 
 /** Tables that existed before migration 7 (V2 tables are created later). */
-const V2_TABLES: readonly string[] = ["bots", "customers", "customer_identifiers", "bot_customer_assignments", "email_deliveries", "customer_access_credentials", "customer_sessions", "platform_admins", "platform_audit_logs"];
+const V2_TABLES: readonly string[] = ["bots", "customers", "customer_identifiers", "bot_customer_assignments", "email_deliveries", "customer_access_credentials", "customer_sessions", "platform_admins", "platform_audit_logs", "legal_acceptances"];
 const V1_TABLES = TABLES.filter((table) => !V2_TABLES.includes(table));
 
 async function privilegeMatrix(tx: Tx, role: string, tables: readonly string[] = TABLES): Promise<Record<string, Privilege[]>> {
@@ -111,6 +114,7 @@ describe("BEFORE migration 7, with production default privileges", () => {
   it("service_role lacks every privilege the backend needs", async () => {
     const matrix = await t.asAdmin((tx) => privilegeMatrix(tx, "service_role", V1_TABLES));
     for (const [table, required] of Object.entries(SERVICE_ROLE_EXPECTED)) {
+      if (!V1_TABLES.includes(table as (typeof TABLES)[number])) continue; // V2 tables do not exist yet
       for (const privilege of required) {
         expect(matrix[table], `${table} ${privilege}`).not.toContain(privilege);
       }
@@ -232,6 +236,13 @@ describe.each<DefaultPrivilegesProfile>(["production", "local"])("AFTER migratio
     ["INSERT platform_admins", "insert into public.platform_admins (user_id) values (gen_random_uuid())"],
     ["SELECT platform_audit_logs", "select action from public.platform_audit_logs"],
     ["INSERT platform_audit_logs", "insert into public.platform_audit_logs (action, target_type) values ('organization.created', 'organization')"],
+    ["UPDATE legal_acceptances", "update public.legal_acceptances set version = '9.9'"],
+    ["DELETE legal_acceptances", "delete from public.legal_acceptances"],
+    [
+      "INSERT legal_acceptances with its own accepted_at",
+      "insert into public.legal_acceptances (user_id, document, version, source, accepted_at) values (gen_random_uuid(), 'terms', '2.0', 'reacceptance', now() - interval '1 year')"
+    ],
+    ["INSERT legal_acceptances with its own id", "insert into public.legal_acceptances (id, user_id, document, version, source) values (gen_random_uuid(), gen_random_uuid(), 'terms', '2.0', 'reacceptance')"],
     ["TRUNCATE emails", "truncate public.emails"]
   ])("service_role cannot %s", async (_label, sql) => {
     await expect(t.asService((tx) => tx.query(sql))).rejects.toThrow(/permission denied/);

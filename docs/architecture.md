@@ -150,7 +150,7 @@ Despliegue (puertos, health checks, CSP, Docker): [`deployment.md`](deployment.m
 
 - Registro y renovación de suscripciones push: Gmail `users.watch` y Graph `subscriptions`. Mientras tanto se usa polling (`WORKER_POLL_INTERVAL_MINUTES`).
 - Sincronización IMAP (adapter scaffold; las cuentas se crean en pausa).
-- Notificaciones por email (canal en scaffold; in-app funciona).
+- Notificaciones por email: no implementadas; el canal `email` se retiró del contrato de reglas en V2 F7 (solo in-app).
 - Invitaciones por correo a personas sin cuenta (hoy solo se agregan usuarios registrados).
 - Tipos generados de la base de datos (`supabase gen types`) en lugar de filas sin tipar en los repositorios.
 - Endpoint de estadísticas dedicado (el dashboard usa los `total` de `GET /api/emails`).

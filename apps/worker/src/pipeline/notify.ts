@@ -1,13 +1,13 @@
 import type { NotificationJob } from "@emailbot/shared";
 import type { EmailStore, Logger, RealtimePublisher } from "./ports.js";
 
-export type NotifyOutcome = "delivered" | "skipped_disabled" | "skipped_not_implemented";
+export type NotifyOutcome = "delivered" | "skipped_disabled" | "skipped_unsupported_channel";
 
 /**
- * Delivers a rule notification.
- *  - in_app: real-time event to the organization room (implemented).
- *  - email: SCAFFOLD — no outbound mail provider is configured yet, so the
- *    job is acknowledged and logged instead of pretending it was sent.
+ * Delivers a rule notification in the app: a real-time event to the
+ * organization room. In-app is the only channel. A job queued before V2
+ * phase 7 with the removed "email" channel (never implemented) is
+ * acknowledged and skipped, as it always was, instead of pretending it was sent.
  */
 export async function deliverNotification(
   job: NotificationJob,
@@ -16,10 +16,9 @@ export async function deliverNotification(
   const settings = await deps.emails.loadSettings(job.organizationId);
   if (!settings.notificationsEnabled) return "skipped_disabled";
 
-  if (job.channel === "email") {
-    if (!settings.emailNotificationsEnabled) return "skipped_disabled";
-    deps.logger.warn({ emailId: job.emailId, ruleId: job.ruleId }, "email notifications are not implemented yet");
-    return "skipped_not_implemented";
+  if ((job.channel as string) !== "in_app") {
+    deps.logger.warn({ emailId: job.emailId, ruleId: job.ruleId, channel: job.channel }, "unsupported notification channel; skipped");
+    return "skipped_unsupported_channel";
   }
 
   await deps.realtime.publish({

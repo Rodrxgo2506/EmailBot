@@ -119,7 +119,7 @@ export function DashboardPage() {
                   description={
                     activeAccounts === 0
                       ? "Conecta una cuenta de correo y crea una regla para empezar."
-                      : "Los correos que coincidan con tus reglas aparecerán aquí en tiempo real."
+                      : "Los correos procesados aparecerán aquí automáticamente."
                   }
                   action={
                     activeAccounts === 0 && can("email-accounts:manage") ? (

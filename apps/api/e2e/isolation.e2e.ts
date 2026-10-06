@@ -78,9 +78,15 @@ const sameSet = (actual: string[], expected: string[]) => actual.length === expe
 const run = randomBytes(3).toString("hex");
 const password = randomBytes(18).toString("base64url");
 const service = createClient(url, serviceKey, { auth: { persistSession: false, autoRefreshToken: false } });
-async function newUser(name: string) {
+/** `acceptsLegal`: signs up accepting the Terms and Privacy Policy (the trigger records the server's versions). */
+async function newUser(name: string, acceptsLegal = true) {
   const email = `${name}-${run}@e2e.test`;
-  const { data, error } = await service.auth.admin.createUser({ email, password, email_confirm: true });
+  const { data, error } = await service.auth.admin.createUser({
+    email,
+    password,
+    email_confirm: true,
+    user_metadata: acceptsLegal ? { legal_accepted: true } : {}
+  });
   if (error || !data.user) throw new Error(`createUser ${name}: ${error?.message}`);
   const client = createClient(url, anonKey, { auth: { persistSession: false, autoRefreshToken: false } });
   const session = await client.auth.signInWithPassword({ email, password });
@@ -329,6 +335,31 @@ for (const scenario of scenarios) {
 }
 
 /* ------------------------------------------------------------------ panel API */
+
+{
+  // Legal barrier (phase 7): a member of A without acceptance cannot use the API until accepting.
+  const pending = await newUser("no-legal", false);
+  must((await call("POST", "/api/organizations/current/members", ownerA.token, orgA, { email: pending.email, role: "VIEWER" })).json?.member, "member without acceptance");
+  const blocked = await call("GET", "/api/emails?pageSize=100", pending.token, orgA);
+  check(blocked.status === 403 && blocked.json?.error?.code === "LEGAL_ACCEPTANCE_REQUIRED", "API: a member without legal acceptance -> 403 LEGAL_ACCEPTANCE_REQUIRED", `${blocked.status}`);
+  const pendingMe = await call("GET", "/api/me", pending.token, null);
+  check(pendingMe.status === 200 && pendingMe.json?.legal?.accepted === false, "API: GET /api/me still works without acceptance");
+  const accepted = await call("POST", "/api/me/legal-acceptance", pending.token, null, {
+    termsVersion: pendingMe.json?.legal?.termsVersion,
+    privacyVersion: pendingMe.json?.legal?.privacyVersion
+  });
+  const afterAccept = await call("GET", "/api/emails?pageSize=100", pending.token, orgA);
+  const pendingSubjects: string[] = (afterAccept.json?.items ?? []).map((item: { subject: string }) => item.subject);
+  check(
+    accepted.status === 200 && afterAccept.status === 200 && !pendingSubjects.some((subject) => subject.includes("E4") || subject.includes("E5")),
+    "API: after accepting, the member uses organization A (and still sees nothing of B)"
+  );
+  const signupRows = await service.from("legal_acceptances").select("document,version,source").eq("user_id", ownerA.id);
+  check(
+    (signupRows.data ?? []).length === 2 && (signupRows.data ?? []).every((row) => row.source === "signup" && row.version === pendingMe.json?.legal?.[`${row.document}Version`]),
+    "sign-up acceptance recorded the server's current versions"
+  );
+}
 
 {
   const listA = await call("GET", "/api/emails?pageSize=100", ownerA.token, orgA);

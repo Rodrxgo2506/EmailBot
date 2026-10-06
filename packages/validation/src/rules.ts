@@ -117,13 +117,21 @@ const extractActionSchema = z
     }
   });
 
+/**
+ * Channels of the NOTIFY action. Only in-app notifications exist: e-mail
+ * notifications were never implemented (no outbound mail provider), so the
+ * channel was removed from the contract (EmailBot V2 phase 7).
+ */
+export const NOTIFICATION_CHANNELS = ["in_app"] as const;
+export type NotificationChannel = (typeof NOTIFICATION_CHANNELS)[number];
+
 export const ruleActionSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("MARK_IMPORTANT") }),
   z.object({ type: z.literal("MARK_READ") }),
   z.object({ type: z.literal("ARCHIVE") }),
   z.object({
     type: z.literal("NOTIFY"),
-    channel: z.enum(["in_app", "email"]).default("in_app"),
+    channel: z.enum(NOTIFICATION_CHANNELS).default("in_app"),
     title: z.string().trim().max(200).optional()
   }),
   extractActionSchema
@@ -136,9 +144,24 @@ export const ruleConditionsDocumentSchema = z.object({
   conditions: z.array(ruleConditionSchema).max(MAX_RULE_CONDITIONS)
 });
 
-/** Shape of email_rules.actions JSONB. */
+/**
+ * Rules saved before phase 7 may still store `{ type: "NOTIFY", channel: "email" }`.
+ * That action never sent anything (the worker acknowledged and skipped it), so
+ * stored documents drop it: the rule keeps working exactly as before instead of
+ * failing validation, which would make the worker skip the WHOLE rule. New
+ * input (ruleCreateSchema / ruleUpdateSchema) rejects the channel.
+ */
+export function withoutLegacyEmailNotifications(actions: unknown): unknown {
+  if (!Array.isArray(actions)) return actions;
+  return actions.filter((action: unknown) => {
+    const candidate = action as { type?: unknown; channel?: unknown } | null;
+    return !(candidate && typeof candidate === "object" && candidate.type === "NOTIFY" && candidate.channel === "email");
+  });
+}
+
+/** Shape of email_rules.actions JSONB (as stored; see withoutLegacyEmailNotifications). */
 export const ruleActionsDocumentSchema = z.object({
-  actions: z.array(ruleActionSchema).max(MAX_RULE_ACTIONS)
+  actions: z.preprocess(withoutLegacyEmailNotifications, z.array(ruleActionSchema).max(MAX_RULE_ACTIONS))
 });
 
 const ruleFields = {

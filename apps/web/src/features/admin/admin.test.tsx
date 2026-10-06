@@ -146,6 +146,7 @@ function organizationContext(overrides: Partial<OrganizationContextValue> = {}):
     error: null,
     memberships: [],
     isPlatformAdmin: false,
+    legalAcceptanceRequired: false,
     organization: null,
     role: null,
     can: () => true,

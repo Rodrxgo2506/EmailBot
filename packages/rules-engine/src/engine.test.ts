@@ -278,6 +278,14 @@ describe("parseRuleRow", () => {
     expect(parsed.ok).toBe(true);
   });
 
+  it("a rule stored with the removed email NOTIFY (phase 7) still parses, without that action", () => {
+    const parsed = parseRuleRow({
+      ...row,
+      actions: { actions: [{ type: "MARK_IMPORTANT" }, { type: "NOTIFY", channel: "email" }, { type: "NOTIFY", channel: "in_app" }] }
+    });
+    expect(parsed.ok && parsed.rule.actions).toEqual([{ type: "MARK_IMPORTANT" }, { type: "NOTIFY", channel: "in_app" }]);
+  });
+
   it("rejects malformed JSONB instead of partially executing it", () => {
     expect(parseRuleRow({ ...row, conditions: { conditions: [{ field: "nope" }] } }).ok).toBe(false);
     expect(parseRuleRow({ ...row, actions: { actions: [{ type: "DELETE_EVERYTHING" }] } }).ok).toBe(false);

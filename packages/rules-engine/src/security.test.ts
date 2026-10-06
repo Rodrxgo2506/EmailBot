@@ -1,8 +1,9 @@
+import vm from "node:vm";
 import type { NormalizedEmail } from "@emailbot/types";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createEvaluationContext } from "./context.js";
 import { evaluateRule, evaluateRules } from "./engine.js";
-import { RegexGuard } from "./regex-guard.js";
+import { DEFAULT_REGEX_BUDGET_MS, DEFAULT_REGEX_TIMEOUT_MS, RegexGuard } from "./regex-guard.js";
 import { htmlToText } from "./text.js";
 import type { EngineRule } from "./types.js";
 
@@ -76,11 +77,83 @@ describe("RegexGuard", () => {
     expect(ms).toBeLessThan(1_000);
   });
 
-  it("still returns correct results for normal patterns", () => {
+});
+
+/*
+ * The guard's limits are wall-clock: the vm watchdog (per execution) and
+ * performance.now() (budget). On a loaded machine (the whole monorepo testing
+ * in parallel) the process can be descheduled for more than 50 ms in the middle
+ * of a trivial regex, so a test relying on real time could see a "timeout" that
+ * has nothing to do with the regex. These tests control both clocks: the
+ * production guard and its default limits run unchanged, but how much time
+ * passes, and whether the watchdog fires, is decided by the test, not by the
+ * machine's load.
+ */
+describe("RegexGuard with controlled clocks (deterministic)", () => {
+  const runInContext = vm.Script.prototype.runInContext;
+
+  /**
+   * Every guarded regex still runs for real in the guard's sandbox; the test
+   * records the per-execution limit the guard requested and decides how much
+   * time each execution takes and whether the watchdog fires.
+   */
+  function controlClocks(options: { timesOut?: (call: number) => boolean; elapsedMs?: (call: number) => number } = {}) {
+    let now = 1_000;
+    const requested: Array<number | undefined> = [];
+    vi.spyOn(performance, "now").mockImplementation(() => now);
+    vi.spyOn(vm.Script.prototype, "runInContext").mockImplementation(function (this: vm.Script, context, runOptions) {
+      const call = requested.length;
+      requested.push(runOptions?.timeout);
+      now += options.elapsedMs?.(call) ?? 0;
+      if (options.timesOut?.(call)) {
+        throw Object.assign(new Error(`Script execution timed out after ${runOptions?.timeout}ms`), { code: "ERR_SCRIPT_EXECUTION_TIMEOUT" });
+      }
+      return runInContext.call(this, context, { ...runOptions, timeout: undefined });
+    });
+    return { requested };
+  }
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("A. still returns correct results for normal patterns, requesting the production limit", () => {
+    const { requested } = controlClocks();
     const guard = new RegexGuard();
     expect(guard.test(/\b\d{6}\b/u, "code 482913")).toBe(true);
     expect(guard.exec(/code (\d+)/u, "code 77")?.[1]).toBe("77");
+    expect(guard.test(/\b\d{6}\b/u, "code 12")).toBe(false);
+    expect(guard.exec(/code (\d+)/u, "nothing")).toBeNull();
     expect(guard.timedOut).toBe(false);
+    // Every execution asked the vm for the production per-regex limit.
+    expect(requested).toEqual([DEFAULT_REGEX_TIMEOUT_MS, DEFAULT_REGEX_TIMEOUT_MS, DEFAULT_REGEX_TIMEOUT_MS, DEFAULT_REGEX_TIMEOUT_MS]);
+  });
+
+  it("B. a regex interrupted by the per-execution limit is a non-match and is reported", () => {
+    controlClocks({ timesOut: (call) => call === 0, elapsedMs: (call) => (call === 0 ? DEFAULT_REGEX_TIMEOUT_MS : 0) });
+    const guard = new RegexGuard();
+    expect(guard.test(/(a|a)+$/u, "aaaa!")).toBe(false);
+    expect(guard.timedOut).toBe(true);
+    // The next (normal) regex still runs while budget remains.
+    expect(guard.exec(/code (\d+)/u, "code 77")?.[1]).toBe("77");
+  });
+
+  it("B. once the evaluation budget is spent, the remaining regexes are not executed at all", () => {
+    const { requested } = controlClocks({ elapsedMs: () => DEFAULT_REGEX_BUDGET_MS });
+    const guard = new RegexGuard();
+    expect(guard.test(/\b\d{6}\b/u, "code 482913")).toBe(true); // runs, and spends the whole budget
+    expect(guard.test(/\b\d{6}\b/u, "code 482913")).toBe(false); // skipped
+    expect(guard.exec(/code (\d+)/u, "code 77")).toBeNull(); // skipped
+    expect(guard.timedOut).toBe(true);
+    expect(requested).toHaveLength(1);
+  });
+
+  it("B. the per-execution limit never exceeds the remaining budget", () => {
+    const { requested } = controlClocks({ elapsedMs: (call) => (call === 0 ? DEFAULT_REGEX_BUDGET_MS - 10 : 0) });
+    const guard = new RegexGuard();
+    guard.test(/a/u, "a");
+    guard.test(/a/u, "a");
+    expect(requested).toEqual([DEFAULT_REGEX_TIMEOUT_MS, 10]);
   });
 });
 

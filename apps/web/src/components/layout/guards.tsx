@@ -26,6 +26,28 @@ export function RequireAuth() {
   return <Outlet />;
 }
 
+/**
+ * EmailBot V2 phase 7: signed-in users who have not accepted the CURRENT Terms and Privacy Policy (existing users,
+ * accounts created outside the web sign-up, or an older accepted version) see the acceptance screen instead of the
+ * panel, onboarding or administration. The API decides (GET /api/me `legal`) and records the acceptance.
+ */
+export function RequireLegalAcceptance() {
+  const { loading, error, legalAcceptanceRequired } = useOrganization();
+  const location = useLocation();
+  if (loading) return <FullScreenLoader />;
+  if (error) {
+    return (
+      <div className="mx-auto mt-24 max-w-md p-4">
+        <ErrorMessage error={new Error(getErrorMessage(error))} />
+      </div>
+    );
+  }
+  if (legalAcceptanceRequired) {
+    return <Navigate to="/legal/accept" replace state={{ from: `${location.pathname}${location.search}` }} />;
+  }
+  return <Outlet />;
+}
+
 /** Only for signed-out users (login, register...). */
 export function RedirectIfAuthenticated() {
   const { session, loading, passwordRecovery } = useAuth();

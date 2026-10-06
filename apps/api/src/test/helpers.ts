@@ -1,6 +1,6 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { SecretBox } from "@emailbot/shared";
-import type { OrganizationRole, OrganizationStatus } from "@emailbot/types";
+import { CURRENT_LEGAL_VERSIONS, LEGAL_DOCUMENTS, type OrganizationRole, type OrganizationStatus } from "@emailbot/types";
 import { vi } from "vitest";
 import { buildApp } from "../app.js";
 import type { ApiConfig } from "../config/env.js";
@@ -94,7 +94,12 @@ export function createFakePrivileged(): { [K in keyof PrivilegedOperations]: Ret
     getPortalAttachment: unexpected("privileged.getPortalAttachment"),
     listPortalFilters: unexpected("privileged.listPortalFilters"),
     portalSyncScope: unexpected("privileged.portalSyncScope"),
-    hasActiveMailbox: vi.fn(async () => true)
+    hasActiveMailbox: vi.fn(async () => true),
+    // Phase 7: every test user has accepted the current legal versions unless a test says otherwise.
+    listLegalAcceptances: vi.fn(async (_userId: string) =>
+      LEGAL_DOCUMENTS.map((document) => ({ document, version: CURRENT_LEGAL_VERSIONS[document] }))
+    ),
+    recordLegalAcceptance: unexpected("privileged.recordLegalAcceptance")
   };
 }
 

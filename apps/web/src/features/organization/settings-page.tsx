@@ -35,8 +35,10 @@ const settingsSchema = z.object({
   autoProcessingEnabled: z.boolean(),
   processAttachments: z.boolean(),
   notificationsEnabled: z.boolean(),
-  emailNotificationsEnabled: z.boolean(),
-  retentionDays: z.string().regex(/^$|^\d{1,5}$/, "Número de días o vacío"),
+  // Not shown (EmailBot V2 phase 7), so the panel does not offer what does not exist:
+  //  - email notifications: never implemented (no outbound mail provider); removed from the API and the rules contract.
+  //  - email retention days: nothing deletes emails by age (field removed from the API).
+  //  Both database columns stay unused (no destructive migration).
   defaultInboxFilter: z.enum(INBOX_FILTERS)
 });
 
@@ -89,14 +91,12 @@ function SettingsCard({ settings, canEdit }: { settings: OrganizationSettings; c
       autoProcessingEnabled: settings.autoProcessingEnabled,
       processAttachments: settings.processAttachments,
       notificationsEnabled: settings.notificationsEnabled,
-      emailNotificationsEnabled: settings.emailNotificationsEnabled,
-      retentionDays: settings.emailRetentionDays === null ? "" : String(settings.emailRetentionDays),
       defaultInboxFilter: settings.defaultInboxFilter
     }
   });
 
-  const onSubmit = form.handleSubmit(async ({ retentionDays, ...values }) => {
-    const patch: SettingsPatch = { ...values, emailRetentionDays: retentionDays ? Number(retentionDays) : null };
+  const onSubmit = form.handleSubmit(async (values) => {
+    const patch: SettingsPatch = { ...values };
     await updateSettings.mutateAsync(patch);
     toast.success("Configuración guardada");
   });
@@ -126,22 +126,9 @@ function SettingsCard({ settings, canEdit }: { settings: OrganizationSettings; c
                 ))}
               </Select>
             </Field>
-            <Field
-              label="Retención de correos (días)"
-              htmlFor="settings-retention"
-              hint="Vacío = sin límite."
-              error={form.formState.errors.retentionDays?.message}
-            >
-              <Input id="settings-retention" inputMode="numeric" {...form.register("retentionDays")} />
-            </Field>
             <CheckboxCard label="Procesamiento automático" description="Evaluar reglas con cada correo nuevo." {...form.register("autoProcessingEnabled")} />
             <CheckboxCard label="Guardar adjuntos" description="Almacenar el contenido de adjuntos en Storage privado." {...form.register("processAttachments")} />
             <CheckboxCard label="Notificaciones" description="Notificaciones en la aplicación de las reglas." {...form.register("notificationsEnabled")} />
-            <CheckboxCard
-              label="Notificaciones por correo"
-              description="Preferencia guardada; el envío por email aún no está implementado."
-              {...form.register("emailNotificationsEnabled")}
-            />
             {canEdit ? (
               <div className="sm:col-span-2">
                 <Button type="submit" disabled={updateSettings.isPending || !form.formState.isDirty}>

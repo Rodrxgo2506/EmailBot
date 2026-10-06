@@ -5,6 +5,7 @@ import { AppError, unwrap } from "../../lib/errors.js";
 import type { PrivilegedOperations } from "../types.js";
 import { portalSessionOperations } from "./customer-access-repositories.js";
 import { portalDataOperations } from "./delivery-repositories.js";
+import { legalAcceptanceOperations } from "./legal-repositories.js";
 import { EMAIL_ACCOUNT_COLUMNS, toEmailAccount, type Row } from "./mappers.js";
 
 /**
@@ -27,6 +28,7 @@ export function privilegedOperations(service: SupabaseClient): PrivilegedOperati
   return {
     ...portalSessionOperations(service),
     ...portalDataOperations(service),
+    ...legalAcceptanceOperations(service),
     async findProfileIdByEmail(email) {
       const row = unwrap(
         await service.from("profiles").select("id").eq("email", email.trim().toLowerCase()).limit(1).maybeSingle()

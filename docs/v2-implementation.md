@@ -855,7 +855,9 @@ afectado.
 ## Fase 7: calidad y lanzamiento
 
 Roadmap aprobado (§27, F7): política de privacidad V2, realtime del portal, E2E y documentación. Gmail watch ya se
-implementó en la fase 5.6. Sin migraciones ni variables de entorno nuevas.
+implementó en la fase 5.6. Tres migraciones aditivas (`20261005130000_legal_acceptances`,
+`20261005130100_legal_reacceptance` y `20261005130200_legal_signup_server_versions`, aceptación de los documentos
+legales); sin variables de entorno nuevas.
 
 ### Política de privacidad y términos V2
 
@@ -876,6 +878,111 @@ entrega segura del Access ID), las reglas del portal y la administración de la 
 enlaza ambos documentos. `legal.test.tsx` comprueba que el texto refleja el código (dominio, scope, Pub/Sub, portal,
 duraciones, cookies). Los textos los redacta el equipo técnico a partir del código: **requieren revisión legal del
 titular** antes de usarlos para la verificación de Google.
+
+### Correcciones tras la revisión legal
+
+Versión 2.0 de ambos documentos (`TERMS_VERSION`, `PRIVACY_VERSION` y `LEGAL_LAST_UPDATED` en `legal-info.ts`; la
+fecha es la de la última modificación del contenido, no una fecha de publicación).
+
+- **Titular**: «REATEGUI RODRIGUEZ, RODRIGO FARID», persona natural con negocio, RUC 10733272231; EmailBot se
+  presenta como nombre del servicio (no como nombre comercial registrado). Contacto: correo de soporte y teléfono.
+  `SERVICE_FISCAL_ADDRESS` es `null` porque SUNAT no muestra domicilio fiscal: la línea no aparece hasta que se
+  complete con el dato oficial.
+- **Retención**: el campo «Retención de correos (días)» se quitó de Ajustes y `emailRetentionDays` del contrato de la
+  API (validación, tipo `OrganizationSettings`, mapper y ruta) porque nada borra correos por antigüedad: no tenía
+  ningún consumidor (ni worker, ni funciones SQL, ni jobs). La columna `organization_settings.email_retention_days` se
+  conserva sin uso (borrarla sería un cambio destructivo en producción). La política dice que no hay borrado
+  automático por antigüedad y da los plazos reales de las colas (`DEFAULT_JOB_OPTIONS`: hasta 24 horas completados,
+  hasta 7 días fallidos).
+- **Adjuntos**: metadatos siempre; el contenido solo con «Guardar adjuntos», fuera del cuerpo y hasta
+  `WORKER_MAX_ATTACHMENT_BYTES` (25 MB por defecto).
+- **Auditoría**: quién la genera (API, worker, portal), qué guarda (sin contraseñas, tokens ni contenido), quién la lee
+  (propietarios y administradores) y las dos excepciones a la protección contra cambios (anonimización del autor al
+  eliminar su cuenta, borrado con la organización).
+- **Ubicación y transferencias**: Supabase en Estados Unidos (región de Oregón, `us-west-2`), Render fuera del Perú
+  (la región del servicio no se deduce del repositorio y no se afirma), red de Cloudflare delante de Render (cabeceras
+  `CF-RAY` verificadas) e infraestructura de Google y Microsoft.
+- **Microsoft**: consultas periódicas (sin avisos push), scopes `Mail.Read`, `User.Read`, `offline_access`; los términos
+  ya no prometen «tiempo real».
+- **Ley aplicable**: legislación de la República del Perú, sin designar tribunal.
+
+**Aceptación expresa al registrarse.** El registro exige marcar «He leído y acepto los Términos y Condiciones y la
+Política de Privacidad» (enlaces a `/terms` y `/privacy`); `register.test.tsx` comprueba que sin la casilla no se llama
+a `signUp`. El navegador solo envía `legal_accepted: true` en los metadatos del registro (nunca versiones); el trigger
+`on_auth_user_legal_acceptance` (`private.record_signup_legal_acceptance`) graba en `public.legal_acceptances` las
+versiones **del servidor** (`private.current_legal_versions()`), con la hora de la base de datos y `source = 'signup'`.
+Cualquier versión que envíe el cliente (antigua, futura o mal formada) se ignora; sin `legal_accepted` igual al booleano
+JSON `true` no se graba nada. El registro va directo a Supabase Auth, así que el trigger es el lado servidor del
+registro: `private.current_legal_versions()` es un espejo de `CURRENT_LEGAL_VERSIONS` y
+`legal-acceptances.test.ts` falla si difieren (publicar una versión = cambiar la constante **y** añadir una migración
+que reemplace la función). Las aceptaciones se
+registran como eventos que no se pueden modificar mientras exista la cuenta (el trigger rechaza todo UPDATE y todo
+DELETE mientras el usuario exista) y se eliminan junto con el usuario (`ON DELETE CASCADE`). RLS activo; `anon` y
+`authenticated` no tienen ningún privilegio. El trigger nunca bloquea el registro: sin metadatos o con versiones mal
+formadas no graba nada. `handle_new_user` no cambia.
+
+**Re-aceptación tras el login (segunda barrera).** Cubre a los usuarios existentes, a las cuentas creadas fuera del
+registro web (administrador, Auth directo) y a quien aceptó una versión anterior:
+
+- Fuente única de versiones: `CURRENT_LEGAL_VERSIONS` en `@emailbot/types` (`packages/types/src/legal.ts`); la web
+  (`legal-info.ts`) y la API la importan, y la base de datos la replica para el registro (ver arriba). Publicar una
+  versión nueva = cambiar ese valor, `LEGAL_LAST_UPDATED` y la migración del espejo.
+- `GET /api/me` devuelve `legal: { termsVersion, privacyVersion, accepted }`. `accepted` exige una fila de **cada**
+  documento con la versión vigente exacta (`legalAcceptanceStatus`): 1.0 no cubre 2.0 y 2.0 no cubre 2.1. Si la
+  consulta falla, `/api/me` falla (no se salta la aceptación).
+- Web: `RequireLegalAcceptance` envuelve todas las rutas autenticadas (panel, onboarding y `/admin`); si `accepted` es
+  false lleva a `/legal/accept` (enlaces a ambos documentos, versión vigente, casilla obligatoria y «Aceptar y
+  continuar») y, tras aceptar, vuelve a la página pedida. Si la API no informa `legal` (API anterior), no bloquea.
+- `POST /api/me/legal-acceptance` con `{ termsVersion, privacyVersion }` (esquema estricto: cualquier otro campo, como
+  un `userId` o una fecha, da 400). Si no son las vigentes responde 409 `LEGAL_VERSION_OUTDATED` (página abierta antes
+  de publicar una versión nueva). Graba con el `service_role`, para el usuario del token verificado, las versiones del
+  servidor y `source = 'reacceptance'`; es idempotente.
+- Base de datos (`20261005130100`): `source` admite `reacceptance`; `service_role` recibe `SELECT` e `INSERT` solo de
+  las columnas `user_id`, `document`, `version` y `source`, así que `accepted_at` siempre es la hora de la base de
+  datos y el `id` lo genera ella. Sin funciones nuevas (la guarda de `service-role-privileges.test.ts` prohíbe
+  funciones `SECURITY DEFINER` ejecutables por `service_role` en `public`/`private`).
+- **Barrera en la API** (la autoridad; `apps/api/src/plugins/legal-acceptance.ts`): `authenticate` comprueba, después de
+  validar el token y antes de cualquier consulta de organización o datos, que el usuario aceptó las versiones vigentes;
+  si no, 403 `LEGAL_ACCEPTANCE_REQUIRED`. Cubre todas las rutas con sesión de usuario (organización, ajustes, correos,
+  reglas, categorías, bots, clientes, entregas, miembros, cuentas de correo, auditoría, onboarding, evento de login y
+  `/api/admin/*`) y el handshake del Socket.IO del panel. Excepciones explícitas por ruta
+  (`config.allowWithoutLegalAcceptance`): `GET /api/me` y `POST /api/me/legal-acceptance`. Sin sesión de usuario y
+  por tanto fuera: `/health`, webhooks (Gmail/Microsoft), portal de clientes (cookie de sesión de cliente), callback
+  OAuth (estado firmado). El worker no pasa por la API. Caché por instancia solo de respuestas positivas (5 min; una
+  aceptación no se retira y las versiones nuevas llegan con un deploy, que vacía la caché); los rechazos se leen siempre
+  de la base de datos, así que aceptar surte efecto al instante.
+- Portal de clientes (`/api/portal/*`) fuera de la barrera, auditado: su identidad es una sesión de **cliente final**
+  (`customer_sessions`, creada con el Access ID de un registro de `customers`), no un usuario de Supabase. La cookie
+  `__Host-emailbot_portal` se valida con `portal.validate_session` (hash del token); las rutas del portal nunca leen
+  el `Authorization` y las del panel nunca leen la cookie. Alcance: solo las entregas de ese cliente (y sus adjuntos
+  y filtros) según la configuración de sus bots; nada de la organización (ajustes, reglas, miembros, cuentas) ni de
+  otros clientes. Emitir o regenerar un Access ID y gestionar sesiones de clientes son rutas del panel (con barrera),
+  así que un usuario sin aceptación no puede crear credenciales nuevas; quien posea un Access ID ya emitido actúa como
+  ese cliente, con su alcance, y la organización puede revocarlo. Los clientes finales quedan cubiertos por los
+  términos (§1) y el login del portal enlaza ambos documentos.
+- Administradores de la plataforma: también deben aceptar. `/api/admin/*` usa la misma sesión de usuario de Supabase y
+  da acceso a metadatos de todas las organizaciones (lo más sensible); la web ya exigía la aceptación en `/admin`. La
+  barrera se comprueba antes que `requirePlatformAdmin`, así que un usuario normal sin aceptación no llega a saber si la
+  consola existe para él.
+- Web: el evento de login (`/api/me/login-event`) se envía después de la aceptación; un 403
+  `LEGAL_ACCEPTANCE_REQUIRED` en cualquier consulta vuelve a leer `/api/me` (por ejemplo, si se publica una versión con
+  el panel abierto) y aparece la pantalla de aceptación.
+
+### Opciones de Ajustes sin implementación
+
+- «Notificaciones por correo» se eliminó: nunca hubo proveedor de correo saliente. `emailNotificationsEnabled` salió de
+  la interfaz y del contrato de ajustes de la API (validación, tipo `OrganizationSettings`, mapper y ruta; enviarlo
+  solo da 400, junto a otros campos se ignora). La columna `organization_settings.email_notifications_enabled` se
+  conserva sin uso (sin migración destructiva).
+- El canal `email` de la acción `NOTIFY` se eliminó del contrato (`NOTIFICATION_CHANNELS = ["in_app"]` en
+  `@emailbot/validation`; `NotificationJob` y `NotificationRequest` solo `in_app`; el worker ya no lee
+  `email_notifications_enabled`). Crear o editar una regla con `channel: "email"` da 400. Las reglas guardadas antes
+  pueden contenerlo: al leerlas (worker `parseRuleRow` y API `toRule`) se descarta solo esa acción
+  (`withoutLegacyEmailNotifications`); si no, la regla entera dejaría de validar y el worker la saltaría. Un trabajo de
+  notificación `email` aún en cola se descarta (`skipped_unsupported_channel`), como antes.
+- «Retención de correos (días)»: ver arriba.
+- Dashboard: «Los correos procesados aparecerán aquí automáticamente.» (antes prometía «tiempo real», falso para
+  Microsoft, que se consulta periódicamente).
 
 ### Realtime del portal
 
