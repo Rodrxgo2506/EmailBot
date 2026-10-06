@@ -46,7 +46,9 @@ const params = {
   stuckBefore: iso(-30 * MINUTE),
   failedSince: iso(-24 * 60 * MINUTE)
 };
-const counts = (watch: boolean) => privileged.syncHealthCounts({ ...params, watchExpiringBefore: watch ? iso(12 * 60 * MINUTE) : null });
+// `push`: Gmail watch and Microsoft subscription checks on (both warn 12 h before expiry).
+const counts = (push: boolean) =>
+  privileged.syncHealthCounts({ ...params, watchExpiringBefore: push ? iso(12 * 60 * MINUTE) : null, microsoftSubscriptionsBefore: push ? iso(12 * 60 * MINUTE) : null });
 
 /* ------------------------------------------------------------------ fixtures (SQL as postgres, local container) */
 
@@ -127,6 +129,10 @@ try {
   const errored = mailbox(active, "error", { status: "ERROR", syncedMinutesAgo: 600 });
   mailbox(active, "error-ms", { provider: "MICROSOFT", status: "ERROR", syncedMinutesAgo: null });
   mailbox(active, "paused", { status: "PAUSED", syncedMinutesAgo: 600, errorCode: "X", watchExpiresInHours: 1 });
+  // F9: Microsoft mailboxes (fresh syncs) with a valid, missing and expiring Graph subscription.
+  mailbox(active, "ms-subscribed", { provider: "MICROSOFT", status: "ACTIVE", syncedMinutesAgo: 2, watchExpiresInHours: 50 });
+  mailbox(active, "ms-missing", { provider: "MICROSOFT", status: "ACTIVE", syncedMinutesAgo: 2 });
+  mailbox(active, "ms-expiring", { provider: "MICROSOFT", status: "ACTIVE", syncedMinutesAgo: 2, watchExpiresInHours: 6 });
 
   email(active, fresh, "received-recent", { status: "RECEIVED", createdMinutesAgo: 5 });
   email(active, fresh, "received-old", { status: "RECEIVED", createdMinutesAgo: 31 });
@@ -147,6 +153,7 @@ try {
     const inactive = organization(label, status);
     const box = mailbox(inactive, `${label}-active`, { status: "ACTIVE", syncedMinutesAgo: 600, errorCode: "X", watchExpiresInHours: 1 });
     mailbox(inactive, `${label}-error`, { status: "ERROR", syncedMinutesAgo: 600 });
+    mailbox(inactive, `${label}-ms`, { provider: "MICROSOFT", status: "ACTIVE", syncedMinutesAgo: 600 });
     email(inactive, box, `${label}-stuck`, { status: "RECEIVED", createdMinutesAgo: 60 });
     email(inactive, box, `${label}-failed`, { status: "FAILED", createdMinutesAgo: 60, updatedMinutesAgo: 30 });
   }
@@ -156,15 +163,21 @@ try {
   const afterWithWatch = await counts(true);
   const delta = (key: keyof SyncHealthCounts) => after[key] - must(before, "baseline")[key];
 
-  check(delta("monitored") === 3, "monitored: ACTIVE Gmail mailboxes of the ACTIVE organization only", `+${delta("monitored")}`);
+  check(delta("monitored") === 6, "monitored: ACTIVE Gmail / Microsoft mailboxes of the ACTIVE organization only", `+${delta("monitored")}`);
   check(delta("errored") === 2, "errored: Gmail + Microsoft mailboxes in ERROR of the ACTIVE organization only", `+${delta("errored")}`);
   check(delta("stale") === 2, "stale: synced 90 min ago and never synced (created 2 h ago); not the fresh one", `+${delta("stale")}`);
   check(delta("erroring") === 1, "erroring: ACTIVE mailbox with last_error_code; not the paused one", `+${delta("erroring")}`);
   check(delta("watchExpiring") === 0, "watchExpiring: 0 when Gmail push is off", `+${delta("watchExpiring")}`);
   check(
     afterWithWatch.watchExpiring - beforeWithWatch.watchExpiring === 1,
-    "watchExpiring with push: only the ACTIVE mailbox whose watch ends within 12 h",
+    "watchExpiring with push: only the ACTIVE Gmail mailbox whose watch ends within 12 h",
     `+${afterWithWatch.watchExpiring - beforeWithWatch.watchExpiring}`
+  );
+  check(delta("subscriptionIssues") === 0, "subscriptionIssues: 0 when Microsoft push is off", `+${delta("subscriptionIssues")}`);
+  check(
+    afterWithWatch.subscriptionIssues - beforeWithWatch.subscriptionIssues === 2,
+    "subscriptionIssues with push: ACTIVE Microsoft mailboxes without a subscription or expiring within 12 h (not the valid one, not inactive organizations)",
+    `+${afterWithWatch.subscriptionIssues - beforeWithWatch.subscriptionIssues}`
   );
   check(delta("stuckEmails") === 2, "stuckEmails: RECEIVED / PROCESSING older than 30 min, on ACTIVE mailboxes", `+${delta("stuckEmails")}`);
   check(delta("failedEmails") === 2, "failedEmails: FAILED in the last 24 h (not the one from 25 h ago)", `+${delta("failedEmails")}`);

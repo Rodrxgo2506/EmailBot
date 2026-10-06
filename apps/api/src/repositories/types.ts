@@ -424,8 +424,36 @@ export interface PrivilegedOperations {
   listLegalAcceptances(userId: string): Promise<LegalAcceptanceRecord[]>;
   /** Idempotent: an already recorded (user, document, version) keeps its original row and time. */
   recordLegalAcceptance(userId: string, versions: Readonly<Record<LegalDocument, string>>): Promise<void>;
-  /** F8-A / F8-B: GET /health/sync. Counts only (no ids, addresses or content); watchExpiringBefore null = Gmail push off (watchExpiring 0). */
-  syncHealthCounts(input: { staleBefore: string; watchExpiringBefore: string | null; stuckBefore: string; failedSince: string }): Promise<SyncHealthCounts>;
+  /**
+   * F8-A / F8-B / F9: GET /health/sync. Counts only (no ids, addresses or content);
+   * watchExpiringBefore null = Gmail push off; microsoftSubscriptionsBefore null = Microsoft push off.
+   */
+  syncHealthCounts(input: {
+    staleBefore: string;
+    watchExpiringBefore: string | null;
+    stuckBefore: string;
+    failedSince: string;
+    microsoftSubscriptionsBefore: string | null;
+  }): Promise<SyncHealthCounts>;
+  /*
+   * F9: Microsoft Graph change-notification subscriptions (provider_metadata
+   * subscription id + clientState SHA-256; expiry in watch_expires_at).
+   */
+  /** The account a subscription belongs to and the stored clientState hash (webhook validation). */
+  findMicrosoftSubscription(subscriptionId: string): Promise<{
+    emailAccountId: string;
+    organizationId: string;
+    accountStatus: EmailAccountStatus;
+    organizationStatus: OrganizationStatus;
+    clientStateHash: string | null;
+  } | null>;
+  /** Encrypted credentials + subscription id, to delete the subscription before a disconnection wipes the tokens. */
+  getMicrosoftSubscriptionCredentials(
+    organizationId: string,
+    id: string
+  ): Promise<{ subscriptionId: string | null; accessTokenEncrypted: string | null; refreshTokenEncrypted: string | null; tokenExpiresAt: string | null } | null>;
+  /** Forgets the subscription (provider_metadata keys + watch_* columns); other metadata is kept. */
+  clearMicrosoftSubscription(organizationId: string, id: string): Promise<void>;
 }
 
 /* ------------------------------------------------------------------ platform administration (V2 phase 6) */

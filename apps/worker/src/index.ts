@@ -35,6 +35,7 @@ import { handleAccountFailure, NonRetryableError } from "./pipeline/failures.js"
 import { handleEmailEvent, SyncBusyError, type HandleEventDeps } from "./pipeline/handle-email-event.js";
 import { deliverNotification } from "./pipeline/notify.js";
 import { processEmail, type ProcessEmailDeps } from "./pipeline/process-email.js";
+import { createMicrosoftSubscriptionClient } from "./providers/microsoft/subscriptions.js";
 import { createProviderRegistry } from "./providers/registry.js";
 import type { WorkerAccount } from "./providers/types.js";
 
@@ -119,7 +120,9 @@ const eventDeps: Omit<HandleEventDeps, "logger"> = {
   enqueueWatch: (account) => queues.enqueueWatch(account),
   lock: createRedisSyncLock(connection),
   audit: auditRecorder,
-  watchTopic: config.gmailPubSubTopic
+  watchTopic: config.gmailPubSubTopic,
+  microsoftPush: config.microsoftPush,
+  microsoftSubscriptions: createMicrosoftSubscriptionClient(providerFetch)
 };
 
 /**
@@ -245,8 +248,9 @@ try {
     await queues.emailEvents.removeJobScheduler(POLL_SCHEDULER_ID);
   }
 
-  // Gmail push: renew watches before they expire (7 days). Polling covers accounts without a valid watch.
-  if (config.gmailPubSubTopic) {
+  // Push subscriptions (Gmail watches: 7 days; Microsoft Graph subscriptions: ~70 h) are renewed
+  // before they expire. Polling (above) keeps covering accounts without a valid subscription.
+  if (config.gmailPubSubTopic || config.microsoftPush) {
     await queues.emailEvents.upsertJobScheduler(
       "renew-gmail-watches",
       { every: config.watchRenewIntervalMinutes * 60_000 },
@@ -277,6 +281,7 @@ logger.info(
     queues: Object.values(QUEUE_NAMES),
     pollIntervalMinutes: config.pollIntervalMinutes,
     gmailPush: Boolean(config.gmailPubSubTopic),
+    microsoftPush: Boolean(config.microsoftPush),
     providersConfigured: { gmail: Boolean(config.oauth.GMAIL), microsoft: Boolean(config.oauth.MICROSOFT) },
     // One-way identifier (not part of the key): must match the API's to decrypt its tokens.
     tokenEncryptionKeyFingerprint: encryptionKeyFingerprint(config.tokenEncryptionKey)

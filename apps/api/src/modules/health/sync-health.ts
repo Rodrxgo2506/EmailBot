@@ -17,8 +17,9 @@
  *   503 down/stale        more than half of the ACTIVE mailboxes are stale: the
  *                         pipeline is stopped. With a single ACTIVE mailbox,
  *                         that mailbox being stale is enough.
- *   200 degraded/degraded some mailbox is in ERROR, stale, failing or its Gmail
- *                         watch is about to expire, or emails are stuck
+ *   200 degraded/degraded some mailbox is in ERROR, stale, failing, its Gmail
+ *                         watch is about to expire or (Microsoft push on) its
+ *                         Graph subscription is missing or about to expire, or emails are stuck
  *                         (RECEIVED / PROCESSING for more than 30 min) or failed
  *                         in the last 24 h; most of the pipeline still works.
  *                         A monitor can alert on the "degraded" keyword.
@@ -37,6 +38,11 @@ export interface SyncHealthCounts {
   erroring: number;
   /** Monitored Gmail accounts whose push watch expires within WATCH_EXPIRY_WARNING_MS (or has expired); 0 without Gmail push. */
   watchExpiring: number;
+  /**
+   * Monitored Microsoft accounts whose Graph subscription is missing, or expires
+   * within WATCH_EXPIRY_WARNING_MS (or has expired); 0 without Microsoft push.
+   */
+  subscriptionIssues: number;
   /** Emails still RECEIVED / PROCESSING STUCK_EMAIL_MS after they were stored (ACTIVE accounts of ACTIVE organizations). */
   stuckEmails: number;
   /** Emails that became FAILED in the last FAILED_EMAIL_WINDOW_MS (ACTIVE organizations). */
@@ -92,7 +98,7 @@ export function evaluateSyncHealth(counts: SyncHealthCounts): SyncHealthResult {
   if (counts.monitored + counts.errored === 0) return { statusCode: 200, body: { status: "ok", sync: "idle" } };
   if (counts.monitored === 0) return { statusCode: 503, body: { status: "down", sync: "error" } };
   if (counts.stale * 2 > counts.monitored) return { statusCode: 503, body: { status: "down", sync: "stale" } };
-  const problems = [counts.errored, counts.stale, counts.erroring, counts.watchExpiring, counts.stuckEmails, counts.failedEmails];
+  const problems = [counts.errored, counts.stale, counts.erroring, counts.watchExpiring, counts.subscriptionIssues, counts.stuckEmails, counts.failedEmails];
   if (problems.some((count) => count > 0)) return { statusCode: 200, body: { status: "degraded", sync: "degraded" } };
   return { statusCode: 200, body: { status: "ok", sync: "healthy" } };
 }

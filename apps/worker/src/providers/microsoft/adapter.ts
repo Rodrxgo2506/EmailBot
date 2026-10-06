@@ -12,9 +12,14 @@ import { normalizeGraphMessage } from "./normalize.js";
  *   - the @odata.deltaLink returned by the previous round.
  *
  * Status: implemented against the documented API and unit-tested with
- * mocked HTTP; not yet exercised against a live mailbox. Change-notification
- * subscriptions (POST /subscriptions, renewed before expiry) are NOT created
- * yet; the polling scheduler covers it in the meantime.
+ * mocked HTTP; not yet exercised against a live mailbox. Push (F9): Graph
+ * change-notification subscriptions (./subscriptions.ts) only TRIGGER this
+ * delta sync; the polling scheduler stays as the safety net.
+ *
+ * Message ids are Graph's default ids (they change if a message moves to
+ * another folder). Switching to Prefer: IdType="ImmutableId" would change the
+ * provider_message_id of stored mail and break deduplication against it: a
+ * pending decision, not done here.
  */
 
 const GRAPH = "https://graph.microsoft.com/v1.0";

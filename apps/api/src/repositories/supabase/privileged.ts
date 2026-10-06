@@ -6,6 +6,7 @@ import type { PrivilegedOperations } from "../types.js";
 import { portalSessionOperations } from "./customer-access-repositories.js";
 import { portalDataOperations } from "./delivery-repositories.js";
 import { legalAcceptanceOperations } from "./legal-repositories.js";
+import { microsoftSubscriptionOperations } from "./microsoft-subscription-repositories.js";
 import { syncHealthOperations } from "./sync-health-repositories.js";
 import { EMAIL_ACCOUNT_COLUMNS, toEmailAccount, type Row } from "./mappers.js";
 
@@ -31,6 +32,7 @@ export function privilegedOperations(service: SupabaseClient): PrivilegedOperati
     ...portalDataOperations(service),
     ...legalAcceptanceOperations(service),
     ...syncHealthOperations(service),
+    ...microsoftSubscriptionOperations(service),
     async findProfileIdByEmail(email) {
       const row = unwrap(
         await service.from("profiles").select("id").eq("email", email.trim().toLowerCase()).limit(1).maybeSingle()

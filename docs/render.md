@@ -149,7 +149,7 @@ Leyenda: **SECRET** = nunca en logs, repositorio ni bundle; se introduce con `sy
 | `GMAIL_PUBSUB_OIDC_AUDIENCE` | PUBLIC · API ONLY | push de Gmail (V2): `https://api.emailbot.app/webhooks/gmail`, idéntica a la audiencia de la suscripción |
 | `GMAIL_PUBSUB_SERVICE_ACCOUNT` | PUBLIC · API ONLY | push de Gmail (V2): cuenta de servicio OIDC de la suscripción; junto con la anterior |
 | `GMAIL_PUBSUB_VERIFICATION_TOKEN` | SECRET · API ONLY | heredada, no recomendada: si existe, todo push sin `?token=` recibe 401 |
-| `MICROSOFT_WEBHOOK_CLIENT_STATE` | SECRET · API ONLY | más adelante |
+| `MICROSOFT_GRAPH_PUSH_ENABLED` | PUBLIC · API ONLY | push de Microsoft (F9): `true` activa `POST /webhooks/microsoft` (+ `/lifecycle`) y la vigilancia de suscripciones en `/health/sync`. Requiere `MICROSOFT_CLIENT_*`. Por defecto `false` (rutas en 404). Sin secreto compartido: cada suscripción tiene su propio `clientState` |
 
 ### Solo worker
 
@@ -158,7 +158,8 @@ Leyenda: **SECRET** = nunca en logs, repositorio ni bundle; se introduce con `sy
 | `WORKER_EVENTS_CONCURRENCY`, `WORKER_PROCESSING_CONCURRENCY` | PUBLIC · WORKER ONLY | 5 / 10 |
 | `WORKER_POLL_INTERVAL_MINUTES` | PUBLIC · WORKER ONLY | 5 (recuperación; no poner 0: con 0 no hay *scheduler* de sondeo y `/health/sync` no puede detectar un worker parado) |
 | `GMAIL_PUBSUB_TOPIC` | PUBLIC · WORKER ONLY | push de Gmail (V2): `projects/<proyecto>/topics/<topic>`; sin ella, solo polling |
-| `WORKER_WATCH_RENEW_INTERVAL_MINUTES` | PUBLIC · WORKER ONLY | 60 por defecto; no definir |
+| `MICROSOFT_GRAPH_NOTIFICATION_URL` | PUBLIC · WORKER ONLY | push de Microsoft (F9): URL https pública de `POST /webhooks/microsoft` de la API (`<API_PUBLIC_URL>/webhooks/microsoft`); el ciclo de vida usa `<URL>/lifecycle`. Requiere `MICROSOFT_CLIENT_*`. Sin ella, solo polling. Activarla a la vez que `MICROSOFT_GRAPH_PUSH_ENABLED=true` en la API (la API primero) |
+| `WORKER_WATCH_RENEW_INTERVAL_MINUTES` | PUBLIC · WORKER ONLY | 60 por defecto; renueva watches de Gmail y suscripciones de Microsoft; no definir |
 | `WORKER_MAX_ATTACHMENT_BYTES` | PUBLIC · WORKER ONLY | 25 MiB |
 | `WORKER_HEALTH_PORT`, `WORKER_HEALTH_HOST` | PUBLIC · WORKER ONLY | no definir en Render |
 

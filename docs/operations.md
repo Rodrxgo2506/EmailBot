@@ -30,9 +30,9 @@ Se evalúan en este orden; el primero que se cumple es la respuesta.
 | 503 | `down` / `unavailable` | Redis o la base de datos no responden: nada puede sincronizar | [7](#7-redis-unavailable) |
 | 503 | `down` / `stalled` | el *scheduler* `poll-active-accounts` lleva más de dos intervalos sin ejecutarse: el worker está parado, colgado o no da abasto | [5](#5-worker-stalled) |
 | 200 | `ok` / `idle` | no hay buzones sincronizables (Gmail/Microsoft de organizaciones `ACTIVE`, en `ACTIVE` o `ERROR`) | — |
-| 503 | `down` / `error` | **todos** los buzones sincronizables están en `ERROR` (autorización perdida) | [6](#6-cuenta-gmail-en-error) |
+| 503 | `down` / `error` | **todos** los buzones sincronizables están en `ERROR` (autorización perdida) | [6](#6-cuenta-gmail-o-microsoft-en-error) |
 | 503 | `down` / `stale` | más de la mitad de los buzones `ACTIVE` sin sincronizar en `SYNC_HEALTH_STALE_MINUTES` (20 min) | [4](#4-sync-stale) |
-| 200 | `degraded` / `degraded` | algún buzón en `ERROR`, atrasado o con error reciente; un *watch* de Gmail a < 12 h de caducar; correos en `RECEIVED`/`PROCESSING` hace más de 30 min; o correos `FAILED` en las últimas 24 h | 4, 6, [10](#10-bullmq) |
+| 200 | `degraded` / `degraded` | algún buzón en `ERROR`, atrasado o con error reciente; un *watch* de Gmail a < 12 h de caducar; una cuenta Microsoft sin suscripción de Graph o con ella a < 12 h de caducar (push activado); correos en `RECEIVED`/`PROCESSING` hace más de 30 min; o correos `FAILED` en las últimas 24 h | 4, 6, [6b](#6b-microsoft-graph-notificaciones-de-cambio-f9), [10](#10-bullmq) |
 | 200 | `ok` / `healthy` | todo en orden | — |
 
 `degraded` nunca es 503: un único buzón roto (entre dos o más) o unos pocos correos fallidos no tumban el
@@ -95,7 +95,7 @@ Síntomas: M1 o M5 en rojo; la web muestra errores de red.
 
 `WORKER_POLL_INTERVAL_MINUTES=0` elimina el *scheduler*: no se detecta `stalled` (no poner 0).
 
-## 6. Cuenta Gmail en ERROR
+## 6. Cuenta Gmail (o Microsoft) en ERROR
 
 El buzón perdió la autorización (token revocado o caducado, contraseña de Google cambiada…): el worker lo marca
 `ERROR` y deja de sincronizarlo. `degraded` si hay otros buzones sanos; `down/error` (503) si todos están en
@@ -134,6 +134,60 @@ El buzón perdió la autorización (token revocado o caducado, contraseña de Go
 - *Database → Backups*: copias diarias (plan Pro, retención de 7 días); PITR no está activado.
 - Correos atascados o fallidos (sección 10): consulta de solo lectura en el *SQL Editor*, por ejemplo
   `select processing_status, count(*) from public.emails where updated_at > now() - interval '24 hours' group by 1;`.
+
+## 6b. Microsoft Graph: notificaciones de cambio (F9)
+
+Equivalente del push de Gmail para buzones de Microsoft 365 / Outlook. **Desactivado** mientras no se configure
+(`MICROSOFT_GRAPH_PUSH_ENABLED` en la API y `MICROSOFT_GRAPH_NOTIFICATION_URL` en el worker); sin ellas los buzones
+Microsoft se sincronizan solo por sondeo cada 5 minutos.
+
+```
+Microsoft 365 → Graph change notification → POST /webhooks/microsoft → MICROSOFT_NOTIFICATION
+  → enqueueSync (GRAPH, coalescido) → syncAccount (lock) → delta de la Inbox → processEmail
+Red de seguridad: POLL_ACCOUNTS cada 5 min (siempre activo)
+```
+
+- **Suscripción**: una por cuenta Microsoft `ACTIVE` con credenciales, recurso `me/mailFolders('inbox')/messages`,
+  `changeType: created`, creada por el worker (`WATCH_ACCOUNT`) con el token delegado de la cuenta (OAuth
+  *authorization code* + refresh token; sin *client credentials*). Se pide al conectar la cuenta y en cada pasada
+  de `RENEW_WATCHES`. Al crearla, Graph llama a la URL con `validationToken`: la API debe estar desplegada y
+  accesible por https antes.
+- **Duración y renovación**: se pide 70 h (Graph devuelve la caducidad real, guardada en `watch_expires_at`).
+  `RENEW_WATCHES` (cada hora) renueva con `PATCH` las que caducan en menos de 24 h; el `clientState` no cambia.
+  Si Graph responde 404 (ya no existe), se olvida y se crea otra con un `clientState` nuevo.
+- **Estado guardado** (sin migración): `provider_metadata.subscriptionId` y `subscriptionClientStateHash`
+  (SHA-256 del `clientState`), `watch_expires_at`, `watch_renewed_at`, `watch_error_code` / `watch_error_at`.
+  Visible en el panel de Super Admin (cuentas de correo de la organización: caducidad y último error).
+- **Ciclo de vida** (`/webhooks/microsoft/lifecycle`):
+  - `reauthorizationRequired` → la suscripción se marca como vencida y el job `WATCH_ACCOUNT` la renueva (renovar
+    la reautoriza);
+  - `subscriptionRemoved` → se olvida, se crea una nueva y se sincroniza la cuenta (por lo que llegara entretanto);
+  - `missed` → solo se sincroniza la cuenta: el delta recupera los cambios (nunca se reconstruyen mensajes desde la
+    notificación).
+- **Desconexión**: la API borra la suscripción en Graph (`DELETE`, con el token de la cuenta) **antes** de borrar los
+  tokens, y la olvida localmente. Un 404 o un fallo no impiden desconectar: la suscripción caduca sola (≤ 70 h) y
+  sus notificaciones se rechazan (suscripción desconocida).
+- **Logs** (`emailbot-worker`): `microsoft.subscription.created`, `renewed`, `missing`, `failed`,
+  `microsoft.lifecycle.*`; (`emailbot-api`): `microsoft.graph.received`, `microsoft.graph.rejected`,
+  `microsoft.lifecycle.received`, `microsoft.subscription.removed`. Con id de cuenta y hash corto de la suscripción;
+  nunca el `clientState` ni tokens.
+- **`/health/sync`**: con `MICROSOFT_GRAPH_PUSH_ENABLED`, una cuenta Microsoft `ACTIVE` sin suscripción o con la
+  suscripción a < 12 h de caducar da `degraded` (200). El sondeo sigue sincronizando mientras tanto.
+
+**Suscripción perdida o fallando** (`degraded`, `watch_error_code` en el panel de Super Admin):
+
+1. Logs del worker: `microsoft.subscription.failed` con `errorCode` (`HTTP_400`: Graph no pudo validar la URL —
+   comprobar que `MICROSOFT_GRAPH_NOTIFICATION_URL` apunta a la API desplegada y responde al handshake—;
+   `HTTP_403`: permisos / consentimiento).
+2. Comprobar el handshake: `curl -s -X POST "https://api.emailbot.app/webhooks/microsoft?validationToken=prueba"`
+   debe devolver `prueba` (con el push activado en la API).
+3. Se reintenta solo en la siguiente pasada de `RENEW_WATCHES` (cada hora); reconectar la cuenta también encola
+   `WATCH_ACCOUNT`. El correo sigue entrando por sondeo mientras tanto.
+4. Credenciales revocadas: la cuenta pasa a `ERROR` (sección 6) y la suscripción deja de renovarse.
+
+**Ids de mensaje**: se usan los ids normales de Graph (cambian si el mensaje se mueve de carpeta). Pasar a
+`Prefer: IdType="ImmutableId"` cambiaría el `provider_message_id` de lo ya guardado y rompería la deduplicación con
+esos correos: decisión pendiente, no aplicada.
 
 ## 10. BullMQ
 

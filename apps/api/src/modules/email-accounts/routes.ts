@@ -25,6 +25,7 @@ import { getAuth } from "../../plugins/auth.js";
 import { getOrganization, requirePermission } from "../../plugins/organization.js";
 import { removeStoredObjects } from "../emails/routes.js";
 import { fetchMailboxIdentity } from "./mailbox-identity.js";
+import { removeMicrosoftSubscription } from "./microsoft-subscription.js";
 
 const PROVIDERS: Record<"gmail" | "microsoft", OAuthProvider> = { gmail: "GMAIL", microsoft: "MICROSOFT" };
 
@@ -162,17 +163,16 @@ export function emailAccountRoutes(deps: AppDeps) {
             request.log.error({ err: serializeError(error) }, "failed to write audit log")
           );
 
-        if (provider === "GMAIL") {
-          // Push notifications (users.watch) are created by the worker; a still valid watch is kept.
-          await deps.queue
-            .enqueueEmailEvent(
-              { type: "WATCH_ACCOUNT", emailAccountId: account.id, organizationId },
-              { jobId: watchAccountJobId(account.id) }
-            )
-            .catch((error: unknown) =>
-              request.log.warn({ err: serializeError(error), emailAccountId: account.id }, "could not queue the Gmail watch; the renewal job will create it")
-            );
-        }
+        // Push notifications (Gmail users.watch, Microsoft Graph subscription) are created by the
+        // worker, only for an ACTIVE account with credentials and push configured; a still valid one is kept.
+        await deps.queue
+          .enqueueEmailEvent(
+            { type: "WATCH_ACCOUNT", emailAccountId: account.id, organizationId },
+            { jobId: watchAccountJobId(account.id) }
+          )
+          .catch((error: unknown) =>
+            request.log.warn({ err: serializeError(error), emailAccountId: account.id }, "could not queue the push subscription; the renewal job will create it")
+          );
 
         request.log.info({ organizationId, emailAccountId: account.id, provider }, "email account connected");
         return redirect({ oauth: "connected", provider: params.data.provider, accountId: account.id });
@@ -257,6 +257,9 @@ export function emailAccountRoutes(deps: AppDeps) {
       const current = await getAuth(request).repos.emailAccounts.get(organizationId, id);
       if (!current) throw notFound("Email account");
 
+      // F9: delete the Graph subscription while the account still has its tokens (best effort).
+      if (current.provider === "MICROSOFT") await removeMicrosoftSubscription(deps, organizationId, id, request.log);
+
       const account = await deps.privileged.disconnectEmailAccount(organizationId, id);
       if (!account) throw notFound("Email account");
 
@@ -304,6 +307,9 @@ export function emailAccountRoutes(deps: AppDeps) {
       if (account.status !== "DISCONNECTED") {
         throw conflict("Disconnect the account before deleting it", "ACCOUNT_NOT_DISCONNECTED");
       }
+
+      // F9: normally already removed at disconnection; covers older disconnections (best effort).
+      if (account.provider === "MICROSOFT") await removeMicrosoftSubscription(deps, organizationId, id, request.log);
 
       // Collected before the cascade deletes the rows; removed after it succeeded.
       const objects = await repos.attachments.listStoredObjects(organizationId, { accountId: id });

@@ -28,10 +28,12 @@ export const LOG_REDACT_PATHS = [
   "*.TOKEN_ENCRYPTION_KEY",
   // EmailBot V2 phase 4: customer Access IDs.
   "*.accessId",
+  // Microsoft Graph subscription secret (each subscription has its own).
+  "*.clientState",
   "req.body.accessId"
 ];
 
-const SENSITIVE_KEY = /pass(word)?|secret|token|authorization|cookie|api[-_]?key|service[-_]?role|credential/i;
+const SENSITIVE_KEY = /pass(word)?|secret|token|authorization|cookie|api[-_]?key|service[-_]?role|credential|client[-_]?state/i;
 
 /**
  * Deep-copies a value replacing sensitive keys with "[REDACTED]".

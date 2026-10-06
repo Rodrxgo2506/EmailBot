@@ -26,6 +26,7 @@ const counts = (overrides: Partial<SyncHealthCounts> = {}): SyncHealthCounts => 
   stale: 0,
   erroring: 0,
   watchExpiring: 0,
+  subscriptionIssues: 0,
   stuckEmails: 0,
   failedEmails: 0,
   ...overrides
@@ -232,15 +233,29 @@ describe("GET /health/sync", () => {
     });
   });
 
-  it("asks for stale mailboxes (20 min), stuck emails (30 min) and failed ones (24 h); without Gmail push, no watch check", async () => {
+  it("asks for stale mailboxes (20 min), stuck emails (30 min) and failed ones (24 h); without Gmail / Microsoft push, no watch / subscription check", async () => {
     const { privileged } = await setup();
     await get();
     expect(privileged.syncHealthCounts).toHaveBeenCalledWith({
       staleBefore: new Date(NOW - 20 * MINUTE).toISOString(),
       watchExpiringBefore: null,
       stuckBefore: new Date(NOW - 30 * MINUTE).toISOString(),
-      failedSince: new Date(NOW - 24 * 60 * MINUTE).toISOString()
+      failedSince: new Date(NOW - 24 * 60 * MINUTE).toISOString(),
+      microsoftSubscriptionsBefore: null
     });
+  });
+
+  it("with Microsoft push, Graph subscriptions missing or within 12 h of expiry are checked (renewed from 24 h)", async () => {
+    const { privileged } = await setup({ config: { microsoftGraphPushEnabled: true } });
+    await get();
+    expect(privileged.syncHealthCounts.mock.calls[0]?.[0]).toMatchObject({ microsoftSubscriptionsBefore: new Date(NOW + 12 * 60 * MINUTE).toISOString() });
+  });
+
+  it("a missing / expiring Microsoft subscription is degraded (200), never down: polling still syncs", async () => {
+    await setup({ counts: counts({ subscriptionIssues: 1 }) });
+    const response = await get();
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual(DEGRADED);
   });
 
   it("with Gmail push, only watches within 12 h of expiry count (the worker renews from 24 h, so a normal renewal window is not flagged)", async () => {

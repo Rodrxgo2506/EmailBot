@@ -30,7 +30,13 @@ export interface GmailNotificationJob {
   historyId: string;
 }
 
-/** Microsoft Graph change notification (clientState already verified). */
+/**
+ * Microsoft Graph change notification (clientState already verified by the
+ * API). Like a Gmail push it only TRIGGERS the account's sync: the delta
+ * cursor decides what is new. `messageId` (resourceData.id) is kept for the
+ * deterministic job id (a redelivered notification is the same job), never
+ * processed directly.
+ */
 export interface MicrosoftNotificationJob {
   type: "MICROSOFT_NOTIFICATION";
   subscriptionId: string;
@@ -38,8 +44,15 @@ export interface MicrosoftNotificationJob {
   messageId: string | null;
 }
 
+/** Microsoft Graph lifecycle notification (clientState already verified by the API). */
+export interface MicrosoftLifecycleJob {
+  type: "MICROSOFT_LIFECYCLE";
+  subscriptionId: string;
+  lifecycleEvent: "reauthorizationRequired" | "subscriptionRemoved" | "missed";
+}
+
 /** Why an account sync was requested (logs only; never authority). */
-export type SyncReason = "PUBSUB" | "POLL" | "MANUAL" | "PORTAL" | "CONTINUATION" | "CONNECT";
+export type SyncReason = "PUBSUB" | "GRAPH" | "POLL" | "MANUAL" | "PORTAL" | "CONTINUATION" | "CONNECT";
 
 /**
  * Account sync. Every ingestion path (Pub/Sub push, recovery polling, manual
@@ -54,14 +67,14 @@ export interface SyncAccountJob {
   reason?: SyncReason | undefined;
 }
 
-/** Create or renew the Gmail push subscription (users.watch) of one account. */
+/** Create or renew the push subscription of one account (Gmail users.watch / Microsoft Graph subscription). */
 export interface WatchAccountJob {
   type: "WATCH_ACCOUNT";
   emailAccountId: string;
   organizationId: string;
 }
 
-/** Periodic: enqueue WATCH_ACCOUNT for Gmail accounts whose watch is missing or expiring. */
+/** Periodic: enqueue WATCH_ACCOUNT for accounts whose push subscription is missing or expiring. */
 export interface RenewWatchesJob {
   type: "RENEW_WATCHES";
 }
@@ -82,6 +95,7 @@ export interface RecoverIncompleteJob {
 export type EmailEventJob =
   | GmailNotificationJob
   | MicrosoftNotificationJob
+  | MicrosoftLifecycleJob
   | SyncAccountJob
   | PollAccountsJob
   | RecoverIncompleteJob

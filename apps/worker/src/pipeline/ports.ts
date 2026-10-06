@@ -24,13 +24,28 @@ export interface AccountStore {
    * sync moved it meanwhile (nothing is overwritten, the cursor never goes back).
    */
   advanceSyncCursor(id: string, state: { from: string | null; to: string | null; lastSyncedAt: string }): Promise<boolean>;
-  /** Gmail users.watch state (phase 5.6). */
+  /** Push subscription state (Gmail users.watch, phase 5.6; Microsoft Graph subscription expiry, F9). */
   saveWatchState(
     id: string,
     state: { expiresAt?: string | null; renewedAt?: string | null; errorCode: string | null; errorAt?: string | null }
   ): Promise<void>;
-  /** Active Gmail accounts of active organizations whose watch is missing or expires before `renewBefore`. */
-  listAccountsNeedingWatch(options: { renewBefore: string; limit: number }): Promise<Array<Pick<WorkerAccount, "id" | "organizationId">>>;
+  /**
+   * Microsoft Graph subscription: provider_metadata (subscription id + clientState
+   * hash, other keys kept by the caller) and the watch_* columns, in one update.
+   */
+  saveSubscriptionState(
+    id: string,
+    state: { providerMetadata: Record<string, unknown>; expiresAt: string | null; renewedAt?: string | null; errorCode: string | null; errorAt?: string | null }
+  ): Promise<void>;
+  /**
+   * Active accounts of active organizations, of the given providers (default
+   * Gmail), whose push subscription is missing or expires before `renewBefore`.
+   */
+  listAccountsNeedingWatch(options: {
+    renewBefore: string;
+    limit: number;
+    providers?: EmailProvider[];
+  }): Promise<Array<Pick<WorkerAccount, "id" | "organizationId">>>;
   saveTokens(
     id: string,
     tokens: { accessTokenEncrypted: string; refreshTokenEncrypted: string | null; tokenExpiresAt: string | null }
