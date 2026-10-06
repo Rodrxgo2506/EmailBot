@@ -1,4 +1,4 @@
-import { addCoalescedSync, DEFAULT_JOB_OPTIONS, isSyncPending, POLL_SCHEDULER_ID, QUEUE_NAMES, type EmailEventJob } from "@emailbot/shared";
+import { addCoalescedSync, COALESCED_JOB_OPTIONS, DEFAULT_JOB_OPTIONS, isSyncPending, POLL_SCHEDULER_ID, QUEUE_NAMES, type EmailEventJob } from "@emailbot/shared";
 import { Queue } from "bullmq";
 import { Redis } from "ioredis";
 import type { JobQueue } from "../deps.js";
@@ -25,10 +25,12 @@ export function createBullJobQueue(connection: Redis): JobQueue {
   return {
     async enqueueEmailEvent(job, options) {
       await emailEvents.add(job.type, job, {
-        ...DEFAULT_JOB_OPTIONS,
-        // Manual syncs are deduplicated only while pending, so they are
-        // removed as soon as they finish to allow the next request.
-        ...(job.type === "SYNC_ACCOUNT" ? { removeOnComplete: true, removeOnFail: true } : {}),
+        // Manual syncs and push-subscription jobs (WATCH_ACCOUNT, id watch-<account>) are
+        // deduplicated only while pending, so they are removed as soon as they finish: a
+        // retained one would make BullMQ ignore the next job with the same id, e.g. the
+        // worker's WATCH_ACCOUNT for a renewal or a Graph lifecycle event (same options as
+        // the worker's coalesced jobs).
+        ...(job.type === "SYNC_ACCOUNT" || job.type === "WATCH_ACCOUNT" ? COALESCED_JOB_OPTIONS : DEFAULT_JOB_OPTIONS),
         ...(options?.jobId ? { jobId: options.jobId } : {})
       });
     },
