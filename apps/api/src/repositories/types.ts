@@ -590,15 +590,13 @@ export interface BillingRepository {
   saveCustomer(organizationId: string, environment: BillingEnvironment, externalCustomerId: string, createdBy: string): Promise<string>;
   /** A checkout already waiting for Culqi (PENDING). */
   hasPending(organizationId: string): Promise<boolean>;
-  /** Inserts the PENDING row; null when another checkout of the organization is already PENDING. */
-  createPending(input: {
-    organizationId: string;
-    planPriceId: string;
-    environment: BillingEnvironment;
-    externalCustomerId: string;
-    externalPlanId: string;
-    createdBy: string;
-  }): Promise<string | null>;
+  /**
+   * Reserves the checkout: inserts the PENDING row (no Culqi customer yet) BEFORE anything is created at Culqi;
+   * null when another checkout of the organization is already PENDING (atomic: unique partial index).
+   */
+  createPending(input: { organizationId: string; planPriceId: string; environment: BillingEnvironment; externalPlanId: string; createdBy: string }): Promise<string | null>;
+  /** Sets the Culqi customer of a reserved checkout (PENDING, customer not set yet); throws otherwise. */
+  attachCustomer(id: string, externalCustomerId: string): Promise<void>;
   attachCulqiSubscription(id: string, input: { externalCardId: string; externalSubscriptionId: string; providerStatus: number | null }): Promise<void>;
   /** PENDING -> FAILED (public.billing_set_culqi_status, audited). */
   markFailed(id: string, failureCode: string, failureMessage: string | null, requestId: string): Promise<void>;

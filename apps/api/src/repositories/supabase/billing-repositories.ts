@@ -124,7 +124,6 @@ export function billingRepository(service: SupabaseClient): BillingRepository {
           provider: PROVIDER,
           environment: input.environment,
           status: "PENDING",
-          external_customer_id: input.externalCustomerId,
           external_plan_id: input.externalPlanId,
           created_by: input.createdBy
         })
@@ -133,6 +132,19 @@ export function billingRepository(service: SupabaseClient): BillingRepository {
       // billing_subscriptions_one_pending: another checkout of this organization is waiting for Culqi.
       if (result.error?.code === "23505") return null;
       return (unwrap(result) as Row).id as string;
+    },
+
+    async attachCustomer(id, externalCustomerId) {
+      const rows = unwrap(
+        await service
+          .from("billing_subscriptions")
+          .update({ external_customer_id: externalCustomerId })
+          .eq("id", id)
+          .eq("status", "PENDING")
+          .is("external_customer_id", null)
+          .select("id")
+      ) as Row[];
+      if (rows.length !== 1) throw new Error("The checkout reservation is no longer pending");
     },
 
     async attachCulqiSubscription(id, input) {

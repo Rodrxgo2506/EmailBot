@@ -255,6 +255,7 @@ function createFakeBilling(): { [K in keyof BillingRepository]: ReturnType<typeo
     saveCustomer: unexpected("billing.saveCustomer"),
     hasPending: unexpected("billing.hasPending"),
     createPending: unexpected("billing.createPending"),
+    attachCustomer: unexpected("billing.attachCustomer"),
     attachCulqiSubscription: unexpected("billing.attachCulqiSubscription"),
     markFailed: unexpected("billing.markFailed"),
     get: unexpected("billing.get"),

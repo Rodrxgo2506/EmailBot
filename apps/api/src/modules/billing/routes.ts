@@ -133,35 +133,12 @@ export function billingRoutes(deps: AppDeps) {
           throw serviceUnavailable("This plan cannot be paid by card yet", "BILLING_PLAN_MISMATCH");
         }
 
-        // Customer (one per organization and environment).
-        let customerId = await deps.billing.customerId(organizationId, environment);
-        if (!customerId) {
-          const customer = {
-            first_name: input.customer.firstName,
-            last_name: input.customer.lastName,
-            email: user.email,
-            address: input.customer.address,
-            address_city: input.customer.addressCity,
-            country_code: input.customer.countryCode,
-            phone_number: input.customer.phoneNumber,
-            metadata: { organization_id: organizationId }
-          };
-          try {
-            customerId = (await culqi.createCustomer(customer)).id;
-          } catch (error) {
-            // Culqi already knows this e-mail (e.g. the same person pays for another organization): reuse it.
-            const existing = error instanceof CulqiApiError && error.isClientError ? await culqi.findCustomerByEmail(user.email).catch(() => null) : null;
-            if (!existing) throw toCulqiError(request, error, "createCustomer");
-            customerId = existing.id;
-          }
-          customerId = await deps.billing.saveCustomer(organizationId, environment, customerId, user.id);
-        }
-
+        // F5: the checkout is reserved atomically (one PENDING per organization, unique index) BEFORE anything is
+        // created at Culqi, so two concurrent requests never create two customers / cards / subscriptions.
         const billingId = await deps.billing.createPending({
           organizationId,
           planPriceId: price.planPriceId,
           environment,
-          externalCustomerId: customerId,
           externalPlanId,
           createdBy: user.id
         });
@@ -171,6 +148,43 @@ export function billingRoutes(deps: AppDeps) {
             request.log.error({ event: "billing.culqi.mark_failed_error", billingSubscriptionId: billingId, err: serializeError(error) }, "could not mark the checkout as failed");
           });
         };
+        const failWith = async (error: unknown, fallback: string) =>
+          fail(error instanceof CulqiApiError ? (error.code ?? error.type ?? fallback) : fallback, error instanceof CulqiApiError ? error.merchantMessage : null);
+
+        // Customer (one per organization and environment), only while the reservation is held.
+        let customerId: string;
+        try {
+          const stored = await deps.billing.customerId(organizationId, environment);
+          if (stored) {
+            customerId = stored;
+          } else {
+            const customer = {
+              first_name: input.customer.firstName,
+              last_name: input.customer.lastName,
+              email: user.email,
+              address: input.customer.address,
+              address_city: input.customer.addressCity,
+              country_code: input.customer.countryCode,
+              phone_number: input.customer.phoneNumber,
+              metadata: { organization_id: organizationId }
+            };
+            let created: string;
+            try {
+              created = (await culqi.createCustomer(customer)).id;
+            } catch (error) {
+              // Culqi already knows this e-mail (e.g. the same person pays for another organization): reuse it.
+              const existing = error instanceof CulqiApiError && error.isClientError ? await culqi.findCustomerByEmail(user.email).catch(() => null) : null;
+              if (!existing) throw error;
+              created = existing.id;
+            }
+            customerId = await deps.billing.saveCustomer(organizationId, environment, created, user.id);
+          }
+          await deps.billing.attachCustomer(billingId, customerId);
+        } catch (error) {
+          await failWith(error, "customer_error");
+          if (error instanceof AppError) throw error;
+          throw toCulqiError(request, error, "createCustomer");
+        }
 
         let cardId: string;
         try {
@@ -182,7 +196,7 @@ export function billingRoutes(deps: AppDeps) {
           cardId = card.id;
         } catch (error) {
           if (error instanceof AppError) throw error;
-          await fail(error instanceof CulqiApiError ? (error.code ?? error.type ?? "card_error") : "card_error", error instanceof CulqiApiError ? error.merchantMessage : null);
+          await failWith(error, "card_error");
           throw toCulqiError(request, error, "createCard");
         }
 
@@ -195,15 +209,25 @@ export function billingRoutes(deps: AppDeps) {
             metadata: { organization_id: organizationId, billing_subscription_id: billingId }
           });
         } catch (error) {
-          await fail(error instanceof CulqiApiError ? (error.code ?? error.type ?? "subscription_error") : "subscription_error", error instanceof CulqiApiError ? error.merchantMessage : null);
+          await failWith(error, "subscription_error");
           throw toCulqiError(request, error, "createSubscription");
         }
 
-        await deps.billing.attachCulqiSubscription(billingId, {
-          externalCardId: cardId,
-          externalSubscriptionId: culqiSubscription.id,
-          providerStatus: Number.isInteger(culqiSubscription.status) ? culqiSubscription.status : null
-        });
+        try {
+          await deps.billing.attachCulqiSubscription(billingId, {
+            externalCardId: cardId,
+            externalSubscriptionId: culqiSubscription.id,
+            providerStatus: Number.isInteger(culqiSubscription.status) ? culqiSubscription.status : null
+          });
+        } catch (error) {
+          // Never leave a Culqi subscription EmailBot does not know about: cancel it (best effort) and free the slot.
+          request.log.error({ event: "billing.culqi.attach_failed", billingSubscriptionId: billingId, err: serializeError(error) }, "Culqi subscription not stored; cancelling it");
+          await culqi.cancelSubscription(culqiSubscription.id).catch((cancelError: unknown) => {
+            request.log.error({ event: "billing.culqi.orphan_subscription", billingSubscriptionId: billingId, err: serializeError(cancelError) }, "orphan Culqi subscription: cancel it manually");
+          });
+          await fail("attach_failed", null);
+          throw error;
+        }
         await app.audit(request, {
           action: "CREATE",
           entityType: "billing_subscription",

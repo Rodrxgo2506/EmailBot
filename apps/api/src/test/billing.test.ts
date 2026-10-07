@@ -105,6 +105,7 @@ async function setup(options: { culqi?: ApiConfig["culqi"]; role?: "OWNER" | "AD
   billing.customerId.mockResolvedValue(null);
   billing.saveCustomer.mockImplementation(async (_org: string, _env: string, id: string) => id);
   billing.createPending.mockResolvedValue("bill-1");
+  billing.attachCustomer.mockResolvedValue(undefined);
   billing.attachCulqiSubscription.mockResolvedValue(undefined);
   billing.markFailed.mockResolvedValue(undefined);
   billing.get.mockResolvedValue(summary());
@@ -323,6 +324,66 @@ describe("POST /api/billing/subscriptions", () => {
     const response = await subscribe(ctx);
     expect(response.statusCode).toBe(409);
     expect(response.json().error.code).toBe("CHECKOUT_IN_PROGRESS");
+  });
+
+  it("F5: the checkout is reserved (PENDING, no customer yet) BEFORE the Culqi customer is created, then the customer is attached", async () => {
+    const culqi = culqiFake();
+    const ctx = await setup({ fetch: culqi.fetch });
+    const order: string[] = [];
+    ctx.billing.createPending.mockImplementation(async () => {
+      order.push(`reserve after ${culqi.calls.length} Culqi call(s)`);
+      return "bill-1";
+    });
+    expect((await subscribe(ctx)).statusCode).toBe(202);
+    expect(order).toEqual(["reserve after 1 Culqi call(s)"]); // only the read-only plan check precedes it
+    expect(ctx.billing.createPending.mock.calls[0]?.[0]).not.toHaveProperty("externalCustomerId");
+    expect(ctx.billing.attachCustomer).toHaveBeenCalledWith("bill-1", "cus_test_CUSTOMER1");
+    expect(ctx.billing.attachCustomer.mock.invocationCallOrder[0]).toBeLessThan(ctx.billing.attachCulqiSubscription.mock.invocationCallOrder[0] as number);
+  });
+
+  it("F5: two concurrent checkouts -> 1 customer, 1 card, 1 subscription, 1 PENDING; the second gets 409, nothing orphaned", async () => {
+    const culqi = culqiFake();
+    const ctx = await setup({ fetch: culqi.fetch });
+    // Same semantics as the database: one PENDING per organization (unique partial index), customer stored once.
+    let pending = 0;
+    let storedCustomer: string | null = null;
+    ctx.billing.createPending.mockImplementation(async () => (pending++ === 0 ? "bill-1" : null));
+    ctx.billing.customerId.mockImplementation(async () => storedCustomer);
+    ctx.billing.saveCustomer.mockImplementation(async (_org: string, _env: string, id: string) => (storedCustomer ??= id));
+
+    const responses = await Promise.all([subscribe(ctx), subscribe(ctx)]);
+
+    expect(responses.map((response) => response.statusCode).sort()).toEqual([202, 409]);
+    expect(responses.find((response) => response.statusCode === 409)?.json().error.code).toBe("CHECKOUT_IN_PROGRESS");
+    const count = (key: string) => culqi.calls.filter((call) => call.key === key).length;
+    expect(count("POST /v2/customers")).toBe(1);
+    expect(count("POST /v2/cards")).toBe(1);
+    expect(count("POST /v2/recurrent/subscriptions/create")).toBe(1);
+    expect(ctx.billing.createPending).toHaveBeenCalledTimes(2);
+    expect(ctx.billing.saveCustomer).toHaveBeenCalledTimes(1);
+    expect(ctx.billing.attachCulqiSubscription).toHaveBeenCalledTimes(1);
+    expect(ctx.billing.markFailed).not.toHaveBeenCalled();
+  });
+
+  it("F5: the Culqi customer cannot be created -> the reservation is released (FAILED), no card, 502", async () => {
+    const culqi = culqiFake({ "POST /v2/customers": { status: 503, body: { object: "error", type: "api_error" } } });
+    const ctx = await setup({ fetch: culqi.fetch });
+    const response = await subscribe(ctx);
+    expect(response.statusCode).toBe(502);
+    expect(ctx.billing.markFailed).toHaveBeenCalledWith("bill-1", "api_error", null, expect.any(String));
+    expect(ctx.billing.attachCustomer).not.toHaveBeenCalled();
+    expect(culqi.calls.map((call) => call.key)).not.toContain("POST /v2/cards");
+  });
+
+  it("F5: the Culqi subscription cannot be stored -> it is cancelled at Culqi and the checkout FAILED (no orphan)", async () => {
+    const culqi = culqiFake({ "DELETE /v2/recurrent/subscriptions/sxn_test_SUB1": { status: 200, body: { id: "sxn_test_SUB1", delete: true } } });
+    const ctx = await setup({ fetch: culqi.fetch });
+    ctx.billing.attachCulqiSubscription.mockRejectedValue(new Error("database unavailable"));
+    const response = await subscribe(ctx);
+    expect(response.statusCode).toBe(500);
+    expect(culqi.calls.map((call) => call.key)).toContain("DELETE /v2/recurrent/subscriptions/sxn_test_SUB1");
+    expect(ctx.billing.markFailed).toHaveBeenCalledWith("bill-1", "attach_failed", null, expect.any(String));
+    expect(ctx.queue.enqueueEmailEvent).not.toHaveBeenCalled();
   });
 
   it("GET /api/billing/subscriptions/current returns the organization's latest Culqi subscription", async () => {
