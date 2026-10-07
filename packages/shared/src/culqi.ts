@@ -13,6 +13,7 @@
  *   GET    /v2/recurrent/subscriptions/{id}    consultar suscripción
  *   DELETE /v2/recurrent/subscriptions/{id}    cancelar suscripción
  *   GET    /v2/events/{id}                     consultar evento (the id sent by the webhook)
+ *   GET    /v2/charges/{id}                    consultar cargo (paid / outcome: the proof of a payment)
  * Authentication: `Authorization: Bearer <secret key>`. Secret keys start with
  * sk_test_ (integration) or sk_live_ (production); public keys pk_test_ / pk_live_.
  *
@@ -204,6 +205,28 @@ export interface CulqiSubscription {
   metadata?: Record<string, unknown> | null;
 }
 
+/**
+ * Culqi charge (GET /v2/charges/{id}, "Objeto Cargo"): the documented proof of a
+ * payment. `outcome.code` is "succesfull_charge" (sic, Culqi's spelling) or
+ * "card_declined"; `paid` / `capture` are booleans; amounts in céntimos.
+ */
+export interface CulqiCharge {
+  id: string;
+  amount?: number | null;
+  current_amount?: number | null;
+  currency_code?: string | null;
+  paid?: boolean | null;
+  capture?: boolean | null;
+  creation_date?: number | string | null;
+  outcome?: { type?: string | null; code?: string | null; decline_code?: string | null; merchant_message?: string | null } | null;
+  /** The card or token used ({ object: "card" | "token", id, customer_id? ... }). */
+  source?: { object?: string | null; id?: string | null; customer_id?: string | null } | null;
+  metadata?: Record<string, unknown> | null;
+}
+
+/** Culqi's documented outcome code of an approved charge (spelling as in the API). */
+export const CULQI_CHARGE_SUCCESS_CODE = "succesfull_charge";
+
 export interface CulqiEvent {
   id: string;
   type: string;
@@ -234,6 +257,8 @@ export interface CulqiClient {
   /** Returns false when Culqi no longer knows it (404): already gone. */
   cancelSubscription(id: string): Promise<boolean>;
   getEvent(id: string): Promise<CulqiEvent | null>;
+  /** GET /v2/charges/{id}; null when Culqi does not know it (404). */
+  getCharge(id: string): Promise<CulqiCharge | null>;
 }
 
 export interface CulqiClientOptions {
@@ -346,6 +371,11 @@ export function createCulqiClient(options: CulqiClientOptions): CulqiClient {
 
     async getEvent(id) {
       const result = await call<CulqiEvent>("getEvent", "GET", `/v2/events/${encode(id)}`, undefined, true);
+      return result?.body ?? null;
+    },
+
+    async getCharge(id) {
+      const result = await call<CulqiCharge>("getCharge", "GET", `/v2/charges/${encode(id)}`, undefined, true);
       return result?.body ?? null;
     }
   };

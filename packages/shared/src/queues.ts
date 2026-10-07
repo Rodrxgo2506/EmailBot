@@ -122,6 +122,20 @@ export interface CulqiReconcileJob {
   billingSubscriptionId: string;
 }
 
+/**
+ * Periodic Culqi reconciliation (worker scheduler, only when Culqi is configured):
+ *  - ACTIVE / PAST_DUE subscriptions near the end of their period are re-read
+ *    (renewal charges are applied even if no webhook mentions them);
+ *  - PENDING checkouts that never got a verified charge are closed
+ *    (confirmation_timeout) so they do not block the organization.
+ */
+export interface CulqiReconcileDueJob {
+  type: "CULQI_RECONCILE_DUE";
+}
+
+export const CULQI_RECONCILE_DUE_SCHEDULER_ID = "culqi-reconcile-due";
+export const CULQI_RECONCILE_DUE_INTERVAL_MS = 60 * 60_000;
+
 export function culqiEventJobId(eventId: string): string {
   return `culqi-evt-${eventId}`;
 }
@@ -142,6 +156,7 @@ export const CULQI_RECONCILE_JOB_OPTIONS = {
 export type EmailEventJob =
   | CulqiEventJob
   | CulqiReconcileJob
+  | CulqiReconcileDueJob
   | GmailNotificationJob
   | MicrosoftNotificationJob
   | MicrosoftLifecycleJob

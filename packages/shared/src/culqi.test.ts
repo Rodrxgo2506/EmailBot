@@ -133,6 +133,17 @@ describe("Culqi client (official v2 endpoints)", () => {
     expect(await client.getPlan("pln_test_missing")).toBeNull();
   });
 
+  it("charges: GET /v2/charges/{id} (the documented proof of payment); unknown -> null", async () => {
+    const { fetch, calls } = fakeFetch([
+      { status: 200, body: { object: "charge", id: "chr_test_C1", amount: 3990, currency_code: "PEN", paid: true, outcome: { code: "succesfull_charge" } } },
+      { status: 404, body: { object: "error" } }
+    ]);
+    const client = createCulqiClient({ secretKey: SECRET, fetch });
+    expect(await client.getCharge("chr_test_C1")).toMatchObject({ paid: true, outcome: { code: "succesfull_charge" } });
+    expect(await client.getCharge("chr_test_missing")).toBeNull();
+    expect(calls.map((call) => `${call.method} ${call.url}`)).toEqual(["GET https://api.culqi.com/v2/charges/chr_test_C1", "GET https://api.culqi.com/v2/charges/chr_test_missing"]);
+  });
+
   it("a card that needs 3DS (200 + action_code REVIEW) is reported, not treated as created", async () => {
     const { fetch } = fakeFetch([{ status: 200, body: { action_code: "REVIEW", user_message: "El usuario necesita autenticarse" } }]);
     const client = createCulqiClient({ secretKey: SECRET, fetch });
