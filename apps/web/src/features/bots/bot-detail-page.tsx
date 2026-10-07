@@ -12,6 +12,7 @@ import { useOrganization } from "@/providers/organization-provider";
 import { useBot, useBotMutations } from "./api";
 import { BotCustomersCard } from "./bot-customers-card";
 import { BotDialog } from "./bot-dialog";
+import { CustomerResolutionCard } from "./customer-resolution-card";
 
 export function BotDetailPage() {
   const { botId } = useParams();
@@ -122,7 +123,8 @@ export function BotDetailPage() {
         </Card>
       </div>
 
-      <div className="mt-6">
+      <div className="mt-6 grid gap-6 lg:grid-cols-2">
+        <CustomerResolutionCard bot={current} canManage={canManage} />
         <BotCustomersCard botId={current.id} canManage={canManageCustomers} />
       </div>
 

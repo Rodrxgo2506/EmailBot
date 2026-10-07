@@ -127,6 +127,30 @@ describe("bots API: create, update, delete", () => {
     expect(repos.bots.update).toHaveBeenNthCalledWith(1, ORG_A, BOT_ID, owner.id, { status: "PAUSED" });
   });
 
+  it("the portal delivery (customerResolution) is updated as the panel sends it; an incomplete one is rejected", async () => {
+    const admin = makeUser({ [ORG_A]: "ADMIN" });
+    const { app, repos, privileged } = await createTestApp({ users: [admin] });
+    const recipient = { source: "RECIPIENT", identifierType: "EMAIL", onMultipleMatches: "LEAVE_UNASSIGNED" } as const;
+    repos.bots.get.mockResolvedValue(storedBot());
+    repos.bots.update.mockResolvedValue(storedBot({ customerResolution: recipient }));
+    const headers = authHeaders(admin, ORG_A);
+
+    const response = await app.inject({
+      method: "PATCH",
+      url: `/api/bots/${BOT_ID}`,
+      headers,
+      payload: { customerResolution: { source: "RECIPIENT", onMultipleMatches: "LEAVE_UNASSIGNED" } }
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.json().bot.customerResolution).toEqual(recipient);
+    expect(repos.bots.update).toHaveBeenCalledWith(ORG_A, BOT_ID, admin.id, { customerResolution: recipient });
+    expect(privileged.insertAuditLog).toHaveBeenCalledWith(expect.objectContaining({ entityType: "bot", metadata: expect.objectContaining({ event: "bot.updated" }) }));
+
+    const invalid = await app.inject({ method: "PATCH", url: `/api/bots/${BOT_ID}`, headers, payload: { customerResolution: { source: "EXTRACTED_FIELD" } } });
+    expect(invalid.statusCode).toBe(400);
+    expect(repos.bots.update).toHaveBeenCalledTimes(1);
+  });
+
   it("a bot of another organization is not found", async () => {
     const owner = makeUser({ [ORG_A]: "OWNER" });
     const { app, repos } = await createTestApp({ users: [owner] });

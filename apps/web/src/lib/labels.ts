@@ -2,9 +2,11 @@ import type {
   AuditAction,
   BotStatus,
   CustomerIdentifierType,
+  CustomerResolutionSource,
   CustomerStatus,
   EmailAccountStatus,
   EmailProvider,
+  MultipleMatchPolicy,
   OrganizationPlan,
   OrganizationRole,
   OrganizationStatus,
@@ -104,6 +106,18 @@ export const IDENTIFIER_TYPE_LABELS: Record<CustomerIdentifierType, string> = {
   USERNAME: "Usuario",
   EXTERNAL_ID: "ID externo",
   CUSTOM: "Personalizado"
+};
+
+export const CUSTOMER_RESOLUTION_SOURCE_LABELS: Record<CustomerResolutionSource, string> = {
+  NONE: "No entregar (desactivado)",
+  RECIPIENT: "Destinatario del correo (Para y CC)",
+  SENDER: "Remitente del correo",
+  EXTRACTED_FIELD: "Dato extraído por una regla del bot"
+};
+
+export const MULTIPLE_MATCH_POLICY_LABELS: Record<MultipleMatchPolicy, string> = {
+  LEAVE_UNASSIGNED: "No entregarlo a ninguno",
+  DELIVER_ALL: "Entregarlo a todos"
 };
 
 export const ORGANIZATION_STATUS_LABELS: Record<OrganizationStatus, string> = {
