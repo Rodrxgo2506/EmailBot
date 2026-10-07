@@ -29,10 +29,10 @@ const overview = (plan: "FREE" | "BASIC" | "PRO" | "BUSINESS" = "PRO"): Organiza
     effectivePlan: plan === "FREE" ? "BASIC" : plan,
     access: plan === "FREE" ? "LEGACY" : "SUBSCRIPTION",
     subscriptionStatus: plan === "FREE" ? null : "ACTIVE",
-    limits: { EMAIL_ACCOUNTS: 5, RULES: 30, BOTS: 10, MONTHLY_EMAILS: 15000, MEMBERS: 5, CUSTOMERS: 2500, STORAGE_BYTES: 5 * GB, RETENTION_DAYS: 90 },
+    limits: { EMAIL_ACCOUNTS: 125, RULES: 30, BOTS: 10, MONTHLY_EMAILS: 15000, MEMBERS: 5, CUSTOMERS: 2500, STORAGE_BYTES: 5 * GB, RETENTION_DAYS: 90 },
     features: { GMAIL: true, MICROSOFT: true, ADVANCED_STATS: true, PORTAL: true, API: false, PRIORITY_SUPPORT: true }
   },
-  usage: { EMAIL_ACCOUNTS: 5, RULES: 4, BOTS: 0, MONTHLY_EMAILS: 15200, MEMBERS: 2, CUSTOMERS: 1234, STORAGE_BYTES: 1536 * 1024 ** 2 }
+  usage: { EMAIL_ACCOUNTS: 125, RULES: 4, BOTS: 0, MONTHLY_EMAILS: 15200, MEMBERS: 2, CUSTOMERS: 1234, STORAGE_BYTES: 1536 * 1024 ** 2 }
 });
 
 describe("plan presentation (Commercial V1)", () => {
@@ -46,7 +46,7 @@ describe("plan presentation (Commercial V1)", () => {
 
   it("usage against each limit; at or above the limit is 'reached'", () => {
     const rows = Object.fromEntries(planUsageRows(overview()).map((row) => [row.key, row]));
-    expect(rows.EMAIL_ACCOUNTS).toMatchObject({ label: "Cuentas de correo", value: "5 / 5", reached: true });
+    expect(rows.EMAIL_ACCOUNTS).toMatchObject({ label: "Cuentas de correo", value: "125 / 125", reached: true });
     expect(rows.RULES).toMatchObject({ value: "4 / 30", reached: false });
     expect(rows.MONTHLY_EMAILS?.reached).toBe(true);
     expect(rows.STORAGE_BYTES).toMatchObject({ value: expect.stringMatching(/^1[.,]5 GB \/ 5 GB$/), reached: false });
@@ -74,8 +74,8 @@ describe("plan presentation (Commercial V1)", () => {
 
 describe("plan errors from the API", () => {
   it("a limit names the plan and the limit", () => {
-    const error = new ApiError(403, "PLAN_LIMIT_REACHED", "The BASIC plan allows up to 2 (EMAIL_ACCOUNTS)", { limit: "EMAIL_ACCOUNTS", max: 2, used: 2, plan: "BASIC" });
-    expect(getErrorMessage(error)).toBe("Alcanzaste el límite de tu plan Básico (cuentas de correo: 2). Para agregar más se necesita un plan superior.");
+    const error = new ApiError(403, "PLAN_LIMIT_REACHED", "The BASIC plan allows up to 25 (EMAIL_ACCOUNTS)", { limit: "EMAIL_ACCOUNTS", max: 25, used: 25, plan: "BASIC" });
+    expect(getErrorMessage(error)).toBe("Alcanzaste el límite de tu plan Básico (cuentas de correo: 25). Para agregar más se necesita un plan superior.");
   });
 
   it("a feature names the feature and the plan", () => {

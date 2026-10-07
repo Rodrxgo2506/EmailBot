@@ -64,9 +64,9 @@ describe("catalog entitlements (pure checks)", () => {
 
   // Hard limits: the last unit fits, the next one does not.
   it.each([
-    ["BASIC", "EMAIL_ACCOUNTS", 2],
-    ["PRO", "EMAIL_ACCOUNTS", 5],
-    ["BUSINESS", "EMAIL_ACCOUNTS", 20],
+    ["BASIC", "EMAIL_ACCOUNTS", 25],
+    ["PRO", "EMAIL_ACCOUNTS", 125],
+    ["BUSINESS", "EMAIL_ACCOUNTS", 250],
     ["BASIC", "RULES", 10],
     ["PRO", "RULES", 30],
     ["BUSINESS", "RULES", 100],
@@ -93,7 +93,7 @@ describe("catalog entitlements (pure checks)", () => {
   });
 
   it("usage already above the limit (plan lowered) is kept but nothing more is added", () => {
-    expect(isWithinLimit(entitlementsFor("BASIC"), "EMAIL_ACCOUNTS", 7)).toBe(false);
+    expect(isWithinLimit(entitlementsFor("BASIC"), "EMAIL_ACCOUNTS", 30)).toBe(false);
   });
 
   it("a null limit is unlimited", () => {
@@ -106,7 +106,7 @@ describe("catalog entitlements (pure checks)", () => {
     const entitlements = entitlementsFor("FREE");
     expect(entitlements).toMatchObject({ plan: "FREE", effectivePlan: "BASIC" });
     expect(canUseFeature(entitlements, "MICROSOFT")).toBe(false);
-    expect(() => assertWithinLimit(entitlements, "EMAIL_ACCOUNTS", 2)).toThrow(expect.objectContaining({ details: expect.objectContaining({ plan: "BASIC" }) }));
+    expect(() => assertWithinLimit(entitlements, "EMAIL_ACCOUNTS", 25)).toThrow(expect.objectContaining({ details: expect.objectContaining({ plan: "BASIC" }) }));
   });
 });
 
@@ -369,26 +369,30 @@ describe("e-mail accounts: OAuth start", () => {
     expect(response.json().authorizationUrl).toContain("login.microsoftonline.com");
   });
 
-  it("BASIC with 2 counted mailboxes: a third (new provider) is refused before going to the provider", async () => {
-    const { repos } = await appWithPlan("BASIC", { EMAIL_ACCOUNTS: 2 }, { users: [owner], config: { google, microsoft: MICROSOFT_OAUTH } });
+  it("BASIC with 25 counted mailboxes: the 26th (new provider) is refused before going to the provider", async () => {
+    const { repos } = await appWithPlan("BASIC", { EMAIL_ACCOUNTS: 25 }, { users: [owner], config: { google, microsoft: MICROSOFT_OAUTH } });
     repos.emailAccounts.list.mockResolvedValue([mailbox({ provider: "IMAP" }), mailbox({ provider: "IMAP", id: "x" })]);
-    expectLimit(await start("gmail"), "EMAIL_ACCOUNTS", 2, "BASIC");
+    expectLimit(await start("gmail"), "EMAIL_ACCOUNTS", 25, "BASIC");
   });
 
   it("at the limit, re-authorizing a counted Gmail mailbox is still possible (decided in the callback)", async () => {
-    const { repos } = await appWithPlan("BASIC", { EMAIL_ACCOUNTS: 2 }, { users: [owner], config: { google } });
+    const { repos } = await appWithPlan("BASIC", { EMAIL_ACCOUNTS: 25 }, { users: [owner], config: { google } });
     repos.emailAccounts.list.mockResolvedValue([mailbox({ status: "ERROR" }), mailbox({ id: "x", emailAddress: "b@gmail.com" })]);
     expect((await start("gmail")).statusCode).toBe(200);
   });
 
-  it("PRO stops at 5 and BUSINESS at 20 mailboxes", async () => {
-    const { repos, app } = await appWithPlan("PRO", { EMAIL_ACCOUNTS: 5 }, { users: [owner], config: { google } });
-    repos.emailAccounts.list.mockResolvedValue([]);
-    expectLimit(await start("gmail"), "EMAIL_ACCOUNTS", 5, "PRO");
-    await app.close();
-    const business = await appWithPlan("BUSINESS", { EMAIL_ACCOUNTS: 20 }, { users: [owner], config: { google } });
-    business.repos.emailAccounts.list.mockResolvedValue([]);
-    expectLimit(await start("gmail"), "EMAIL_ACCOUNTS", 20, "BUSINESS");
+  it.each([
+    ["BASIC", 25],
+    ["PRO", 125],
+    ["BUSINESS", 250]
+  ] as const)("%s: mailbox number %d can be started, the next one is refused", async (plan, max) => {
+    const below = await appWithPlan(plan, { EMAIL_ACCOUNTS: max - 1 }, { users: [owner], config: { google } });
+    below.repos.emailAccounts.list.mockResolvedValue([]);
+    expect((await start("gmail")).statusCode).toBe(200);
+    await below.app.close();
+    const full = await appWithPlan(plan, { EMAIL_ACCOUNTS: max }, { users: [owner], config: { google } });
+    full.repos.emailAccounts.list.mockResolvedValue([]);
+    expectLimit(await start("gmail"), "EMAIL_ACCOUNTS", max, plan);
   });
 });
 
@@ -432,16 +436,16 @@ describe("e-mail accounts: OAuth callback re-checks the plan", () => {
     expect(privileged.upsertOAuthEmailAccount).toHaveBeenCalled();
   });
 
-  it("BASIC with 2 counted mailboxes: a NEW mailbox is refused and the tokens are not stored", async () => {
-    const { send, privileged } = await callback("BASIC", "GMAIL", { EMAIL_ACCOUNTS: 2 });
+  it("BASIC with 25 counted mailboxes: a NEW mailbox (the 26th) is refused and the tokens are not stored", async () => {
+    const { send, privileged } = await callback("BASIC", "GMAIL", { EMAIL_ACCOUNTS: 25 });
     const response = await send();
     expect(response.headers.location).toContain("oauth=error&reason=plan_limit");
     expect(privileged.findOAuthEmailAccountStatus).toHaveBeenCalledWith(ORG_A, "GMAIL", "me@gmail.com");
     expect(privileged.upsertOAuthEmailAccount).not.toHaveBeenCalled();
   });
 
-  it("BASIC with 2 counted mailboxes: re-authorizing one of them is allowed", async () => {
-    const { send, privileged } = await callback("BASIC", "GMAIL", { EMAIL_ACCOUNTS: 2 });
+  it("BASIC with 25 counted mailboxes: re-authorizing one of them is allowed", async () => {
+    const { send, privileged } = await callback("BASIC", "GMAIL", { EMAIL_ACCOUNTS: 25 });
     privileged.findOAuthEmailAccountStatus.mockResolvedValue("ERROR");
     expect((await send()).headers.location).toContain("oauth=connected");
     expect(privileged.getOrganizationUsage).not.toHaveBeenCalled();
@@ -449,7 +453,7 @@ describe("e-mail accounts: OAuth callback re-checks the plan", () => {
   });
 
   it("reconnecting a DISCONNECTED mailbox counts again, so it needs room", async () => {
-    const { send, privileged } = await callback("BASIC", "GMAIL", { EMAIL_ACCOUNTS: 2 });
+    const { send, privileged } = await callback("BASIC", "GMAIL", { EMAIL_ACCOUNTS: 25 });
     privileged.findOAuthEmailAccountStatus.mockResolvedValue("DISCONNECTED");
     expect((await send()).headers.location).toContain("reason=plan_limit");
     expect(privileged.upsertOAuthEmailAccount).not.toHaveBeenCalled();
@@ -459,6 +463,20 @@ describe("e-mail accounts: OAuth callback re-checks the plan", () => {
     const { send, privileged } = await callback("BASIC", "GMAIL", { EMAIL_ACCOUNTS: 1 });
     expect((await send()).headers.location).toContain("oauth=connected");
     expect(privileged.getOrganizationUsage).toHaveBeenCalledWith(ORG_A, ["EMAIL_ACCOUNTS"]);
+  });
+
+  it.each([
+    ["BASIC", 25],
+    ["PRO", 125],
+    ["BUSINESS", 250]
+  ] as const)("%s: a new mailbox number %d connects, the next one is refused", async (plan, max) => {
+    const below = await callback(plan, "GMAIL", { EMAIL_ACCOUNTS: max - 1 });
+    expect((await below.send()).headers.location).toContain("oauth=connected");
+    expect(below.privileged.upsertOAuthEmailAccount).toHaveBeenCalledTimes(1);
+    await below.app.close();
+    const full = await callback(plan, "GMAIL", { EMAIL_ACCOUNTS: max });
+    expect((await full.send()).headers.location).toContain("oauth=error&reason=plan_limit");
+    expect(full.privileged.upsertOAuthEmailAccount).not.toHaveBeenCalled();
   });
 
   it.each([["plan not readable", null], ["no active subscription", noAccess()], ["suspended subscription", noAccess("SUSPENDED")]])("%s: refused before the code is exchanged", async (_label, entitlements) => {
@@ -473,7 +491,7 @@ describe("e-mail accounts: OAuth callback re-checks the plan", () => {
 describe("existing data is never touched by the plan", () => {
   it("listing, pausing and disconnecting mailboxes work above the limit (legacy FREE with Microsoft)", async () => {
     const owner = makeUser({ [ORG_A]: "OWNER" });
-    const { app, repos } = await appWithPlan("FREE", { EMAIL_ACCOUNTS: 5 }, { users: [owner] });
+    const { app, repos } = await appWithPlan("FREE", { EMAIL_ACCOUNTS: 30 }, { users: [owner] });
     const microsoft = mailbox({ provider: "MICROSOFT", emailAddress: "me@contoso.com" });
     repos.emailAccounts.list.mockResolvedValue([microsoft]);
     repos.emailAccounts.get.mockResolvedValue(microsoft);

@@ -17,7 +17,7 @@ automáticos, prorrateos, créditos, reembolsos, SUNAT / facturación electróni
 |---|---|---|---|
 | Mensual (PEN) | 19.90 | 39.90 | 89.90 |
 | Anual (PEN) | 199.00 | 399.00 | 899.00 |
-| `EMAIL_ACCOUNTS` | 2 | 5 | 20 |
+| `EMAIL_ACCOUNTS` | 25 | 125 | 250 |
 | `RULES` | 10 | 30 | 100 |
 | `BOTS` | 2 | 10 | 50 |
 | `MONTHLY_EMAILS` | 2 000 | 15 000 | 75 000 |
@@ -33,6 +33,9 @@ automáticos, prorrateos, créditos, reembolsos, SUNAT / facturación electróni
 | `PRIORITY_SUPPORT` | no (estándar) | sí | sí |
 
 - **Los precios mostrados al cliente incluyen IGV** (decisión comercial). No hay lógica tributaria ni SUNAT todavía.
+- `EMAIL_ACCOUNTS` subió de 2 / 5 / 20 a 25 / 125 / 250 con la migración `20261007120000_email_account_plan_limits`
+  (solo esas tres filas de `plan_entitlements`; precios y demás límites sin cambios). Ningún buzón existente se
+  toca: el límite solo se comprueba al agregar uno.
 - 1 GB = 1024³ bytes. Los valores viven **solo en la base de datos** (sembrados por la migración); el código conoce
   las claves (`packages/types/src/plans.ts`) y lee los valores con `public.organization_entitlements()`.
 

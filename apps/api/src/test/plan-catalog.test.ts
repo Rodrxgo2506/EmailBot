@@ -78,6 +78,11 @@ describe("GET /api/plans (public)", () => {
     expect(response.statusCode).toBe(200);
     expect(response.headers["cache-control"]).toBe("public, max-age=300");
     expect(response.json()).toEqual({ items });
+    expect((response.json() as { items: PlanCatalogEntry[] }).items.map((plan) => [plan.code, plan.limits.EMAIL_ACCOUNTS, plan.prices.map((price) => price.amount)])).toEqual([
+      ["BASIC", 25, ["19.90", "199.00"]],
+      ["PRO", 125, ["39.90", "399.00"]],
+      ["BUSINESS", 250, ["89.90", "899.00"]]
+    ]);
     expect(privileged.listPlanCatalog).toHaveBeenCalledTimes(1);
   });
 

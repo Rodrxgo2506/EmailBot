@@ -21,7 +21,7 @@ export const PLAN_CATALOG: PlanCatalogEntry[] = [
     badge: null,
     sortOrder: 1,
     prices: price("19.90", "199.00"),
-    limits: { EMAIL_ACCOUNTS: 2, RULES: 10, BOTS: 2, MONTHLY_EMAILS: 2_000, MEMBERS: 2, CUSTOMERS: 500, STORAGE_BYTES: 1 * GB, RETENTION_DAYS: 30 },
+    limits: { EMAIL_ACCOUNTS: 25, RULES: 10, BOTS: 2, MONTHLY_EMAILS: 2_000, MEMBERS: 2, CUSTOMERS: 500, STORAGE_BYTES: 1 * GB, RETENTION_DAYS: 30 },
     features: { GMAIL: true, MICROSOFT: false, ADVANCED_STATS: false, PORTAL: false, API: false, PRIORITY_SUPPORT: false }
   },
   {
@@ -31,7 +31,7 @@ export const PLAN_CATALOG: PlanCatalogEntry[] = [
     badge: "Más elegido",
     sortOrder: 2,
     prices: price("39.90", "399.00"),
-    limits: { EMAIL_ACCOUNTS: 5, RULES: 30, BOTS: 10, MONTHLY_EMAILS: 15_000, MEMBERS: 5, CUSTOMERS: 2_500, STORAGE_BYTES: 5 * GB, RETENTION_DAYS: 90 },
+    limits: { EMAIL_ACCOUNTS: 125, RULES: 30, BOTS: 10, MONTHLY_EMAILS: 15_000, MEMBERS: 5, CUSTOMERS: 2_500, STORAGE_BYTES: 5 * GB, RETENTION_DAYS: 90 },
     features: { GMAIL: true, MICROSOFT: true, ADVANCED_STATS: true, PORTAL: true, API: false, PRIORITY_SUPPORT: true }
   },
   {
@@ -41,7 +41,7 @@ export const PLAN_CATALOG: PlanCatalogEntry[] = [
     badge: null,
     sortOrder: 3,
     prices: price("89.90", "899.00"),
-    limits: { EMAIL_ACCOUNTS: 20, RULES: 100, BOTS: 50, MONTHLY_EMAILS: 75_000, MEMBERS: 20, CUSTOMERS: 10_000, STORAGE_BYTES: 25 * GB, RETENTION_DAYS: 365 },
+    limits: { EMAIL_ACCOUNTS: 250, RULES: 100, BOTS: 50, MONTHLY_EMAILS: 75_000, MEMBERS: 20, CUSTOMERS: 10_000, STORAGE_BYTES: 25 * GB, RETENTION_DAYS: 365 },
     features: { GMAIL: true, MICROSOFT: true, ADVANCED_STATS: true, PORTAL: true, API: true, PRIORITY_SUPPORT: true }
   }
 ];
