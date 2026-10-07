@@ -42,22 +42,27 @@ Navegador                         API                                 Culqi     
 Culqi Custom Checkout ── tarjeta ─────────────────────────────────► token (tkn_test_…)
 token + plan + periodo + T&C ────► POST /api/billing/subscriptions
                                    verifica plan Culqi = precio ─────► GET plan
+                                   RESERVA: fila PENDING (atómica, 1 por organización; otra → 409)
                                    cliente (1 por organización) ────► POST customers
-                                   fila PENDING (billing_subscriptions)
                                    tarjeta ─────────────────────────► POST cards
                                    suscripción ─────────────────────► POST subscriptions/create
                                    202 PENDING; encola CULQI_RECONCILE ───────────────────────► reintenta hasta confirmar
-                                                                      cobro asíncrono
+                                                                      cobro asíncrono (chr_…)
                                    POST /webhooks/culqi ◄──────────── evento (solo se usa su id)
-                                   registra evento, encola CULQI_EVENT ───────────────────────► GET evento + GET suscripción
-                                                                                               → activación idempotente
+                                   registra evento, encola CULQI_EVENT ───────────────────────► GET evento
+                                                                                               GET suscripción + GET plan → verificación
+                                                                                               GET /v2/charges/{chr} → verificación
+                                                                                               → activación idempotente por chr
                                                                                                  (private.activate_subscription,
                                                                                                   origen CULQI)
 ```
 
 - El navegador **nunca** decide el precio: envía `plan`, `billingPeriod`, `tokenId`, `acceptTerms`, `customer`. El
   esquema es estricto: `amount`, `currency`, `limits`, datos de tarjeta, etc. → `400`.
-- La API **no activa** nada. El acceso cambia solo cuando el worker confirma el pago.
+- La API **no activa** nada. El acceso cambia solo cuando el worker verifica un **cargo pagado** en Culqi.
+
+**Regla de activación (única).** Solo un cargo `chr_…` leído con `GET /v2/charges/{id}` activa o renueva. Ni
+`subscription.creation.succeeded` ni el estado 3 «Activa» de Culqi activan por sí mismos. Ver [Verificación](#verificación-de-suscripción-y-cargo).
 - EmailBot nunca recibe ni guarda número de tarjeta, CVV ni PAN: Culqi tokeniza en su iframe y guarda la tarjeta.
 
 ## Modelo de datos (migración `20261007130000_culqi_billing_sandbox.sql`)
@@ -72,6 +77,12 @@ token + plan + periodo + T&C ────► POST /api/billing/subscriptions
 
 - Los ids tienen el formato de Culqi y deben ser del mismo entorno que la fila (`cus_test_…` en una fila `test`): un
   id `live` nunca entra en una fila de prueba.
+- Migración `20261007140000_culqi_billing_verified_charges.sql` (revisión F1–F5):
+  - `external_customer_id` admite `NULL`: el checkout se reserva **antes** de crear el cliente en Culqi;
+  - `billing_subscriptions_customer_before_subscription`: no hay suscripción de Culqi sin cliente;
+  - `payment_events_external_payment_unique`: un cargo se registra una sola vez;
+  - `billing_activate_culqi_subscription` exige un id de cargo `chr_(test|live)_…` del mismo entorno y que la clave
+    de activación **sea** ese id; si no, error y nada cambia.
 - RLS: ningún miembro accede por la Data API. `service_role` (API + worker): `SELECT / INSERT / UPDATE`, nunca `DELETE`.
 - Lo que toca `subscriptions`, `payment_events` o `platform_audit_logs` pasa por tres funciones `SECURITY DEFINER`
   (solo `service_role`):
@@ -85,10 +96,10 @@ token + plan + periodo + T&C ────► POST /api/billing/subscriptions
 
 | Estado | Significado | Acceso EmailBot |
 |---|---|---|
-| `PENDING` | Suscripción creada en Culqi, cobro no confirmado | sin cambio (no se concede el plan nuevo) |
-| `ACTIVE` | Pago confirmado | plan activado vía `private.activate_subscription` |
+| `PENDING` | Checkout reservado o suscripción creada en Culqi, cobro no verificado | sin cambio (no se concede el plan nuevo) |
+| `ACTIVE` | Cargo verificado | plan activado vía `private.activate_subscription` |
 | `PAST_DUE` | Renovación rechazada / en reintento | sin cambio: el periodo pagado sigue; expira al final si no se cobra |
-| `FAILED` | Primer cobro rechazado o suscripción no creada | sin plan |
+| `FAILED` | Primer cobro rechazado, suscripción no creada o checkout caducado (`confirmation_timeout`, `checkout_incomplete`) | sin plan |
 | `CANCELED` | Cancelada (motivo `USER`, `PROVIDER` o `UPGRADED`) | sin cambio inmediato: el periodo pagado se respeta |
 | `EXPIRED` | Vencida en Culqi | sin cambio inmediato: expira al final del periodo |
 
@@ -103,20 +114,22 @@ Culqi vienen de la especificación: 1 Creada, 2 Periodo de prueba, 3 Activa, 4 C
 | Culqi | EmailBot |
 |---|---|
 | 1 Creada, 2 Prueba | `PENDING` |
-| 3 Activa | `ACTIVE` (vía activación) |
+| 3 Activa | **ninguno por sí solo**: `ACTIVE` solo con un cargo verificado |
 | 5 En cola | `PAST_DUE` si ya estaba activa; si no, `PENDING` |
 | 4 Cancelada | `CANCELED` (`PROVIDER`, salvo que ya tuviera otro motivo) |
 | 6 Vencida | `EXPIRED` |
-| otro | sin cambio (se registra) |
+| 8 (no documentado; los SDK lo aceptan) u otro | sin cambio (se registra) |
 
 Casos cubiertos:
 
 | Caso | Qué pasa |
 |---|---|
-| Pago inicial aprobado | `ACTIVATED` |
-| Pago inicial rechazado | `FAILED` + `payment_events` `FAILED` |
-| Renovación aprobada | `RENEWED`, se extiende el periodo |
-| Renovación fallida | `PAST_DUE` |
+| Pago inicial verificado | `ACTIVATED` |
+| Pago inicial rechazado | `FAILED` + `payment_events` `FAILED`; la suscripción se cancela en Culqi (no cobra después) |
+| Renovación verificada | `RENEWED`, se extiende el periodo |
+| Renovación fallida | `PAST_DUE` (Culqi reintenta; no se cancela) |
+| `PENDING` sin cargo pagado tras 48 h | se cancela en Culqi y queda `FAILED` (`confirmation_timeout`) |
+| `PENDING` sin suscripción de Culqi tras 30 min | `FAILED` (`checkout_incomplete`) |
 | Culqi cancela tras reintentos | `CANCELED` (`PROVIDER`) o `EXPIRED` |
 | Cancelación del usuario | `CANCELED` (`USER`); se representa, pero no hay botón en esta fase |
 
@@ -167,7 +180,14 @@ Reglas (`apps/api/src/modules/billing/policy.ts`):
 - **upgrade** BÁSICO → PRO / BUSINESS y PRO → BUSINESS;
 - mismo plan solo para pasar a tarjeta un plan heredado o pagado a mano;
 - **sin downgrade** (`409`);
-- un checkout a la vez (`409 CHECKOUT_IN_PROGRESS`, también garantizado por índice único).
+- un checkout a la vez (`409 CHECKOUT_IN_PROGRESS`, garantizado por índice único).
+
+**Orden del checkout (F5, sin clientes duplicados).** La fila `PENDING` se inserta **antes** de cualquier escritura
+en Culqi (solo la lectura del plan va antes). Dos solicitudes simultáneas: una obtiene la reserva y la otra recibe
+`409` sin haber llamado a Culqi. Después: cliente (el guardado de la organización o uno nuevo) → `attachCustomer` →
+tarjeta → suscripción → `attachCulqiSubscription`. Si algo falla tras la reserva, la fila pasa a `FAILED` y libera el
+hueco. Si la suscripción se creó en Culqi pero no se pudo guardar, se cancela en Culqi (best effort; si no, se registra
+`billing.culqi.orphan_subscription`).
 
 Errores:
 
@@ -203,7 +223,7 @@ comercial pendiente.
 **Autenticación.** La documentación de Culqi no describe ninguna firma del webhook. Por eso **no se confía en el cuerpo**:
 - el worker lee de nuevo el evento con la llave secreta (`GET /v2/events/{id}`);
 - un id falso no existe en Culqi y el evento queda `IGNORED` (`NOT_FOUND_AT_CULQI`);
-- además, lee de nuevo la suscripción (`GET /v2/recurrent/subscriptions/{id}`) y aplica su estado **actual**.
+- además, lee de nuevo la suscripción, el plan y cada cargo, y solo aplica lo que pasa la verificación.
 
 El token en la URL es una defensa adicional contra tráfico basura (lo configuramos nosotros en la URL; no depende de
 una función de Culqi).
@@ -217,26 +237,60 @@ una función de Culqi).
 - El resto → `IGNORED`.
 - Como Culqi no documenta la forma de `data` en cada evento, se buscan los ids con los prefijos documentados (`sxn_`,
   `chr_`) en `data`, también si llega como texto JSON.
-- Eventos sin suscripción o de suscripciones que EmailBot no creó → `IGNORED`.
+- Eventos sin suscripción → `IGNORED`. Si el evento solo trae un cargo, la suscripción se busca en el propio cargo.
+- Suscripciones que EmailBot no creó → `IGNORED` (`UNKNOWN_SUBSCRIPTION`).
+- Webhook, reconciliación tras el checkout y reconciliación periódica usan **la misma función**
+  (`syncCulqiSubscription`).
+
+### Verificación de suscripción y cargo
+
+**Suscripción (F2, `verifyCulqiSubscription`).** Antes de aplicar nada se comprueba:
+- `id` = el guardado y del mismo entorno (`sxn_test_…` en sandbox);
+- `plan_id` = el plan mapeado del checkout;
+- plan de Culqi (`GET` plan): importe = catálogo, `PEN`, intervalo = periodo;
+- `metadata.organization_id` y `metadata.billing_subscription_id`, si vienen, = los de EmailBot.
+
+Si algo no coincide: no se activa, el evento queda `IGNORED` con `REJECTED:<motivo>` (p. ej. `PLAN_MISMATCH`,
+`PLAN_AMOUNT_MISMATCH`, `ORGANIZATION_MISMATCH`) y se registra en el log.
+
+**Cargo (F1, `verifyCulqiCharge`).** Candidatos: los `chr_…` del evento y de `periods[].charges[]` de la suscripción.
+Cada uno se lee con `GET /v2/charges/{id}`:
+- `PAID` solo si `paid === true` y `outcome.code === "succesfull_charge"` (así lo escribe Culqi), importe = catálogo,
+  `currency_code = PEN`, mismo entorno, y el cargo pertenece a la suscripción (listado en ella o hecho con su tarjeta /
+  cliente; una tarjeta o cliente distinto lo invalida);
+- `DECLINED` si `paid === false` o `card_declined` → se registra el fallo una sola vez (por id de cargo);
+- cualquier otra cosa → rechazado (`CHARGE_AMOUNT_MISMATCH`, `CHARGE_CURRENCY_MISMATCH`, `CHARGE_NOT_CONFIRMED`, …).
+
+Sin cargo pagado verificado, la fila sigue `PENDING` (el evento queda `PROCESSED` con `NO_VERIFIED_CHARGE`).
 
 **Idempotencia y orden:**
-- **Clave de activación** = (suscripción de Culqi, ciclo), con el ciclo identificado por `next_billing_date`. El webhook
-  y la reconciliación del mismo ciclo producen la misma clave y se aplican una sola vez (`DUPLICATE`).
-- **Confirmación tardía de un ciclo anterior** → `ALREADY_COVERED`: nunca acorta el periodo.
+- **Clave de activación = id del cargo** (`chr_…`), exigido también por la BD. Webhook y reconciliación del mismo cargo
+  se aplican una sola vez (`DUPLICATE`, un solo `payment_events`). Un `DUPLICATE` no cambia el estado.
+- **Cargo cuyo periodo ya terminó** → no se aplica; **confirmación tardía de un cargo anterior** → `ALREADY_COVERED`:
+  nunca acorta el periodo ni lo extiende dos veces.
 - **Evento de una suscripción reemplazada o cancelada** → `IGNORED`: nunca baja el plan.
-- **Cargos rechazados**: idempotentes por id de evento.
+- **Cargos rechazados**: idempotentes por id de cargo.
 - **Errores**: el evento queda `FAILED` y el job se reintenta. Un reenvío de Culqi tras agotar los reintentos crea un job
   nuevo.
 
-**Reconciliación (`CULQI_RECONCILE`).**
-- Tras cada checkout, el worker vuelve a leer la suscripción a los 20 s y después con backoff exponencial (unas 2 h).
-  Mientras siga en estado 1 o 5 sin fallo, reintenta.
+**Reconciliación tras el checkout (`CULQI_RECONCILE`).**
+- El worker vuelve a leer la suscripción a los 20 s y después con backoff exponencial (unas 2 h) mientras siga
+  `PENDING` sin cargo verificado.
 - Así el sandbox funciona aunque Culqi no pueda llamar al webhook (por ejemplo, en local).
 
+**Reconciliación periódica (F3/F4, `CULQI_RECONCILE_DUE`, cada 60 min; solo si el worker tiene `CULQI_SECRET_KEY`).**
+- Suscripciones `ACTIVE` / `PAST_DUE` cuyo periodo termina en los próximos 4 días (gracia + 24 h) o terminó hace menos
+  de 7 días: se aplican sus cargos nuevos (renovaciones) aunque no llegue webhook.
+- `PENDING` con suscripción de Culqi y sin cargo pagado tras **N = 48 h** (`CULQI_PENDING_CONFIRMATION_TIMEOUT_MS`):
+  se vuelve a sincronizar; si sigue sin cargo, se cancela en Culqi, se sincroniza otra vez (por si el cargo llegó
+  justo antes) y queda `FAILED` (`confirmation_timeout`). **Nunca** se cancela una suscripción con cargo pagado.
+- `PENDING` sin suscripción de Culqi tras 30 min (`CULQI_PENDING_INCOMPLETE_TIMEOUT_MS`): `FAILED`
+  (`checkout_incomplete`); el posible cliente / tarjeta en Culqi queda registrado en el log.
+- Lotes de 100; un error en una suscripción no detiene el resto.
+
 **Periodo.**
-- El periodo de EmailBot termina en el `next_billing_date` de Culqi + 3 días de gracia
-  (`CULQI_RENEWAL_GRACE_MS`), porque Culqi cobra las suscripciones en un lote diario.
-- Si falta esa fecha: un intervalo del plan + gracia.
+- Empieza en la fecha del cargo verificado y termina un intervalo del plan (mes / año calendario) después + 3 días de
+  gracia (`CULQI_RENEWAL_GRACE_MS`), porque Culqi cobra las suscripciones en un lote diario.
 - **Política provisional**, pendiente de decisión.
 
 ## Variables de entorno
@@ -280,7 +334,8 @@ Nada en `connect-src`: la tarjeta y el token viajan dentro del iframe de Culqi. 
    de pruebas.
 6. Usar una [tarjeta de prueba de Culqi](https://docs.culqi.com/es/documentacion/pagos-online/tarjetas-de-prueba/).
 7. Confirmación:
-   - **Sin webhook** (local): la reconciliación consulta la suscripción y activa el plan cuando Culqi la marca Activa.
+   - **Sin webhook** (local): la reconciliación consulta la suscripción y activa el plan cuando encuentra su cargo
+     pagado y verificado.
    - **Con webhook**: requiere una URL pública HTTPS hacia la API (túnel o entorno de pruebas aprobado).
      1. En CulqiPanel → Eventos → Webhooks → «+Añadir», usar `https://<api-de-pruebas>/webhooks/culqi?token=<CULQI_WEBHOOK_TOKEN>`.
      2. Suscribir los eventos `subscription.creation.succeeded`, `subscription.creation.failed`,
@@ -298,7 +353,8 @@ Nada en `connect-src`: la tarjeta y el token viajan dentro del iframe de Culqi. 
 |---|---|---|
 | Autenticación del webhook (firma, usuario/clave) | `/webhooks/culqi` | No se confía en el cuerpo: se vuelve a leer el evento con la llave secreta; token opcional en la URL |
 | Forma de `data` por tipo de evento | Worker | Búsqueda de ids por prefijo documentado y relectura de la suscripción |
-| Si el estado 3 «Activa» implica primer cobro hecho | Activación por reconciliación | Por webhook, `subscription.charge.succeeded` verificado también activa. Revisar el primer cobro en sandbox |
+| Si el estado 3 «Activa» implica primer cobro hecho | Activación | Ya no importa: solo activa un cargo verificado con `GET /v2/charges/{id}`. Confirmar en sandbox que `periods[].charges[]` o el evento traen el `chr_` |
+| Estado 8 (aceptado por los SDK, no documentado) | Mapper | Sin cambio de estado; se registra |
 | Semántica de `interval_count` («si envía 0 se cobrará de forma indefinida») | Planes | Se envía 0. Confirmar en el plan creado (`GET`) y en la primera renovación |
 | Unidades de `next_billing_date` (los ejemplos mezclan segundos y ms) | Periodo | Se aceptan ambos |
 | Respuesta al crear un cliente con email repetido | Checkout | Si Culqi lo rechaza, se busca el cliente por email y se reutiliza |
@@ -365,8 +421,8 @@ Todo lo siguiente está **pendiente** y requiere aprobación explícita:
   - cancelación al final del periodo;
   - reintentos de Culqi.
 - **Facturación:** SUNAT / facturación electrónica, reembolsos.
-- **Operación:** alertas sobre eventos `FAILED` y checkouts `PENDING` antiguos; panel de Super Admin para ver
-  `billing_*`.
+- **Operación:** alertas sobre eventos `FAILED`, cargos rechazados por verificación (`REJECTED:*`) y suscripciones
+  huérfanas en Culqi; panel de Super Admin para ver `billing_*`.
 - **Legal (pendiente de revisión legal; no se redactó contenido definitivo):**
   - condiciones de contratación;
   - precio con IGV y periodicidad;
