@@ -166,7 +166,7 @@ describe.each<DefaultPrivilegesProfile>(["production", "local"])("AFTER migratio
     expect(await t.asAdmin((tx) => privilegeMatrix(tx, "service_role"))).toEqual(SERVICE_ROLE_EXPECTED);
   });
 
-  it("service_role cannot execute EmailBot SECURITY DEFINER functions (one explicit, parameterless exception)", async () => {
+  it("service_role cannot execute EmailBot SECURITY DEFINER functions (explicit exceptions only)", async () => {
     const executable = await t.asAdmin(async (tx) =>
       (
         await tx.query<{ f: string }>(
@@ -178,7 +178,14 @@ describe.each<DefaultPrivilegesProfile>(["production", "local"])("AFTER migratio
     );
     // Commercial V1.2: the worker's expiration job. No parameters, now() of the database: it can only expire
     // subscriptions whose period already ended (covered by subscriptions.test.ts).
-    expect(executable).toEqual(["public.expire_due_subscriptions()"]);
+    // OAuth mailbox connection: plan limit + insert/update under the organization lock, called by the API's
+    // OAuth callback after it re-checked the role and the plan (covered by email-account-connect.test.ts).
+    expect(executable.sort()).toEqual(
+      [
+        "public.connect_oauth_email_account(p_organization_id uuid, p_provider email_provider, p_email_address text, p_display_name text, p_provider_account_id text, p_access_token_encrypted text, p_refresh_token_encrypted text, p_token_expires_at timestamp with time zone, p_sync_cursor text)",
+        "public.expire_due_subscriptions()"
+      ].sort()
+    );
   });
 
   it("every backend operation works with these grants", async () => {

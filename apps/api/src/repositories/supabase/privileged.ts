@@ -49,7 +49,6 @@ export function privilegedOperations(service: SupabaseClient): PrivilegedOperati
     },
 
     getOrganizationEntitlements: (organizationId) => plans.entitlements(organizationId),
-    getOrganizationUsage: (organizationId, keys) => plans.usage(organizationId, keys),
 
     async listPlanCatalog() {
       // Read-only, public data: the service role has SELECT on the three catalog tables (no anon grant).
@@ -57,19 +56,6 @@ export function privilegedOperations(service: SupabaseClient): PrivilegedOperati
         await service.from("plan_catalog").select(PLAN_CATALOG_COLUMNS).eq("active", true).order("sort_order", { ascending: true })
       ) as Row[];
       return toPlanCatalog(rows);
-    },
-
-    async findOAuthEmailAccountStatus(organizationId, provider, emailAddress) {
-      const row = unwrap(
-        await service
-          .from("email_accounts")
-          .select("status")
-          .eq("organization_id", organizationId)
-          .eq("provider", provider)
-          .eq("email_address", emailAddress.trim().toLowerCase())
-          .maybeSingle()
-      ) as Row | null;
-      return (row?.status as EmailAccountStatus | undefined) ?? null;
     },
 
     async getMemberRole(organizationId, userId) {
@@ -84,66 +70,48 @@ export function privilegedOperations(service: SupabaseClient): PrivilegedOperati
       return (row?.role as OrganizationRole | undefined) ?? null;
     },
 
-    async upsertOAuthEmailAccount(input) {
-      const emailAddress = input.emailAddress.trim().toLowerCase();
+    async connectOAuthEmailAccount(input) {
+      // One transaction under a per-organization lock: limit check + insert/update (P0), and the
+      // Gmail cursor of an ERROR mailbox is kept (P1). See 20261007160000_email_account_oauth_connect.sql.
+      const rows = unwrap(
+        await service.rpc("connect_oauth_email_account", {
+          p_organization_id: input.organizationId,
+          p_provider: input.provider,
+          p_email_address: input.emailAddress,
+          p_display_name: input.displayName,
+          p_provider_account_id: input.providerAccountId,
+          p_access_token_encrypted: input.accessTokenEncrypted,
+          p_refresh_token_encrypted: input.refreshTokenEncrypted,
+          p_token_expires_at: input.tokenExpiresAt,
+          p_sync_cursor: input.syncCursor
+        })
+      ) as Row[] | null;
+      const result = rows?.[0];
+      if (!result) throw new AppError(500, "EMAIL_ACCOUNT_CONNECT_FAILED", "The mailbox connection returned no result");
 
-      const existing = unwrap(
-        await service
-          .from("email_accounts")
-          .select("id")
-          .eq("organization_id", input.organizationId)
-          .eq("provider", input.provider)
-          .eq("email_address", emailAddress)
-          .maybeSingle()
-      ) as Row | null;
-
-      const columns: Record<string, unknown> = {
-        status: "ACTIVE",
-        display_name: input.displayName,
-        provider_account_id: input.providerAccountId,
-        access_token_encrypted: input.accessTokenEncrypted,
-        token_expires_at: input.tokenExpiresAt,
-        sync_cursor: input.syncCursor,
-        last_error_code: null,
-        last_error_message: null
-      };
-      // Google only returns a refresh token on (re)consent: keep the old one otherwise.
-      if (input.refreshTokenEncrypted) columns.refresh_token_encrypted = input.refreshTokenEncrypted;
-
-      if (existing) {
-        const row = unwrap(
-          await service
-            .from("email_accounts")
-            .update(columns)
-            .eq("id", existing.id)
-            .eq("organization_id", input.organizationId)
-            .select(EMAIL_ACCOUNT_COLUMNS)
-            .single()
-        ) as Row;
-        return { account: toEmailAccount(row), created: false };
+      const outcome = result.outcome as string;
+      if (outcome === "PLAN_LIMIT_REACHED") {
+        return { outcome, used: Number(result.used ?? 0), limit: Number(result.limit_value ?? 0) };
       }
-
-      if (!input.refreshTokenEncrypted) {
-        throw new AppError(
-          422,
-          "MISSING_REFRESH_TOKEN",
-          "The provider did not return a refresh token; offline access is required"
-        );
+      if (outcome === "MISSING_REFRESH_TOKEN") return { outcome };
+      if (outcome !== "CREATED" && outcome !== "RECONNECTED") {
+        throw new AppError(500, "EMAIL_ACCOUNT_CONNECT_FAILED", "The mailbox connection returned an unknown outcome");
       }
 
       const row = unwrap(
         await service
           .from("email_accounts")
-          .insert({
-            ...columns,
-            organization_id: input.organizationId,
-            provider: input.provider,
-            email_address: emailAddress
-          })
           .select(EMAIL_ACCOUNT_COLUMNS)
+          .eq("id", result.email_account_id)
+          .eq("organization_id", input.organizationId)
           .single()
       ) as Row;
-      return { account: toEmailAccount(row), created: true };
+      return {
+        outcome,
+        account: toEmailAccount(row),
+        created: outcome === "CREATED",
+        previousStatus: (result.previous_status as EmailAccountStatus | null) ?? null
+      };
     },
 
     async createImapEmailAccount(input) {

@@ -151,7 +151,7 @@ describe("OAuth state", () => {
       fetch: fetchMock as unknown as typeof fetch
     });
     privileged.getMemberRole.mockResolvedValue("OWNER");
-    privileged.upsertOAuthEmailAccount.mockResolvedValue({ account: { id: "acc", emailAddress: "me@gmail.com" }, created: true });
+    privileged.connectOAuthEmailAccount.mockResolvedValue({ outcome: "CREATED", account: { id: "acc", emailAddress: "me@gmail.com" }, created: true, previousStatus: null });
 
     const state = encodeURIComponent(
       createOAuthState({ userId: owner.id, organizationId: ORG_A, provider: "GMAIL" }, deps.config.oauthStateSecret)
@@ -161,7 +161,7 @@ describe("OAuth state", () => {
 
     expect(first.headers.location).toContain("oauth=connected");
     expect(replay.headers.location).toContain("reason=invalid_state");
-    expect(privileged.upsertOAuthEmailAccount).toHaveBeenCalledTimes(1);
+    expect(privileged.connectOAuthEmailAccount).toHaveBeenCalledTimes(1);
   });
 });
 

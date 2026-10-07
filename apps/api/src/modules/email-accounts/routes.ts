@@ -172,18 +172,10 @@ export function emailAccountRoutes(deps: AppDeps) {
         const tokens = await exchangeAuthorizationCode(provider, config, query.data.code, deps.fetch);
         const identity = await fetchMailboxIdentity(provider, tokens.accessToken, deps.fetch);
 
-        // Re-authorizing a mailbox that already counts is always allowed; a new (or
-        // disconnected) one needs room in the plan. The tokens just obtained are discarded.
-        const existing = await deps.privileged.findOAuthEmailAccountStatus(organizationId, provider, identity.emailAddress);
-        if (existing === null || existing === "DISCONNECTED") {
-          const used = (await deps.privileged.getOrganizationUsage(organizationId, ["EMAIL_ACCOUNTS"])).EMAIL_ACCOUNTS ?? 0;
-          if (!isWithinLimit(entitlements, "EMAIL_ACCOUNTS", used)) {
-            request.log.info({ organizationId, provider, code: "PLAN_LIMIT_REACHED", used }, "oauth connection refused by the plan");
-            return fail("plan_limit");
-          }
-        }
-
-        const { account, created } = await deps.privileged.upsertOAuthEmailAccount({
+        // One locked transaction decides and stores (concurrent callbacks cannot exceed the plan):
+        // re-authorizing a mailbox that already counts is always allowed, a new (or disconnected)
+        // one needs room in the plan. On a refusal nothing is stored and the tokens just obtained are discarded.
+        const connection = await deps.privileged.connectOAuthEmailAccount({
           organizationId,
           provider: provider === "GMAIL" ? "GMAIL" : "MICROSOFT",
           emailAddress: identity.emailAddress,
@@ -194,6 +186,19 @@ export function emailAccountRoutes(deps: AppDeps) {
           tokenExpiresAt: tokens.expiresAt?.toISOString() ?? null,
           syncCursor: identity.syncCursor
         });
+        if (connection.outcome === "PLAN_LIMIT_REACHED") {
+          request.log.info(
+            { organizationId, provider, code: "PLAN_LIMIT_REACHED", used: connection.used, max: connection.limit },
+            "oauth connection refused by the plan"
+          );
+          return fail("plan_limit");
+        }
+        if (connection.outcome === "MISSING_REFRESH_TOKEN") {
+          // Offline access is required to keep synchronizing; nothing was stored and the user can retry.
+          request.log.warn({ organizationId, provider, code: "MISSING_REFRESH_TOKEN" }, "oauth connection refused: no refresh token");
+          return fail("missing_refresh_token");
+        }
+        const { account, created } = connection;
 
         await deps.privileged
           .insertAuditLog({

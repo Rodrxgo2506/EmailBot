@@ -121,7 +121,7 @@ describe("OAuth callback with a hanging provider", () => {
     expect(Date.now() - started).toBeLessThan(2000);
     expect(response.statusCode).toBe(302);
     expect(response.headers.location).toContain("reason=connection_failed");
-    expect(privileged.upsertOAuthEmailAccount).not.toHaveBeenCalled();
+    expect(privileged.connectOAuthEmailAccount).not.toHaveBeenCalled();
   });
 });
 

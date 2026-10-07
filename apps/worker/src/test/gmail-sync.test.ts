@@ -11,6 +11,7 @@ import {
   syncAccount,
   type HandleEventDeps
 } from "../pipeline/handle-email-event.js";
+import { handleAccountFailure } from "../pipeline/failures.js";
 import { AttachmentsPendingError, processEmail, type ProcessEmailDeps, type ProcessEmailOutcome } from "../pipeline/process-email.js";
 import { createGmailAdapter } from "../providers/gmail/adapter.js";
 import { ProviderHttpError } from "../providers/http.js";
@@ -291,6 +292,93 @@ describe("concurrency, duplicates and out-of-order notifications", () => {
     expect(await handleEmailEvent({ type: "GMAIL_NOTIFICATION", emailAddress: "me@gmail.com", historyId: "1" }, deps)).toEqual({ accounts: 0, enqueued: 0 });
     expect(await handleEmailEvent({ type: "GMAIL_NOTIFICATION", emailAddress: "other@gmail.com", historyId: "1" }, deps)).toEqual({ accounts: 0, enqueued: 0 });
     expect(enqueueSync).not.toHaveBeenCalled();
+  });
+});
+
+describe("two Gmail mailboxes of one organization (sales@ / support@)", () => {
+  /** Each mailbox has its own (encrypted) tokens and its own history cursor. */
+  function twoMailboxes(adapter?: ProviderAdapter & Record<string, ReturnType<typeof vi.fn>>) {
+    const sales = makeAccount({ id: "acc-sales", emailAddress: "sales@example.com", syncCursor: "100", accessTokenEncrypted: "v1.sales", refreshTokenEncrypted: "v1.sales-rt" });
+    const support = makeAccount({ id: "acc-support", emailAddress: "support@example.com", syncCursor: "900", accessTokenEncrypted: "v1.support", refreshTokenEncrypted: "v1.support-rt" });
+    const context = setup({ accounts: [sales, support], ...(adapter ? { adapter } : {}) });
+    // The real createContext decrypts the account's own token; here the token names its account.
+    const createContext = vi.fn((account: WorkerAccount) => ({ account, getAccessToken: async () => `token-of-${account.accessTokenEncrypted}` }));
+    context.deps.createContext = createContext;
+    return { ...context, sales, support, createContext };
+  }
+
+  it("a push for sales@ queues only sales@, a push for support@ only support@", async () => {
+    const { deps, enqueueSync } = twoMailboxes();
+    expect(await handleEmailEvent({ type: "GMAIL_NOTIFICATION", emailAddress: "sales@example.com", historyId: "150" }, deps)).toEqual({ accounts: 1, enqueued: 1 });
+    expect(enqueueSync.mock.calls).toEqual([[expect.objectContaining({ id: "acc-sales" }), "PUBSUB"]]);
+    enqueueSync.mockClear();
+    expect(await handleEmailEvent({ type: "GMAIL_NOTIFICATION", emailAddress: "support@example.com", historyId: "950" }, deps)).toEqual({ accounts: 1, enqueued: 1 });
+    expect(enqueueSync.mock.calls).toEqual([[expect.objectContaining({ id: "acc-support" }), "PUBSUB"]]);
+  });
+
+  it("syncing sales@ uses only sales@'s token and cursor; support@'s cursor does not move", async () => {
+    const seen: Array<{ id: string; cursor: string | null; token: string }> = [];
+    const adapter = makeAdapter({
+      listNewMessageIds: vi.fn(async (context: { account: WorkerAccount; getAccessToken(): Promise<string> }) => {
+        seen.push({ id: context.account.id, cursor: context.account.syncCursor, token: await context.getAccessToken() });
+        return { messageIds: ["m1"], nextCursor: "120" };
+      })
+    });
+    const { deps, sales, support, processMessage, createContext } = twoMailboxes(adapter);
+    await syncAccount(sales, deps);
+
+    expect(createContext.mock.calls.map(([account]) => account.id)).toEqual(["acc-sales"]);
+    expect(seen).toEqual([{ id: "acc-sales", cursor: "100", token: "token-of-v1.sales" }]);
+    expect(processMessage.mock.calls.map(([job]) => job.emailAccountId)).toEqual(["acc-sales"]);
+    expect(sales.syncCursor).toBe("120");
+    expect(support.syncCursor).toBe("900");
+  });
+
+  it("the watch of sales@ is created with sales@'s context and recorded on sales@ only", async () => {
+    const watch = vi.fn(async (_context: { account: WorkerAccount }, _topic: string) => ({ expiresAt: new Date(NOW + 7 * 86_400_000).toISOString() }));
+    const { deps, store, support } = twoMailboxes(makeAdapter({ watch }));
+    expect(await ensureWatch("acc-sales", ORG, deps)).toBe(true);
+    expect(watch).toHaveBeenCalledTimes(1);
+    expect(watch.mock.calls[0]?.[0].account.id).toBe("acc-sales");
+    expect(vi.mocked(store.saveWatchState).mock.calls.map(([id]) => id)).toEqual(["acc-sales"]);
+    expect(support.watchExpiresAt).toBeUndefined();
+  });
+
+  it("revoked credentials on sales@ put only sales@ in ERROR; support@ keeps receiving its pushes", async () => {
+    const { deps, store, enqueueSync, sales } = twoMailboxes();
+    await expect(
+      handleAccountFailure(new ProviderAuthError("revoked", "AUTH_REVOKED"), sales, { accounts: store, realtime: makeRealtime(), logger: silentLogger })
+    ).rejects.toThrow();
+    expect(vi.mocked(store.markError).mock.calls.map(([id]) => id)).toEqual(["acc-sales"]);
+
+    await handleEmailEvent({ type: "GMAIL_NOTIFICATION", emailAddress: "support@example.com", historyId: "950" }, deps);
+    expect(enqueueSync.mock.calls).toEqual([[expect.objectContaining({ id: "acc-support" }), "PUBSUB"]]);
+  });
+
+  it("re-authorized from ERROR with its kept cursor: the sync resumes from it, and an expired one is recovered (history gap)", async () => {
+    const listedFrom: Array<string | null> = [];
+    const adapter = makeAdapter({
+      listNewMessageIds: vi.fn(async (context: { account: WorkerAccount }) => {
+        listedFrom.push(context.account.syncCursor);
+        return { messageIds: [], nextCursor: "12345", historyGap: true };
+      }),
+      recoverMessageIds: vi.fn(async () => ({ messageIds: ["missed-1", "missed-2"], nextCursor: "20000", truncated: false }))
+    });
+    const { deps, processMessage } = twoMailboxes(adapter);
+    const reconnected = makeAccount({ id: "acc-reconnected", emailAddress: "sales@example.com", syncCursor: "12345", lastSyncedAt: "2026-10-05T08:00:00.000Z" });
+    (deps.accounts as unknown as { advanceSyncCursor: ReturnType<typeof vi.fn> }).advanceSyncCursor.mockImplementation(
+      async (_id: string, state: { from: string | null; to: string | null }) => {
+        if (reconnected.syncCursor !== state.from) return false;
+        reconnected.syncCursor = state.to;
+        return true;
+      }
+    );
+
+    const result = await syncAccount(reconnected, deps);
+    expect(listedFrom).toEqual(["12345"]);
+    expect(result).toMatchObject({ historyGap: true, processed: 2, cursorAdvanced: true });
+    expect(processMessage.mock.calls.map(([job]) => job.providerMessageId)).toEqual(["missed-1", "missed-2"]);
+    expect(reconnected.syncCursor).toBe("20000");
   });
 });
 

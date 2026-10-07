@@ -204,10 +204,27 @@ describe("OAuth clients", () => {
     expect(url.searchParams.get("scope")).toContain("gmail.readonly");
   });
 
+  it("Gmail asks for explicit consent AND the account chooser (prompt=consent select_account); nothing else changes", () => {
+    const url = new URL(buildAuthorizationUrl("GMAIL", config, "state-123"));
+    expect(url.searchParams.get("prompt")).toBe("consent select_account");
+    expect(url.toString()).toContain("prompt=consent+select_account");
+    expect(Object.fromEntries(url.searchParams)).toEqual({
+      client_id: "client",
+      redirect_uri: "https://api.example.com/cb",
+      response_type: "code",
+      scope: "https://www.googleapis.com/auth/gmail.readonly",
+      access_type: "offline",
+      prompt: "consent select_account",
+      include_granted_scopes: "true",
+      state: "state-123"
+    });
+  });
+
   it("builds a Microsoft authorization URL with the tenant", () => {
     const url = new URL(buildAuthorizationUrl("MICROSOFT", { ...config, tenant: "common" }, "s"));
     expect(url.pathname).toBe("/common/oauth2/v2.0/authorize");
     expect(url.searchParams.get("scope")).toContain("offline_access");
+    expect(url.searchParams.get("prompt")).toBe("select_account"); // Microsoft unchanged
   });
 
   it("exchanges a code and computes expiry", async () => {

@@ -224,7 +224,7 @@ const a2 = await customer(ownerA.token, orgA, botA, "Cliente A2", address("dos")
 const b1 = await customer(ownerB.token, orgB, botB, "Cliente B1", address("uno"));
 
 async function account(org: string, box: string) {
-  const created = await privileged.upsertOAuthEmailAccount({
+  const connected = await privileged.connectOAuthEmailAccount({
     organizationId: org,
     provider: "GMAIL",
     emailAddress: box,
@@ -235,7 +235,8 @@ async function account(org: string, box: string) {
     tokenExpiresAt: new Date(Date.now() + 3600_000).toISOString(),
     syncCursor: "1"
   });
-  return created.account.id;
+  if (connected.outcome !== "CREATED" && connected.outcome !== "RECONNECTED") throw new Error(`mailbox ${box}: ${connected.outcome}`);
+  return connected.account.id;
 }
 const accountA = await account(orgA, `box-a-${run}@e2e.test`);
 const accountB = await account(orgB, `box-b-${run}@e2e.test`);

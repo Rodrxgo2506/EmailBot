@@ -69,7 +69,9 @@ export function buildAuthorizationUrl(provider: OAuthProvider, config: OAuthClie
       response_type: "code",
       scope: GMAIL_SCOPES.join(" "),
       access_type: "offline",
-      prompt: "consent",
+      // Explicit consent (a refresh token every time) AND the account chooser: with several Google sessions open,
+      // the user picks which mailbox to connect (several Gmail accounts per organization).
+      prompt: "consent select_account",
       include_granted_scopes: "true",
       state
     }).toString();
