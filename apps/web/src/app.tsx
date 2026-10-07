@@ -14,6 +14,7 @@ import {
 } from "@/components/layout/guards";
 import { SkeletonRows } from "@/components/ui/feedback";
 import { createQueryClient } from "@/lib/query-client";
+import { useTheme } from "@/lib/theme";
 import { AuthProvider } from "@/providers/auth-provider";
 import { OrganizationProvider } from "@/providers/organization-provider";
 
@@ -62,6 +63,7 @@ function publicPage(element: ReactNode) {
 
 export function App() {
   const [queryClient] = useState(createQueryClient);
+  const { theme } = useTheme();
 
   return (
     <QueryClientProvider client={queryClient}>
@@ -75,7 +77,8 @@ export function App() {
           <Route path="*" element={<SessionRoutes />} />
         </Routes>
       </BrowserRouter>
-      <Toaster richColors closeButton position="top-right" />
+      {/* Toasts follow the app theme (light / dark from the navbar toggle). */}
+      <Toaster richColors closeButton position="top-right" theme={theme} />
     </QueryClientProvider>
   );
 }

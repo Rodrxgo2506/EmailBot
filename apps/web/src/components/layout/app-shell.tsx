@@ -8,6 +8,7 @@ import { useAuth, useUserDisplayName } from "@/providers/auth-provider";
 import { useOrganization } from "@/providers/organization-provider";
 import { useRealtime, type RealtimeStatus } from "@/providers/realtime";
 import { Sidebar } from "./sidebar";
+import { ThemeToggle } from "./theme-toggle";
 
 const STATUS_STYLES: Record<RealtimeStatus, { label: string; dot: string }> = {
   connected: { label: "Tiempo real activo", dot: "bg-emerald-500" },
@@ -55,6 +56,7 @@ export function AppShell() {
           <p className="truncate text-sm font-medium">{organization?.name}</p>
           <div className="ml-auto flex items-center gap-3">
             <RealtimeIndicator status={realtime} />
+            <ThemeToggle />
             <Link
               to="/profile"
               className="flex items-center gap-2 rounded-md px-1.5 py-1 text-sm hover:bg-accent"
