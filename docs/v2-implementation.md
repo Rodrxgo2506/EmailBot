@@ -254,6 +254,11 @@ determinista:
   concurrentes puede registrar el mismo evento más de una vez (las entregas nunca se duplican).
 - Consultas del worker: búsqueda por `(organization_id, type, normalized_value) where active` (en bloques de 50
   valores, cada valor entrecomillado y escapado para PostgREST) + asignaciones activas del bot.
+- Configuración en el panel: ficha del bot → tarjeta «Entrega al portal» (permiso `bots:manage`; PATCH
+  `/api/bots/:id` con `customerResolution`). Todo bot nace con `source = NONE` (default de la columna): sus correos
+  se ven en el panel pero no llegan a ningún portal (`routing.unassigned` `NOT_CONFIGURED` en el log del worker,
+  sin auditoría) hasta que se elige la fuente. Las acciones de la regla («Marcar como importante», etc.) no
+  influyen en la entrega. Activarla no reenvía correos ya procesados.
 
 ### `email_deliveries`
 

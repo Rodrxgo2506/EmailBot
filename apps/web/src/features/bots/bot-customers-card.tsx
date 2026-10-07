@@ -39,7 +39,7 @@ function AssignDialog({
       <DialogContent>
         <DialogHeader>
           <DialogTitle>Asociar cliente</DialogTitle>
-          <DialogDescription>El cliente podrá recibir los correos de este bot (cuando se active la entrega).</DialogDescription>
+          <DialogDescription>El cliente podrá recibir los correos de este bot si la entrega al portal está activa y uno de sus identificadores coincide.</DialogDescription>
         </DialogHeader>
         <div className="relative">
           <Search className="pointer-events-none absolute top-2.5 left-2.5 size-4 text-muted-foreground" />
@@ -85,7 +85,7 @@ export function BotCustomersCard({ botId, canManage }: { botId: string; canManag
       <CardHeader className="flex-row items-start justify-between gap-4">
         <div className="grid gap-1.5">
           <CardTitle>Clientes</CardTitle>
-          <CardDescription>Clientes que podrán recibir los correos de este bot.</CardDescription>
+          <CardDescription>Clientes que pueden recibir los correos de este bot (según la entrega al portal).</CardDescription>
         </div>
         {canManage ? (
           <Button size="sm" onClick={() => setAssigning(true)}>

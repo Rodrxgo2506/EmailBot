@@ -1,4 +1,5 @@
 import type { Bot, BotStatus } from "@emailbot/types";
+import type { CustomerResolutionInput } from "@emailbot/validation";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { queryKeys } from "@/lib/query-keys";
@@ -8,6 +9,7 @@ export interface BotInput {
   name?: string;
   description?: string | null;
   status?: BotStatus;
+  customerResolution?: CustomerResolutionInput;
 }
 
 export function useBots() {
