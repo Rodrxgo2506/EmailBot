@@ -123,7 +123,7 @@ Con acceso se aplican los límites duros: `403 PLAN_LIMIT_REACHED` / `PLAN_FEATU
 | Acción | Comprobación |
 |---|---|
 | `POST /email-accounts/oauth/:provider/start` | suscripción; feature `GMAIL` / `MICROSOFT`; `EMAIL_ACCOUNTS` (salvo que pueda ser la re-autorización de un buzón que ya cuenta) |
-| `GET /oauth/:provider/callback` | de nuevo suscripción y feature, antes de canjear el código; `EMAIL_ACCOUNTS` con la dirección real |
+| `GET /oauth/:provider/callback` | de nuevo suscripción y feature, antes de canjear el código; `EMAIL_ACCOUNTS` con la dirección real, **atómico** (ver abajo) |
 | `POST /email-accounts/imap` | `EMAIL_ACCOUNTS` (IMAP sigue desactivado) |
 | `POST /rules` | `RULES` |
 | `POST /bots` (ACTIVE), `PATCH /bots/:id` (→ ACTIVE) | `BOTS` (bots activos) |
@@ -132,6 +132,33 @@ Con acceso se aplican los límites duros: `403 PLAN_LIMIT_REACHED` / `PLAN_FEATU
 | `POST /customers/:id/access` | feature `PORTAL` |
 
 Lo existente **nunca** se borra ni se oculta: los datos se leen, y las cuentas se pueden pausar y desconectar.
+
+### Conexión OAuth de un buzón (`public.connect_oauth_email_account`)
+
+El callback OAuth guarda el buzón solo con esta función (migración `20261007160000_email_account_oauth_connect`,
+SECURITY DEFINER, `search_path = ''`, EXECUTE solo para `service_role`). En **una** transacción:
+
+1. bloquea la fila de la organización (`FOR NO KEY UPDATE`): las conexiones simultáneas de una organización se
+   serializan;
+2. busca el buzón por (organización, proveedor, `lower(email)`) y lo bloquea;
+3. si es nuevo o está `DISCONNECTED`, exige `usados + 1 <= límite` (usados = buzones con estado distinto de
+   `DISCONNECTED`; límite = `EMAIL_ACCOUNTS` del plan efectivo, `NULL` = ilimitado, sin acceso comercial = 0).
+   `ACTIVE` / `PAUSED` / `ERROR` se re-autorizan sin consumir cupo;
+4. inserta o reutiliza la fila (nunca dos filas para la misma dirección).
+
+Resultados: `CREATED`, `RECONNECTED`, `PLAN_LIMIT_REACHED` (`reason=plan_limit`) y `MISSING_REFRESH_TOKEN`
+(`reason=missing_refresh_token`: el proveedor no devolvió refresh token y no hay uno guardado; no se escribe nada y
+se puede reintentar). En la re-autorización: estado `ACTIVE`, access token nuevo, refresh token nuevo solo si llegó
+(si no, se conserva), `last_error_*` a `NULL`. **Gmail en `ERROR` conserva su `sync_cursor`** (historyId): se
+sincroniza lo recibido mientras la autorización estuvo rota; si el cursor caducó, el worker usa la recuperación de
+history gap. Nuevo, `DISCONNECTED`, `ACTIVE`, `PAUSED` y Microsoft parten del cursor actual (como antes). El watch
+se sigue encolando igual (`WATCH_ACCOUNT`).
+
+Pruebas: `packages/database/test/email-account-connect.test.ts` (PGlite: decisiones, permisos, A/B, mayúsculas; PGlite
+tiene una sola conexión, así que ahí las llamadas «simultáneas» se ejecutan en serie) y
+`packages/database/scripts/connect-concurrency-check.sh`, que comprueba el bloqueo con sesiones **realmente
+simultáneas** contra el PostgreSQL local de Supabase, en una base temporal que crea y borra, y con una función de
+control sin bloqueo que sí supera el límite.
 
 `GET /api/organizations/current/plan` (todos los roles) devuelve los entitlements, el uso y la suscripción actual. La
 web lo muestra en Configuración («Plan y uso» / «Sin suscripción activa») y desactiva los botones de conexión sin
@@ -270,7 +297,8 @@ conservan; al recuperar el acceso todo continúa desde donde quedó.
 - **`ADVANCED_STATS`, `API`, `PRIORITY_SUPPORT`**: sin producto detrás. La web no los muestra.
 - **Microsoft al bajar a BÁSICO**: un buzón Microsoft ya conectado sigue sincronizando mientras haya suscripción (el
   portal sí se cierra; ver arriba).
-- **Concurrencia**: el límite se comprueba antes de crear; dos peticiones simultáneas pueden superarlo en una unidad.
+- **Concurrencia**: `EMAIL_ACCOUNTS` en la conexión OAuth es atómico (ver arriba). Los demás límites se comprueban
+  antes de crear; dos peticiones simultáneas pueden superarlos en una unidad.
 - **Legal**: los Términos / la Privacidad no tienen todavía las condiciones de contratación, reembolsos, el Libro de
   Reclamaciones ni Culqi como encargado de pagos.
 

@@ -20,7 +20,7 @@ import {
   isWithinLimit
 } from "../modules/plans/entitlements.js";
 import { toEntitlements } from "../repositories/supabase/plan-repositories.js";
-import type { PlanRepository } from "../repositories/types.js";
+import type { OAuthAccountConnection, PlanRepository } from "../repositories/types.js";
 import { authHeaders, createTestApp, makeUser, MICROSOFT_OAUTH, ORG_A, type TestUser } from "./helpers.js";
 import { entitlementsFor, noAccess, V1_FEATURES, V1_LIMITS } from "./plan-fixtures.js";
 
@@ -220,9 +220,6 @@ async function appWithPlan(plan: OrganizationPlan, usage: Partial<Record<PlanUsa
     Object.fromEntries(keys.map((key) => [key, usage[key] ?? 0]))
   );
   ctx.privileged.getOrganizationEntitlements.mockResolvedValue(entitlementsFor(plan));
-  ctx.privileged.getOrganizationUsage.mockImplementation(async (_organizationId: string, keys: readonly PlanUsageKey[]) =>
-    Object.fromEntries(keys.map((key) => [key, usage[key] ?? 0]))
-  );
   return ctx;
 }
 
@@ -406,16 +403,27 @@ describe("e-mail accounts: OAuth callback re-checks the plan", () => {
           ? new Response(JSON.stringify({ id: "ms-id", mail: "me@contoso.com", userPrincipalName: "me@contoso.com", displayName: "Me" }), { status: 200 })
           : new Response(JSON.stringify({ emailAddress: "Me@Gmail.com", historyId: "555" }), { status: 200 })
     );
+  const created = (): OAuthAccountConnection => ({
+    outcome: "CREATED",
+    account: mailbox({ id: "acc-new", emailAddress: "me@gmail.com" }),
+    created: true,
+    previousStatus: null
+  });
 
-  async function callback(plan: OrganizationPlan, provider: "GMAIL" | "MICROSOFT", usage: Partial<Record<PlanUsageKey, number>> = {}) {
+  /*
+   * The limit itself (count + insert under the organization lock) is decided by
+   * public.connect_oauth_email_account and covered against the real SQL in
+   * packages/database/test/email-account-connect.test.ts; here the route's use of its outcome.
+   */
+  async function callback(plan: OrganizationPlan, provider: "GMAIL" | "MICROSOFT", connection: OAuthAccountConnection = created()) {
     const fetch = tokenFetch();
-    const context = await appWithPlan(plan, usage, {
+    const context = await appWithPlan(plan, {}, {
       users: [owner],
       fetch: fetch as unknown as typeof globalThis.fetch,
       config: { google, microsoft: MICROSOFT_OAUTH }
     });
     context.privileged.getMemberRole.mockResolvedValue("OWNER");
-    context.privileged.upsertOAuthEmailAccount.mockResolvedValue({ account: { id: "acc-new", emailAddress: "me@gmail.com" }, created: true });
+    context.privileged.connectOAuthEmailAccount.mockResolvedValue(connection);
     const state = createOAuthState({ userId: owner.id, organizationId: ORG_A, provider }, context.deps.config.oauthStateSecret);
     const slug = provider === "GMAIL" ? "gmail" : "microsoft";
     const send = () => context.app.inject({ method: "GET", url: `/api/oauth/${slug}/callback?code=abc&state=${encodeURIComponent(state)}` });
@@ -427,56 +435,49 @@ describe("e-mail accounts: OAuth callback re-checks the plan", () => {
     const response = await send();
     expect(response.headers.location).toContain("oauth=error&reason=plan_feature");
     expect(fetch).not.toHaveBeenCalled();
-    expect(privileged.upsertOAuthEmailAccount).not.toHaveBeenCalled();
+    expect(privileged.connectOAuthEmailAccount).not.toHaveBeenCalled();
   });
 
   it("PRO: Microsoft connects", async () => {
     const { send, privileged } = await callback("PRO", "MICROSOFT");
     expect((await send()).headers.location).toContain("oauth=connected");
-    expect(privileged.upsertOAuthEmailAccount).toHaveBeenCalled();
+    expect(privileged.connectOAuthEmailAccount).toHaveBeenCalledWith(expect.objectContaining({ provider: "MICROSOFT", emailAddress: "me@contoso.com" }));
   });
 
-  it("BASIC with 25 counted mailboxes: a NEW mailbox (the 26th) is refused and the tokens are not stored", async () => {
-    const { send, privileged } = await callback("BASIC", "GMAIL", { EMAIL_ACCOUNTS: 25 });
+  it("the limit is decided in ONE call that also stores the mailbox (no separate count before the write)", async () => {
+    const { send, privileged } = await callback("BASIC", "GMAIL");
+    expect((await send()).headers.location).toContain("oauth=connected");
+    expect(privileged.connectOAuthEmailAccount).toHaveBeenCalledTimes(1);
+    expect(privileged.connectOAuthEmailAccount).toHaveBeenCalledWith(
+      expect.objectContaining({ organizationId: ORG_A, provider: "GMAIL", emailAddress: "me@gmail.com", syncCursor: "555" })
+    );
+  });
+
+  it("PLAN_LIMIT_REACHED (a new or disconnected mailbox at the limit): plan_limit, nothing audited nor watched", async () => {
+    const { send, privileged, queue } = await callback("BASIC", "GMAIL", { outcome: "PLAN_LIMIT_REACHED", used: 25, limit: 25 });
     const response = await send();
     expect(response.headers.location).toContain("oauth=error&reason=plan_limit");
-    expect(privileged.findOAuthEmailAccountStatus).toHaveBeenCalledWith(ORG_A, "GMAIL", "me@gmail.com");
-    expect(privileged.upsertOAuthEmailAccount).not.toHaveBeenCalled();
+    expect(privileged.insertAuditLog).not.toHaveBeenCalled();
+    expect(queue.enqueueEmailEvent).not.toHaveBeenCalled();
   });
 
-  it("BASIC with 25 counted mailboxes: re-authorizing one of them is allowed", async () => {
-    const { send, privileged } = await callback("BASIC", "GMAIL", { EMAIL_ACCOUNTS: 25 });
-    privileged.findOAuthEmailAccountStatus.mockResolvedValue("ERROR");
-    expect((await send()).headers.location).toContain("oauth=connected");
-    expect(privileged.getOrganizationUsage).not.toHaveBeenCalled();
-    expect(privileged.upsertOAuthEmailAccount).toHaveBeenCalled();
-  });
-
-  it("reconnecting a DISCONNECTED mailbox counts again, so it needs room", async () => {
-    const { send, privileged } = await callback("BASIC", "GMAIL", { EMAIL_ACCOUNTS: 25 });
-    privileged.findOAuthEmailAccountStatus.mockResolvedValue("DISCONNECTED");
-    expect((await send()).headers.location).toContain("reason=plan_limit");
-    expect(privileged.upsertOAuthEmailAccount).not.toHaveBeenCalled();
-  });
-
-  it("BASIC below the limit: a new Gmail mailbox connects", async () => {
-    const { send, privileged } = await callback("BASIC", "GMAIL", { EMAIL_ACCOUNTS: 1 });
-    expect((await send()).headers.location).toContain("oauth=connected");
-    expect(privileged.getOrganizationUsage).toHaveBeenCalledWith(ORG_A, ["EMAIL_ACCOUNTS"]);
-  });
-
-  it.each([
-    ["BASIC", 25],
-    ["PRO", 125],
-    ["BUSINESS", 250]
-  ] as const)("%s: a new mailbox number %d connects, the next one is refused", async (plan, max) => {
-    const below = await callback(plan, "GMAIL", { EMAIL_ACCOUNTS: max - 1 });
-    expect((await below.send()).headers.location).toContain("oauth=connected");
-    expect(below.privileged.upsertOAuthEmailAccount).toHaveBeenCalledTimes(1);
-    await below.app.close();
-    const full = await callback(plan, "GMAIL", { EMAIL_ACCOUNTS: max });
-    expect((await full.send()).headers.location).toContain("oauth=error&reason=plan_limit");
-    expect(full.privileged.upsertOAuthEmailAccount).not.toHaveBeenCalled();
+  it("re-authorizing a mailbox that already counts (RECONNECTED) connects the same account and re-queues its watch", async () => {
+    const { send, privileged, queue } = await callback("BASIC", "GMAIL", {
+      outcome: "RECONNECTED",
+      account: mailbox({ id: "acc-existing", emailAddress: "me@gmail.com" }),
+      created: false,
+      previousStatus: "ERROR"
+    });
+    const response = await send();
+    expect(response.headers.location).toContain("oauth=connected");
+    expect(response.headers.location).toContain("accountId=acc-existing");
+    expect(privileged.insertAuditLog).toHaveBeenCalledWith(
+      expect.objectContaining({ action: "CONNECT", entityId: "acc-existing", metadata: expect.objectContaining({ reconnected: true }) })
+    );
+    expect(queue.enqueueEmailEvent).toHaveBeenCalledWith(
+      { type: "WATCH_ACCOUNT", emailAccountId: "acc-existing", organizationId: ORG_A },
+      { jobId: "watch-acc-existing" }
+    );
   });
 
   it.each([["plan not readable", null], ["no active subscription", noAccess()], ["suspended subscription", noAccess("SUSPENDED")]])("%s: refused before the code is exchanged", async (_label, entitlements) => {
@@ -484,7 +485,7 @@ describe("e-mail accounts: OAuth callback re-checks the plan", () => {
     privileged.getOrganizationEntitlements.mockResolvedValue(entitlements);
     expect((await send()).headers.location).toContain("reason=subscription_required");
     expect(fetch).not.toHaveBeenCalled();
-    expect(privileged.upsertOAuthEmailAccount).not.toHaveBeenCalled();
+    expect(privileged.connectOAuthEmailAccount).not.toHaveBeenCalled();
   });
 });
 

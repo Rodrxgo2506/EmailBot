@@ -82,6 +82,21 @@ describe("Gmail Pub/Sub push webhook", () => {
     expect(fetch.mock.calls.map(([url]) => url)).toEqual([GOOGLE_CERTS_URL]);
   });
 
+  it("two mailboxes of one organization: each push queues only its own address (distinct, deduplicated jobs)", async () => {
+    const { push, queue, privileged } = await pushApp();
+    const auth = bearer(jwt(validClaims()));
+    expect((await push(pubsub({ emailAddress: "Sales@Example.com", historyId: 10 }, "m-sales"), auth)).statusCode).toBe(204);
+    expect((await push(pubsub({ emailAddress: "support@example.com", historyId: 10 }, "m-support"), auth)).statusCode).toBe(204);
+    const [sales, support] = queue.enqueueEmailEvent.mock.calls as [[{ emailAddress: string }, { jobId: string }], [{ emailAddress: string }, { jobId: string }]];
+    expect(sales[0]).toEqual({ type: "GMAIL_NOTIFICATION", emailAddress: "sales@example.com", historyId: "10" });
+    expect(support[0]).toEqual({ type: "GMAIL_NOTIFICATION", emailAddress: "support@example.com", historyId: "10" });
+    expect(sales[1].jobId).not.toBe(support[1].jobId);
+    expect(privileged.hasActiveMailbox.mock.calls).toEqual([
+      ["GMAIL", "sales@example.com"],
+      ["GMAIL", "support@example.com"]
+    ]);
+  });
+
   it("is not affected by the legal barrier (phase 7): no user session, the acceptance is never consulted", async () => {
     const { push, queue, privileged } = await pushApp();
     privileged.listLegalAcceptances.mockResolvedValue([]); // nobody has accepted anything
@@ -315,7 +330,7 @@ describe("Gmail watch after OAuth", () => {
       config: { google: { clientId: "id", clientSecret: "secret", redirectUri: "http://localhost:3000/api/oauth/gmail/callback" } }
     });
     context.privileged.getMemberRole.mockResolvedValue("OWNER");
-    context.privileged.upsertOAuthEmailAccount.mockResolvedValue({ account: { id: "acc-new", emailAddress: "me@gmail.com" }, created: true });
+    context.privileged.connectOAuthEmailAccount.mockResolvedValue({ outcome: "CREATED", account: { id: "acc-new", emailAddress: "me@gmail.com" }, created: true, previousStatus: null });
     const state = createOAuthState({ userId: owner.id, organizationId: ORG_A, provider: "GMAIL" }, context.deps.config.oauthStateSecret);
 
     const response = await context.app.inject({ method: "GET", url: `/api/oauth/gmail/callback?code=abc&state=${encodeURIComponent(state)}` });

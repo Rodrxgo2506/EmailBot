@@ -357,6 +357,15 @@ export interface OAuthAccountUpsert {
   syncCursor: string | null;
 }
 
+/**
+ * Result of public.connect_oauth_email_account (one transaction under a per-organization lock).
+ * PLAN_LIMIT_REACHED and MISSING_REFRESH_TOKEN wrote nothing.
+ */
+export type OAuthAccountConnection =
+  | { outcome: "CREATED" | "RECONNECTED"; account: EmailAccount; created: boolean; previousStatus: EmailAccountStatus | null }
+  | { outcome: "PLAN_LIMIT_REACHED"; used: number; limit: number }
+  | { outcome: "MISSING_REFRESH_TOKEN" };
+
 export interface ImapAccountInsert {
   organizationId: string;
   emailAddress: string;
@@ -423,7 +432,11 @@ export interface PortalAttachmentLocation {
 export interface PrivilegedOperations {
   findProfileIdByEmail(email: string): Promise<string | null>;
   getMemberRole(organizationId: string, userId: string): Promise<OrganizationRole | null>;
-  upsertOAuthEmailAccount(input: OAuthAccountUpsert): Promise<{ account: EmailAccount; created: boolean }>;
+  /**
+   * Stores an OAuth mailbox atomically: the EMAIL_ACCOUNTS limit is checked and the row inserted or
+   * reused (same organization, provider and address, case-insensitive) in one locked transaction.
+   */
+  connectOAuthEmailAccount(input: OAuthAccountUpsert): Promise<OAuthAccountConnection>;
   createImapEmailAccount(input: ImapAccountInsert): Promise<EmailAccount>;
   disconnectEmailAccount(organizationId: string, id: string): Promise<EmailAccount | null>;
   insertAuditLog(entry: AuditEntry): Promise<void>;
@@ -486,15 +499,8 @@ export interface PrivilegedOperations {
    * signed state names the organization and the role is re-checked first).
    */
   getOrganizationEntitlements(organizationId: string): Promise<OrganizationEntitlements | null>;
-  getOrganizationUsage(organizationId: string, keys: readonly PlanUsageKey[]): Promise<Partial<PlanUsage>>;
   /** Commercial V1: the public plan catalog (GET /api/plans, no session); active plans, prices and entitlements only. */
   listPlanCatalog(): Promise<PlanCatalogEntry[]>;
-  /** Status of the mailbox the OAuth upsert would update (same organization, provider and address), or null. */
-  findOAuthEmailAccountStatus(
-    organizationId: string,
-    provider: Exclude<EmailProvider, "IMAP">,
-    emailAddress: string
-  ): Promise<EmailAccountStatus | null>;
 }
 
 /* ------------------------------------------------------------------ platform administration (V2 phase 6) */

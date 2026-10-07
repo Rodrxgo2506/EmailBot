@@ -169,7 +169,11 @@ describe("Commercial V1: Microsoft needs the PRO or BUSINESS plan", () => {
 
   it.each([
     ["plan_feature", "Tu plan no incluye este proveedor de correo. Microsoft está disponible en los planes Pro y Business."],
-    ["plan_limit", "Alcanzaste el límite de cuentas de correo de tu plan. Para conectar otra se necesita un plan superior."]
+    ["plan_limit", "Alcanzaste el límite de cuentas de correo de tu plan. Para conectar otra se necesita un plan superior."],
+    [
+      "missing_refresh_token",
+      "El proveedor no concedió acceso sin conexión, así que la cuenta no se guardó. Vuelve a conectarla y acepta todos los permisos solicitados."
+    ]
   ])("the OAuth callback refusal %s is explained", async (reason, message) => {
     providers = { GMAIL: true, MICROSOFT: true, IMAP: false };
     renderPage("OWNER", `/accounts?oauth=error&reason=${reason}`);

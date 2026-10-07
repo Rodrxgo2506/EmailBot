@@ -28,6 +28,8 @@ const OAUTH_ERRORS: Record<string, string> = {
   forbidden: "Tu rol ya no permite conectar cuentas en esta organización.",
   not_configured: "El proveedor no está configurado en el servidor.",
   connection_failed: "No se pudo completar la conexión con el proveedor.",
+  missing_refresh_token:
+    "El proveedor no concedió acceso sin conexión, así que la cuenta no se guardó. Vuelve a conectarla y acepta todos los permisos solicitados.",
   plan_feature: "Tu plan no incluye este proveedor de correo. Microsoft está disponible en los planes Pro y Business.",
   plan_limit: "Alcanzaste el límite de cuentas de correo de tu plan. Para conectar otra se necesita un plan superior.",
   subscription_required: "Tu organización no tiene una suscripción activa. Contrata o renueva un plan para conectar cuentas."

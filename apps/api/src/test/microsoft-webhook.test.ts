@@ -208,7 +208,7 @@ describe("account connection and disconnection", () => {
     );
     const context = await setup({}, fetchImpl as unknown as typeof fetch);
     context.privileged.getMemberRole.mockResolvedValue("OWNER");
-    context.privileged.upsertOAuthEmailAccount.mockResolvedValue({ account: msAccount({ id: "acc-ms" }), created: true });
+    context.privileged.connectOAuthEmailAccount.mockResolvedValue({ outcome: "CREATED", account: msAccount({ id: "acc-ms" }), created: true, previousStatus: null });
     const state = createOAuthState({ userId: owner.id, organizationId: ORG_A, provider: "MICROSOFT" }, context.deps.config.oauthStateSecret);
     const response = await context.app.inject({ method: "GET", url: `/api/oauth/microsoft/callback?code=abc&state=${encodeURIComponent(state)}` });
     expect(response.headers.location).toContain("oauth=connected");

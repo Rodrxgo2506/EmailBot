@@ -407,6 +407,7 @@ describe("email accounts and OAuth", () => {
     const url = new URL(response.json().authorizationUrl);
     expect(url.searchParams.get("client_id")).toBe("cid");
     expect(url.searchParams.get("state")).toMatch(/\./);
+    expect(url.searchParams.get("prompt")).toBe("consent select_account"); // the user picks which Google account
     expect(response.body).not.toContain("csecret");
   });
 
@@ -418,7 +419,7 @@ describe("email accounts and OAuth", () => {
     expect(response.statusCode).toBe(302);
     expect(response.headers.location).toBe("http://localhost:5173/accounts?oauth=error&reason=invalid_state");
     expect(fetchMock).not.toHaveBeenCalled();
-    expect(privileged.upsertOAuthEmailAccount).not.toHaveBeenCalled();
+    expect(privileged.connectOAuthEmailAccount).not.toHaveBeenCalled();
   });
 
   it("callback stores encrypted tokens and never exposes them", async () => {
@@ -437,7 +438,7 @@ describe("email accounts and OAuth", () => {
       fetch: fetchMock as unknown as typeof fetch
     });
     privileged.getMemberRole.mockResolvedValue("OWNER");
-    privileged.upsertOAuthEmailAccount.mockResolvedValue({ account: { id: ACCOUNT_ID, emailAddress: "me@gmail.com" }, created: true });
+    privileged.connectOAuthEmailAccount.mockResolvedValue({ outcome: "CREATED", account: { id: ACCOUNT_ID, emailAddress: "me@gmail.com" }, created: true, previousStatus: null });
 
     const state = createOAuthState({ userId: owner.id, organizationId: ORG_A, provider: "GMAIL" }, deps.config.oauthStateSecret);
     const response = await app.inject({
@@ -449,7 +450,7 @@ describe("email accounts and OAuth", () => {
     expect(response.headers.location).toContain("oauth=connected");
     expect(response.headers.location).not.toContain("PLAIN");
 
-    const stored = privileged.upsertOAuthEmailAccount.mock.calls[0]?.[0] as Record<string, string>;
+    const stored = privileged.connectOAuthEmailAccount.mock.calls[0]?.[0] as Record<string, string>;
     expect(stored).toMatchObject({ organizationId: ORG_A, provider: "GMAIL", emailAddress: "me@gmail.com", syncCursor: "1234" });
     expect(stored.accessTokenEncrypted).not.toContain("PLAIN-ACCESS");
     expect(deps.secretBox.decrypt(stored.accessTokenEncrypted as string)).toBe("PLAIN-ACCESS");

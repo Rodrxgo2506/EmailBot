@@ -98,7 +98,7 @@ export function createFakePrivileged(): { [K in keyof PrivilegedOperations]: Ret
   return {
     findProfileIdByEmail: unexpected("privileged.findProfileIdByEmail"),
     getMemberRole: unexpected("privileged.getMemberRole"),
-    upsertOAuthEmailAccount: unexpected("privileged.upsertOAuthEmailAccount"),
+    connectOAuthEmailAccount: unexpected("privileged.connectOAuthEmailAccount"),
     createImapEmailAccount: unexpected("privileged.createImapEmailAccount"),
     disconnectEmailAccount: unexpected("privileged.disconnectEmailAccount"),
     insertAuditLog: vi.fn(async () => undefined),
@@ -122,10 +122,8 @@ export function createFakePrivileged(): { [K in keyof PrivilegedOperations]: Ret
     findMicrosoftSubscription: unexpected("privileged.findMicrosoftSubscription"),
     getMicrosoftSubscriptionCredentials: unexpected("privileged.getMicrosoftSubscriptionCredentials"),
     clearMicrosoftSubscription: unexpected("privileged.clearMicrosoftSubscription"),
-    // Commercial V1 (OAuth callback): BUSINESS, nothing used, the mailbox is new.
+    // Commercial V1 (OAuth callback): BUSINESS (the limit itself is decided by connectOAuthEmailAccount).
     getOrganizationEntitlements: vi.fn(async () => entitlementsFor("BUSINESS")),
-    getOrganizationUsage: vi.fn(async (_organizationId: string, keys: readonly string[]) => Object.fromEntries(keys.map((key) => [key, 0]))),
-    findOAuthEmailAccountStatus: vi.fn(async () => null),
     listPlanCatalog: unexpected("privileged.listPlanCatalog")
   };
 }
