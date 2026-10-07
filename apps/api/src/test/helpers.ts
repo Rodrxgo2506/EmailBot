@@ -7,7 +7,7 @@ import type { ApiConfig, OAuthProviderConfig } from "../config/env.js";
 import { createMemoryNonceStore } from "../infrastructure/nonces.js";
 import type { RateLimitRedis } from "../infrastructure/rate-limit-store.js";
 import type { AppDeps, AuthenticatedUser } from "../deps.js";
-import type { AdminOperations, PrivilegedOperations, Repositories } from "../repositories/types.js";
+import type { AdminOperations, BillingRepository, PrivilegedOperations, Repositories } from "../repositories/types.js";
 import { entitlementsFor } from "./plan-fixtures.js";
 
 export const ORG_A = "11111111-1111-4111-8111-111111111111";
@@ -47,6 +47,7 @@ export function testConfig(overrides: Partial<ApiConfig> = {}): ApiConfig {
     imapAccountsEnabled: false,
     syncHealthStaleMinutes: 20,
     sentryDsn: null,
+    culqi: null,
     ...overrides
   };
 }
@@ -184,6 +185,7 @@ export async function createTestApp(
   const repos = createFakeRepositories();
   const privileged = createFakePrivileged();
   const admin = createFakeAdmin(options.platformAdmins);
+  const billing = createFakeBilling();
   const queue = {
     enqueueEmailEvent: vi.fn(async (_job: unknown, _options?: { jobId?: string }) => undefined),
     requestAccountSync: vi.fn(
@@ -230,6 +232,7 @@ export async function createTestApp(
     repositories: () => repos as unknown as Repositories,
     privileged: privileged as unknown as PrivilegedOperations,
     admin: admin as unknown as AdminOperations,
+    billing: billing as unknown as BillingRepository,
     queue,
     secretBox: SecretBox.fromBase64(config.tokenEncryptionKey),
     fetch: options.fetch ?? (vi.fn(async () => new Response("{}", { status: 500 })) as unknown as typeof fetch),
@@ -239,7 +242,25 @@ export async function createTestApp(
   };
 
   const app = await buildApp(deps, { logger: false });
-  return { app, deps, repos, privileged, admin, queue };
+  return { app, deps, repos, privileged, admin, billing, queue };
+}
+
+/** Commercial V1 phase 2: billing_* (service role). Fails loudly unless a test overrides a call. */
+function createFakeBilling(): { [K in keyof BillingRepository]: ReturnType<typeof vi.fn> } {
+  return {
+    resolvePrice: unexpected("billing.resolvePrice"),
+    planOrder: unexpected("billing.planOrder"),
+    providerPlanId: unexpected("billing.providerPlanId"),
+    customerId: unexpected("billing.customerId"),
+    saveCustomer: unexpected("billing.saveCustomer"),
+    hasPending: unexpected("billing.hasPending"),
+    createPending: unexpected("billing.createPending"),
+    attachCulqiSubscription: unexpected("billing.attachCulqiSubscription"),
+    markFailed: unexpected("billing.markFailed"),
+    get: unexpected("billing.get"),
+    current: unexpected("billing.current"),
+    recordWebhookEvent: unexpected("billing.recordWebhookEvent")
+  };
 }
 
 export function authHeaders(user: TestUser, organizationId?: string): Record<string, string> {

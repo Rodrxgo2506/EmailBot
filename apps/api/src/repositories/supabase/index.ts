@@ -1,6 +1,7 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import type { Repositories } from "../types.js";
 import { adminOperations } from "./admin-repositories.js";
+import { billingRepository } from "./billing-repositories.js";
 import { botRepository } from "./bot-repositories.js";
 import { customerAccessRepository } from "./customer-access-repositories.js";
 import { emailDeliveryRepository } from "./delivery-repositories.js";
@@ -64,4 +65,4 @@ export function createSupabaseRepositories(db: SupabaseClient): Repositories {
   };
 }
 
-export { adminOperations, privilegedOperations };
+export { adminOperations, billingRepository, privilegedOperations };

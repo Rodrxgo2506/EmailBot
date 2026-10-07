@@ -29,6 +29,7 @@ import { portalSyncRoutes, type SyncLimiter } from "./modules/portal/sync-routes
 import { registerPortalSession } from "./modules/portal/session.js";
 import { ruleRoutes } from "./modules/rules/routes.js";
 import { webhookRoutes } from "./modules/webhooks/routes.js";
+import { billingRoutes, culqiWebhookRoutes } from "./modules/billing/routes.js";
 import { registerAuth } from "./plugins/auth.js";
 import { registerErrorHandler } from "./plugins/error-handler.js";
 import { ORGANIZATION_HEADER, registerOrganizationContext } from "./plugins/organization.js";
@@ -149,12 +150,14 @@ export async function buildApp(deps: AppDeps, options: BuildAppOptions = {}) {
 
   await app.register(healthRoutes(deps));
   await app.register(webhookRoutes(deps));
+  await app.register(culqiWebhookRoutes(deps));
 
   await app.register(
     async (api) => {
       await api.register(meRoutes(deps));
       await api.register(organizationRoutes);
       await api.register(planRoutes(deps));
+      await api.register(billingRoutes(deps));
       await api.register(memberRoutes(deps));
       await api.register(emailAccountRoutes(deps));
       await api.register(categoryRoutes);

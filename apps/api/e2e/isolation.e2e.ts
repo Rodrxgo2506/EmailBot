@@ -27,7 +27,7 @@ import { buildApp } from "../src/app.js";
 import { loadConfig } from "../src/config/env.js";
 import type { AppDeps, JobQueue } from "../src/deps.js";
 import { createMemoryNonceStore } from "../src/infrastructure/nonces.js";
-import { adminOperations, createSupabaseClients, createSupabaseRepositories, privilegedOperations } from "../src/repositories/supabase/index.js";
+import { adminOperations, billingRepository, createSupabaseClients, createSupabaseRepositories, privilegedOperations } from "../src/repositories/supabase/index.js";
 import {
   createAccountStore,
   createAttachmentStorage,
@@ -115,6 +115,7 @@ const deps: AppDeps = {
   repositories: (token) => createSupabaseRepositories(clients.forUser(token)),
   privileged,
   admin: adminOperations(clients.service),
+  billing: billingRepository(clients.service),
   queue,
   secretBox,
   fetch: globalThis.fetch,
@@ -461,6 +462,20 @@ for (const scenario of scenarios) {
   check((await portal("/api/portal/inbox", cookieB1)).status === 200, "portal: the same B1 session works again (nothing was deleted)");
   const processed = await processEmail({ organizationId: orgB, emailAccountId: accountB, provider: "GMAIL", providerMessageId: "e6" }, processDeps);
   check(processed.status === "processed", "worker: B's email is processed again once the subscription is active");
+}
+
+// Commercial V1 phase 2 (Culqi sandbox): without Culqi keys card checkout is off; billing tables are not
+// reachable through the Data API (real PostgREST + RLS), whatever the caller.
+{
+  const config = await call("GET", "/api/billing/config", ownerA.token, orgA);
+  check(config.status === 200 && config.json?.enabled === false, "billing: card checkout disabled without Culqi keys");
+  const checkout = await call("GET", "/api/billing/checkout?plan=PRO&billingPeriod=MONTHLY", ownerA.token, orgA);
+  check(checkout.status === 503 && checkout.json?.error?.code === "BILLING_NOT_CONFIGURED", "billing: checkout refused without Culqi keys");
+  check((await call("POST", "/webhooks/culqi", null, null, { id: "evt_test_0CjjdWhFpEAZlxlz" })).status === 404, "billing: /webhooks/culqi does not exist without Culqi keys");
+  for (const table of ["billing_subscriptions", "billing_customers", "billing_webhook_events", "billing_provider_plans"]) {
+    const { error } = await userDb(ownerA.token).from(table).select("id").limit(1);
+    check(error !== null, `billing: ${table} not readable by members through the Data API`, error?.message ?? "no error");
+  }
 }
 
 await app.close();

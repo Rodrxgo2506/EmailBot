@@ -146,11 +146,12 @@ create table public.billing_customers (
     check (external_customer_id like 'cus_' || environment::text || '_%'),
 
   constraint billing_customers_one_per_organization
-    unique (organization_id, provider, environment),
-
-  constraint billing_customers_external_unique
-    unique (external_customer_id)
+    unique (organization_id, provider, environment)
 );
+
+-- Not unique: the same person (Culqi customer, keyed by e-mail at Culqi) may pay for several organizations.
+create index billing_customers_external_idx
+  on public.billing_customers(external_customer_id);
 
 comment on table public.billing_customers is
   'Culqi customer of an organization (per environment). No card data: Culqi stores it.';

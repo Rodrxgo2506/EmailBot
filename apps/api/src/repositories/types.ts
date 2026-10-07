@@ -1,4 +1,8 @@
 import type {
+  BillingEnvironment,
+  BillingPeriod,
+  BillingSubscriptionSummary,
+  CommercialPlan,
   AdminActivityItem,
   AdminAuditEntry,
   AdminBot,
@@ -554,4 +558,53 @@ export interface AdminOperations {
   /** `limit` rows at most, newest first. */
   listActivity(actorId: string, query: { organizationId?: string | undefined; limit: number; offset: number }): Promise<AdminActivityItem[]>;
   listAudit(actorId: string, query: { organizationId?: string | undefined; limit: number; offset: number }): Promise<AdminAuditEntry[]>;
+}
+
+/*
+ * Commercial V1 phase 2 (Culqi SANDBOX): provider side of the subscriptions.
+ * SERVICE ROLE; every call is scoped by the organization the route resolved
+ * (membership + permission checked first). Never returns card data (EmailBot
+ * has none).
+ */
+export interface BillingPrice {
+  planPriceId: string;
+  plan: CommercialPlan;
+  planName: string;
+  billingPeriod: BillingPeriod;
+  currency: string;
+  /** "39.90" */
+  amount: string;
+  amountCents: number;
+  sortOrder: number;
+}
+
+export interface BillingRepository {
+  /** The ACTIVE price of a commercial plan / period (EmailBot catalog), or null. */
+  resolvePrice(plan: CommercialPlan, billingPeriod: BillingPeriod): Promise<BillingPrice | null>;
+  /** sort_order of every active commercial plan (upgrade = higher). */
+  planOrder(): Promise<Partial<Record<CommercialPlan, number>>>;
+  /** Culqi plan id mapped to an EmailBot price in an environment, or null. */
+  providerPlanId(planPriceId: string, environment: BillingEnvironment): Promise<string | null>;
+  customerId(organizationId: string, environment: BillingEnvironment): Promise<string | null>;
+  /** Stores the organization's Culqi customer; returns the stored id (the existing one on a race). */
+  saveCustomer(organizationId: string, environment: BillingEnvironment, externalCustomerId: string, createdBy: string): Promise<string>;
+  /** A checkout already waiting for Culqi (PENDING). */
+  hasPending(organizationId: string): Promise<boolean>;
+  /** Inserts the PENDING row; null when another checkout of the organization is already PENDING. */
+  createPending(input: {
+    organizationId: string;
+    planPriceId: string;
+    environment: BillingEnvironment;
+    externalCustomerId: string;
+    externalPlanId: string;
+    createdBy: string;
+  }): Promise<string | null>;
+  attachCulqiSubscription(id: string, input: { externalCardId: string; externalSubscriptionId: string; providerStatus: number | null }): Promise<void>;
+  /** PENDING -> FAILED (public.billing_set_culqi_status, audited). */
+  markFailed(id: string, failureCode: string, failureMessage: string | null, requestId: string): Promise<void>;
+  get(organizationId: string, id: string): Promise<BillingSubscriptionSummary | null>;
+  /** Latest Culqi subscription of the organization. */
+  current(organizationId: string): Promise<BillingSubscriptionSummary | null>;
+  /** Webhook idempotency: inserts the event once (unique id) and returns its state. */
+  recordWebhookEvent(environment: BillingEnvironment, externalEventId: string): Promise<{ isNew: boolean; status: string; attempts: number }>;
 }
