@@ -3,10 +3,11 @@ import { createTestDatabase, type TestDatabase, type Tx } from "../src/harness.j
 import { count, one, seedTwoTenants, type Fixtures } from "./fixtures.js";
 
 /*
- * Commercial V1 phase 2, Culqi SANDBOX (20261007130000_culqi_billing_sandbox.sql).
- * The provider side (billing_*) never grants access by itself: a confirmed
- * payment goes through private.activate_subscription (origin CULQI), once per
- * (Culqi subscription, period); stale events never lower a plan or shorten a
+ * Commercial V1 phase 2, Culqi SANDBOX (20261007130000_culqi_billing_sandbox.sql
+ * + 20261007140000_culqi_billing_verified_charges.sql). The provider side
+ * (billing_*) never grants access by itself: only a Culqi CHARGE verified by
+ * the worker is applied, through private.activate_subscription (origin
+ * CULQI), once per charge id; stale charges never lower a plan or shorten a
  * period; declined charges are recorded without touching public.subscriptions.
  */
 
@@ -60,11 +61,13 @@ async function checkout(orgId: string, plan: Plan, options: { sxn?: string | nul
 }
 
 interface Confirm {
-  key: string;
+  /** The verified Culqi charge (the idempotency key). */
+  charge: string;
+  /** Defaults to the charge id (they must be equal). */
+  key?: string | null;
   period?: number;
   start?: string;
   end?: string;
-  charge?: string | null;
 }
 
 async function confirm(billingId: string, options: Confirm) {
@@ -73,17 +76,18 @@ async function confirm(billingId: string, options: Confirm) {
       tx,
       `select * from public.billing_activate_culqi_subscription($1, $2, 'subscription.charge.succeeded',
          coalesce($3::timestamptz, now()), coalesce($4::timestamptz, now() + interval '1 month'), $5, $6, 3::smallint, 'req-culqi')`,
-      [billingId, options.key, options.start ?? null, options.end ?? null, options.period ?? 1, options.charge ?? null]
+      [billingId, options.key === undefined ? options.charge : options.key, options.start ?? null, options.end ?? null, options.period ?? 1, options.charge]
     )
   );
 }
 
-const failCharge = (billingId: string, eventId: string) =>
+/** A declined charge, recorded under `key` (the charge id, or an event id when the charge is unknown). */
+const failCharge = (billingId: string, key: string, charge: string | null = key.startsWith("chr_") ? key : null) =>
   t.asService((tx) =>
     one<{ result: string }>(
       tx,
-      "select public.billing_record_culqi_charge_failure($1, $2, 'subscription.charge.failed', 'chr_test_declined', 'card_declined', 'Tarjeta rechazada', 5::smallint, 'req-fail') as result",
-      [billingId, eventId]
+      "select public.billing_record_culqi_charge_failure($1, $2, 'subscription.charge.failed', $3, 'card_declined', 'Tarjeta rechazada', 5::smallint, 'req-fail') as result",
+      [billingId, key, charge]
     )
   ).then((row) => row.result);
 
@@ -119,6 +123,8 @@ const organizationPlan = (orgId: string) =>
 const access = (orgId: string) =>
   t.asAdmin((tx) => one<{ access: string; effective_plan: string | null }>(tx, "select access, effective_plan from public.organization_access(array[$1::uuid])", [orgId]));
 
+const payments = (orgId: string) => t.asAdmin((tx) => count(tx, "select 1 from public.payment_events where organization_id = $1", [orgId]));
+
 describe("schema, privileges and environment guards", () => {
   it("the Data API (anon / authenticated) cannot read or write any billing table; service_role cannot delete", async () => {
     for (const table of ["billing_provider_plans", "billing_customers", "billing_subscriptions", "billing_webhook_events"]) {
@@ -134,7 +140,7 @@ describe("schema, privileges and environment guards", () => {
   it("ids must have Culqi's format and belong to the row's environment (a live id never enters a test row)", async () => {
     const org = await newOrganization();
     const price = await priceId("PRO");
-    const insert = (values: string[]) =>
+    const insert = (values: Array<string | null>) =>
       t.asService((tx) =>
         tx.query(
           `insert into public.billing_subscriptions (organization_id, plan_price_id, environment, external_customer_id, external_plan_id, external_subscription_id)
@@ -153,6 +159,25 @@ describe("schema, privileges and environment guards", () => {
     ).rejects.toThrow(/environment_matches/);
   });
 
+  it("F5: the checkout is reserved BEFORE the Culqi customer exists; a Culqi subscription always has its customer", async () => {
+    const org = await newOrganization();
+    const price = await priceId("PRO");
+    const reserved = await t.asService((tx) =>
+      one<{ id: string }>(
+        tx,
+        "insert into public.billing_subscriptions (organization_id, plan_price_id, environment, external_plan_id) values ($1, $2, 'test', 'pln_test_reserve') returning id",
+        [org, price]
+      )
+    );
+    // A second reservation of the same organization is refused atomically (one PENDING per organization).
+    await expect(
+      t.asService((tx) => tx.query("insert into public.billing_subscriptions (organization_id, plan_price_id, environment, external_plan_id) values ($1, $2, 'test', 'pln_test_reserve')", [org, price]))
+    ).rejects.toThrow(/billing_subscriptions_one_pending/);
+    await expect(
+      t.asService((tx) => tx.query("update public.billing_subscriptions set external_subscription_id = 'sxn_test_nocustomer' where id = $1", [reserved.id]))
+    ).rejects.toThrow(/customer_before_subscription/);
+  });
+
   it("one checkout in progress per organization; webhook events are unique per Culqi event id", async () => {
     const org = await newOrganization();
     await checkout(org, "PRO");
@@ -164,12 +189,12 @@ describe("schema, privileges and environment guards", () => {
   });
 });
 
-describe("confirmed payment -> activation (private.activate_subscription, origin CULQI)", () => {
-  it("activates the plan once per (subscription, period): CULQI origin, cache, payment with the charge id, audit", async () => {
+describe("F1: only a verified charge activates (private.activate_subscription, origin CULQI)", () => {
+  it("activates once per charge: CULQI origin, cache, payment with the charge id, audit", async () => {
     const org = await newOrganization();
     expect((await access(org)).access).toBe("NONE");
     const id = await checkout(org, "PRO");
-    const first = await confirm(id.id, { key: "culqi:sxn:p1", charge: "chr_test_first" });
+    const first = await confirm(id.id, { charge: "chr_test_first" });
     expect(first.outcome).toBe("ACTIVATED");
 
     const sub = await openSubscription(org);
@@ -180,74 +205,106 @@ describe("confirmed payment -> activation (private.activate_subscription, origin
     expect(await billing(id.id)).toMatchObject({ status: "ACTIVE", subscription_id: sub?.id });
 
     const payment = await t.asAdmin((tx) =>
-      one<{ amount: string; payment_status: string; external_payment_id: string; payment_method: string }>(
+      one<{ amount: string; payment_status: string; external_payment_id: string; payment_method: string; external_event_id: string }>(
         tx,
-        "select amount::text, payment_status, external_payment_id, payment_method from public.payment_events where external_event_id = 'culqi:sxn:p1'"
+        "select amount::text, payment_status, external_payment_id, payment_method, external_event_id from public.payment_events where organization_id = $1",
+        [org]
       )
     );
-    expect(payment).toEqual({ amount: "39.90", payment_status: "SUCCEEDED", external_payment_id: "chr_test_first", payment_method: "CULQI" });
+    expect(payment).toEqual({ amount: "39.90", payment_status: "SUCCEEDED", external_payment_id: "chr_test_first", payment_method: "CULQI", external_event_id: "chr_test_first" });
     expect(await t.asAdmin((tx) => count(tx, "select 1 from public.platform_audit_logs where organization_id = $1 and action = 'subscription.activated'", [org]))).toBe(1);
 
-    // The same period again (webhook retry, or webhook + reconciliation): nothing is applied twice.
-    expect((await confirm(id.id, { key: "culqi:sxn:p1", charge: "chr_test_first" })).outcome).toBe("DUPLICATE");
-    expect(await t.asAdmin((tx) => count(tx, "select 1 from public.payment_events where organization_id = $1", [org]))).toBe(1);
+    // The same charge again (webhook + reconciliation, retries): one payment, one activation.
+    expect((await confirm(id.id, { charge: "chr_test_first" })).outcome).toBe("DUPLICATE");
+    expect(await payments(org)).toBe(1);
   });
 
-  it("a renewal extends the period; a late confirmation of an older period never shortens it", async () => {
+  it("nothing can be activated without a charge id: no subscription status / creation key, no foreign key, no live charge", async () => {
+    const id = await checkout(await newOrganization(), "PRO");
+    await expect(confirm(id.id, { charge: null as unknown as string, key: "culqi:sxn:p1" })).rejects.toThrow(/verified Culqi charge id is required/);
+    await expect(confirm(id.id, { charge: "chr_test_abc", key: "culqi:sxn:p1" })).rejects.toThrow(/activation key must be the Culqi charge id/);
+    await expect(confirm(id.id, { charge: "sxn_test_notacharge" })).rejects.toThrow(/verified Culqi charge id is required/);
+    await expect(confirm(id.id, { charge: "chr_live_abc" })).rejects.toThrow(/another Culqi environment/);
+    expect(await billing(id.id)).toMatchObject({ status: "PENDING" });
+  });
+
+  it("a renewal charge extends the period; a late older charge never shortens it", async () => {
     const org = await newOrganization();
     const id = await checkout(org, "BASIC");
     const now = Date.now();
     const day = 24 * 3600_000;
-    await confirm(id.id, { key: "renew:p1", period: 1, start: new Date(now).toISOString(), end: new Date(now + 30 * day).toISOString() });
-    const renewal = await confirm(id.id, { key: "renew:p2", period: 2, start: new Date(now).toISOString(), end: new Date(now + 60 * day).toISOString() });
+    await confirm(id.id, { charge: "chr_test_renew1", period: 1, start: new Date(now).toISOString(), end: new Date(now + 30 * day).toISOString() });
+    const renewal = await confirm(id.id, { charge: "chr_test_renew2", period: 2, start: new Date(now).toISOString(), end: new Date(now + 60 * day).toISOString() });
     expect(renewal.outcome).toBe("RENEWED");
     const end = (await openSubscription(org))?.current_period_end.getTime();
     expect(end).toBeGreaterThan(now + 59 * day);
 
-    // Out of order: period 1's confirmation arrives again with a NEW key (e.g. reconciliation): nothing shortened.
-    const late = await confirm(id.id, { key: "renew:p1-late", period: 1, start: new Date(now).toISOString(), end: new Date(now + 30 * day).toISOString() });
+    // An older charge processed late (out of order): nothing shortened, nothing recorded.
+    const late = await confirm(id.id, { charge: "chr_test_renew0", period: 0, start: new Date(now - 30 * day).toISOString(), end: new Date(now + 2 * day).toISOString() });
     expect(late.outcome).toBe("ALREADY_COVERED");
     expect((await openSubscription(org))?.current_period_end.getTime()).toBe(end);
+    expect(await payments(org)).toBe(2);
+  });
+
+  it("a repeated old charge does not clear a newer PAST_DUE (provider status untouched on DUPLICATE)", async () => {
+    const org = await newOrganization();
+    const id = await checkout(org, "PRO");
+    await confirm(id.id, { charge: "chr_test_pd1" });
+    expect(await failCharge(id.id, "chr_test_pd2")).toBe("RECORDED");
+    expect(await billing(id.id)).toMatchObject({ status: "PAST_DUE" });
+    expect((await confirm(id.id, { charge: "chr_test_pd1" })).outcome).toBe("DUPLICATE");
+    expect(await billing(id.id)).toMatchObject({ status: "PAST_DUE" });
   });
 
   it.each([
     ["BASIC", "PRO"],
     ["BASIC", "BUSINESS"],
     ["PRO", "BUSINESS"]
-  ] as const)("upgrade %s -> %s: new plan on confirmation; the old Culqi subscription is superseded; its late events are ignored", async (from, to) => {
+  ] as const)("upgrade %s -> %s: new plan on its verified charge; the old Culqi subscription is superseded; its late charges are ignored", async (from, to) => {
     const org = await newOrganization();
     const old = await checkout(org, from);
-    await confirm(old.id, { key: `up:${from}:${to}:old` });
+    await confirm(old.id, { charge: `chr_test_up${from}${to}old` });
     expect(await organizationPlan(org)).toBe(from);
 
     // Pending upgrade: the plan does NOT change yet.
     const upgrade = await checkout(org, to);
     expect(await organizationPlan(org)).toBe(from);
 
-    const result = await confirm(upgrade.id, { key: `up:${from}:${to}:new` });
+    const result = await confirm(upgrade.id, { charge: `chr_test_up${from}${to}new` });
     expect(result.outcome).toBe("PLAN_CHANGED");
     expect(result.superseded_external_ids).toHaveLength(1);
     expect(await organizationPlan(org)).toBe(to);
     expect(await billing(old.id)).toMatchObject({ status: "CANCELED", cancel_reason: "UPGRADED" });
 
-    // A late renewal of the replaced subscription never lowers the plan.
-    expect((await confirm(old.id, { key: `up:${from}:${to}:old-late` })).outcome).toBe("IGNORED");
+    // A late renewal charge of the replaced subscription never lowers the plan.
+    expect((await confirm(old.id, { charge: `chr_test_up${from}${to}late` })).outcome).toBe("IGNORED");
     expect(await organizationPlan(org)).toBe(to);
     expect(await t.asAdmin((tx) => count(tx, "select 1 from public.platform_audit_logs where organization_id = $1 and action = 'billing.subscription.superseded'", [org]))).toBe(1);
   });
 
+  it("F4: a FAILED Culqi subscription of the organization is superseded too (cancelled at Culqi by the worker)", async () => {
+    const org = await newOrganization();
+    const failed = await checkout(org, "PRO");
+    expect(await failCharge(failed.id, "chr_test_f4declined")).toBe("RECORDED");
+    expect(await billing(failed.id)).toMatchObject({ status: "FAILED" });
+    const retry = await checkout(org, "PRO");
+    const result = await confirm(retry.id, { charge: "chr_test_f4ok" });
+    expect(result.outcome).toBe("ACTIVATED");
+    expect(result.superseded_external_ids).toHaveLength(1);
+    expect(await billing(failed.id)).toMatchObject({ status: "CANCELED", cancel_reason: "UPGRADED" });
+  });
+
   it("a legacy / manually paid organization can move to card payments (same plan or higher)", async () => {
-    // Seeded tenant A pays PRO manually (origin ADMIN).
     expect((await openSubscription(f.a.orgId))?.origin).toBe("ADMIN");
     const id = await checkout(f.a.orgId, "PRO");
-    expect((await confirm(id.id, { key: "manual-to-card" })).outcome).toBe("RENEWED");
+    expect((await confirm(id.id, { charge: "chr_test_manualtocard" })).outcome).toBe("RENEWED");
     expect(await openSubscription(f.a.orgId)).toMatchObject({ origin: "CULQI", payment_method: "CULQI", plan: "PRO" });
   });
 
   it("mailboxes and other data are untouched by an activation (only the subscription changes)", async () => {
     const before = await t.asAdmin((tx) => count(tx, "select 1 from public.email_accounts where organization_id = $1", [f.b.orgId]));
     const id = await checkout(f.b.orgId, "BUSINESS");
-    await confirm(id.id, { key: "org-b-business" });
+    await confirm(id.id, { charge: "chr_test_orgbbusiness" });
     expect(await t.asAdmin((tx) => count(tx, "select 1 from public.email_accounts where organization_id = $1 and status <> 'DISCONNECTED'", [f.b.orgId]))).toBe(before);
     expect(await organizationPlan(f.b.orgId)).toBe("BUSINESS");
   });
@@ -257,40 +314,46 @@ describe("declined charges and provider-side states (access unchanged)", () => {
   it("initial charge declined: billing FAILED, payment recorded once as FAILED, no subscription, no access", async () => {
     const org = await newOrganization();
     const id = await checkout(org, "PRO");
-    expect(await failCharge(id.id, "evt_test_fail1")).toBe("RECORDED");
-    expect(await failCharge(id.id, "evt_test_fail1")).toBe("DUPLICATE");
+    expect(await failCharge(id.id, "chr_test_fail1")).toBe("RECORDED");
+    expect(await failCharge(id.id, "chr_test_fail1")).toBe("DUPLICATE");
+    // The same charge reported again under its webhook event id: still one record.
+    expect(await failCharge(id.id, "evt_test_fail1", "chr_test_fail1")).toBe("DUPLICATE");
     expect(await billing(id.id)).toMatchObject({ status: "FAILED", failure_code: "card_declined" });
     expect(await openSubscription(org)).toBeNull();
     expect((await access(org)).access).toBe("NONE");
     expect(
-      await t.asAdmin((tx) => one<{ payment_status: string; status: string }>(tx, "select payment_status, status from public.payment_events where external_event_id = 'evt_test_fail1'"))
+      await t.asAdmin((tx) => one<{ payment_status: string; status: string }>(tx, "select payment_status, status from public.payment_events where external_payment_id = 'chr_test_fail1'"))
     ).toEqual({ payment_status: "FAILED", status: "PROCESSED" });
+    expect(await payments(org)).toBe(1);
 
-    // Culqi retries and the charge succeeds: activated (a FAILED row can still become ACTIVE).
-    expect((await confirm(id.id, { key: "fail1-retry-ok" })).outcome).toBe("ACTIVATED");
+    // A declined charge is never activated afterwards.
+    expect((await confirm(id.id, { charge: "chr_test_fail1" })).outcome).toBe("DUPLICATE");
+    expect((await access(org)).access).toBe("NONE");
+    // Culqi retries with a NEW charge that succeeds: activated (a FAILED row can still become ACTIVE).
+    expect((await confirm(id.id, { charge: "chr_test_fail1retry" })).outcome).toBe("ACTIVATED");
     expect(await billing(id.id)).toMatchObject({ status: "ACTIVE", failure_code: null });
   });
 
   it("renewal declined: billing PAST_DUE, the paid subscription keeps its status and period (no policy yet)", async () => {
     const org = await newOrganization();
     const id = await checkout(org, "PRO");
-    await confirm(id.id, { key: "pd:p1" });
+    await confirm(id.id, { charge: "chr_test_pdok" });
     const before = await openSubscription(org);
-    expect(await failCharge(id.id, "evt_test_renewfail")).toBe("RECORDED");
+    expect(await failCharge(id.id, "chr_test_renewfail")).toBe("RECORDED");
     expect(await billing(id.id)).toMatchObject({ status: "PAST_DUE" });
     expect(await openSubscription(org)).toEqual(before);
     expect((await access(org)).access).toBe("SUBSCRIPTION");
   });
 
-  it("cancellation by Culqi (or the user) and expiry are terminal; late events cannot revive the row", async () => {
+  it("cancellation by Culqi (or the user) and expiry are terminal; late charges cannot revive the row", async () => {
     const org = await newOrganization();
     const id = await checkout(org, "BASIC");
-    await confirm(id.id, { key: "cx:p1" });
+    await confirm(id.id, { charge: "chr_test_cx1" });
     expect(await setStatus(id.id, "CANCELED", "PROVIDER")).toBe("CHANGED");
     expect(await billing(id.id)).toMatchObject({ status: "CANCELED", cancel_reason: "PROVIDER" });
     expect(await setStatus(id.id, "CANCELED")).toBe("UNCHANGED");
     expect(await setStatus(id.id, "PAST_DUE")).toBe("IGNORED");
-    expect((await confirm(id.id, { key: "cx:p2" })).outcome).toBe("IGNORED");
+    expect((await confirm(id.id, { charge: "chr_test_cx2" })).outcome).toBe("IGNORED");
     // The paid period is kept: access ends at its end (expiration sweep), not at the cancellation.
     expect((await access(org)).access).toBe("SUBSCRIPTION");
 
@@ -303,7 +366,18 @@ describe("declined charges and provider-side states (access unchanged)", () => {
     expect(await setStatus(expired.id, "FAILED")).toBe("IGNORED");
   });
 
-  it("ACTIVE / PENDING are never set directly (only a confirmed payment activates)", async () => {
+  it("F4: a PENDING checkout can be failed (confirmation_timeout) to free the organization", async () => {
+    const org = await newOrganization();
+    const id = await checkout(org, "PRO");
+    const result = await t.asService((tx) =>
+      one<{ result: string }>(tx, "select public.billing_set_culqi_status($1, 'FAILED', 1::smallint, null, 'confirmation_timeout', null, 'req-timeout') as result", [id.id])
+    );
+    expect(result.result).toBe("CHANGED");
+    expect(await billing(id.id)).toMatchObject({ status: "FAILED", failure_code: "confirmation_timeout" });
+    await checkout(org, "PRO"); // a new checkout is possible again
+  });
+
+  it("ACTIVE / PENDING are never set directly (only a verified charge activates)", async () => {
     const id = await checkout(await newOrganization(), "PRO");
     await expect(setStatus(id.id, "ACTIVE")).rejects.toThrow(/confirmed payment/);
     await expect(setStatus(id.id, "PENDING")).rejects.toThrow(/confirmed payment/);
@@ -311,7 +385,7 @@ describe("declined charges and provider-side states (access unchanged)", () => {
 
   it("an activation needs the Culqi subscription to exist", async () => {
     const id = await checkout(await newOrganization(), "PRO", { sxn: null });
-    await expect(confirm(id.id, { key: "no-sxn" })).rejects.toThrow(/was not created/);
+    await expect(confirm(id.id, { charge: "chr_test_nosxn" })).rejects.toThrow(/was not created/);
   });
 });
 
