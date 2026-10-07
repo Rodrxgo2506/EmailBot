@@ -13,8 +13,8 @@ describe("content security policy", () => {
   const production = buildContentSecurityPolicy({ apiUrl: "https://api.example.com/", supabaseUrl: "https://project.supabase.co" });
   const parsed = directives(production);
 
-  it("allows only same-origin scripts (no inline, no eval)", () => {
-    expect(parsed["script-src"]).toEqual(["'self'"]);
+  it("allows only same-origin scripts plus Culqi's checkout script (no inline, no eval)", () => {
+    expect(parsed["script-src"]).toEqual(["'self'", "https://js.culqi.com"]);
     expect(production).not.toContain("unsafe-eval");
     expect(production).not.toMatch(/script-src[^;]*unsafe-inline/);
   });
@@ -30,6 +30,13 @@ describe("content security policy", () => {
     expect(parsed["worker-src"]).toEqual(["'none'"]);
     expect(parsed["default-src"]).toEqual(["'self'"]);
     expect(production).toContain("upgrade-insecure-requests");
+  });
+
+  it("frames: itself and Culqi's checkout iframe only (exact origin, no wildcard)", () => {
+    expect(parsed["frame-src"]).toEqual(["'self'", "https://checkoutview.culqi.com"]);
+    expect(production).not.toContain("*.culqi");
+    // Card data never goes through EmailBot: no Culqi API origin in connect-src.
+    expect(parsed["connect-src"]?.some((value) => value.includes("culqi"))).toBe(false);
   });
 
   it("documents the two deliberate exceptions", () => {

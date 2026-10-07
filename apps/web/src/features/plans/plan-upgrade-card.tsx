@@ -7,7 +7,7 @@ import { Badge, Card, CardContent, CardDescription, CardHeader, CardTitle, Error
 import { SkeletonRows } from "@/components/ui/feedback";
 import { getErrorMessage } from "@/lib/errors";
 import { usePlanCatalog } from "./api";
-import { ComingSoonDialog } from "./coming-soon-dialog";
+import { ChoosePlanDialog } from "@/features/billing/choose-plan-dialog";
 import { formatPrice, monthlyPrice, upgradeBenefits, upgradeOptions } from "./plans-model";
 
 /**
@@ -69,7 +69,7 @@ export function PlanUpgradeCard({ currentPlan }: { currentPlan: CommercialPlan |
           })}
         </CardContent>
       ) : null}
-      <ComingSoonDialog plan={choosing} onOpenChange={(open) => !open && setChoosing(null)} />
+      <ChoosePlanDialog plan={choosing} onOpenChange={(open) => !open && setChoosing(null)} />
     </Card>
   );
 }
