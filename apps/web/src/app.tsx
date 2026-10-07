@@ -43,6 +43,7 @@ const ProfilePage = page(() => import("@/features/profile/profile-page"), "Profi
 const LegalAcceptancePage = page(() => import("@/features/legal/legal-acceptance-page"), "LegalAcceptancePage");
 const PrivacyPage = page(() => import("@/features/legal/privacy-page"), "PrivacyPage");
 const TermsPage = page(() => import("@/features/legal/terms-page"), "TermsPage");
+const PlansPage = page(() => import("@/features/plans/plans-page"), "PlansPage");
 const PortalApp = page(() => import("@/features/portal/portal-app"), "PortalApp");
 const AdminRoute = page(() => import("@/features/admin/admin-route"), "AdminRoute");
 
@@ -93,6 +94,8 @@ function SessionRoutes() {
             </Route>
             {/* Reachable with the temporary recovery session from the email link. */}
             <Route path="/reset-password" element={<ResetPasswordPage />} />
+            {/* Public pricing page; inside the session providers only to recognize the current plan. */}
+            <Route path="/planes" element={<PlansPage />} />
 
             <Route element={<RequireAuth />}>
               {/* Acceptance of the current Terms / Privacy versions; everything else waits for it. */}

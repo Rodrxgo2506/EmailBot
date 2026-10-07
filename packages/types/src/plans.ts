@@ -103,6 +103,35 @@ export interface OrganizationEntitlements {
 
 export type PlanUsage = Record<PlanUsageKey, number>;
 
+/** An ACTIVE price of a catalog plan (plan_prices). */
+export interface PlanCatalogPrice {
+  billingPeriod: BillingPeriod;
+  /** ISO 4217 ("PEN"). */
+  currency: string;
+  /** Major units as a decimal string ("39.90"), never a float; IGV included. */
+  amount: string;
+  /** Minor units (céntimos), what a payment provider expects. */
+  amountCents: number;
+}
+
+/**
+ * One commercial plan as offered publicly (GET /api/plans): the active rows of
+ * plan_catalog / plan_prices / plan_entitlements, the single source of prices,
+ * limits and features. Fail closed like the entitlements: a missing limit is 0,
+ * a missing feature is disabled.
+ */
+export interface PlanCatalogEntry {
+  code: CommercialPlan;
+  name: string;
+  description: string | null;
+  /** Commercial highlight ("Más elegido"); null = none. */
+  badge: string | null;
+  sortOrder: number;
+  prices: PlanCatalogPrice[];
+  limits: Record<PlanLimitKey, number | null>;
+  features: Record<PlanFeatureKey, boolean>;
+}
+
 /** The organization's current (open, or else latest) subscription as its members see it. */
 export interface OrganizationSubscriptionSummary {
   status: SubscriptionStatus;

@@ -4,6 +4,8 @@
  * data of one tenant is never shown under another.
  */
 export const queryKeys = {
+  /** Public plan catalog: the same for everyone (not organization-scoped). */
+  planCatalog: () => ["plan-catalog"] as const,
   org: (organizationId: string) => ["org", organizationId] as const,
   current: (organizationId: string) => ["org", organizationId, "current"] as const,
   plan: (organizationId: string) => ["org", organizationId, "plan"] as const,

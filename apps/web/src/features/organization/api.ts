@@ -33,12 +33,13 @@ export function useCurrentOrganization() {
 }
 
 /** Commercial V1: plan, entitlements and usage of the active organization (every member). */
-export function usePlanOverview() {
+export function usePlanOverview({ enabled = true }: { enabled?: boolean } = {}) {
   const organizationId = useOrganizationId();
   return useQuery({
     queryKey: queryKeys.plan(organizationId),
     queryFn: () => api.get<OrganizationPlanOverview>("/api/organizations/current/plan"),
-    staleTime: 30_000
+    staleTime: 30_000,
+    enabled
   });
 }
 

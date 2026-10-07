@@ -154,7 +154,7 @@ export async function buildApp(deps: AppDeps, options: BuildAppOptions = {}) {
     async (api) => {
       await api.register(meRoutes(deps));
       await api.register(organizationRoutes);
-      await api.register(planRoutes);
+      await api.register(planRoutes(deps));
       await api.register(memberRoutes(deps));
       await api.register(emailAccountRoutes(deps));
       await api.register(categoryRoutes);

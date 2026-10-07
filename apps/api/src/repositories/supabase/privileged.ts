@@ -7,7 +7,7 @@ import { portalSessionOperations } from "./customer-access-repositories.js";
 import { portalDataOperations } from "./delivery-repositories.js";
 import { legalAcceptanceOperations } from "./legal-repositories.js";
 import { microsoftSubscriptionOperations } from "./microsoft-subscription-repositories.js";
-import { planRepository } from "./plan-repositories.js";
+import { PLAN_CATALOG_COLUMNS, planRepository, toPlanCatalog } from "./plan-repositories.js";
 import { syncHealthOperations } from "./sync-health-repositories.js";
 import { EMAIL_ACCOUNT_COLUMNS, toEmailAccount, type Row } from "./mappers.js";
 
@@ -50,6 +50,14 @@ export function privilegedOperations(service: SupabaseClient): PrivilegedOperati
 
     getOrganizationEntitlements: (organizationId) => plans.entitlements(organizationId),
     getOrganizationUsage: (organizationId, keys) => plans.usage(organizationId, keys),
+
+    async listPlanCatalog() {
+      // Read-only, public data: the service role has SELECT on the three catalog tables (no anon grant).
+      const rows = unwrap(
+        await service.from("plan_catalog").select(PLAN_CATALOG_COLUMNS).eq("active", true).order("sort_order", { ascending: true })
+      ) as Row[];
+      return toPlanCatalog(rows);
+    },
 
     async findOAuthEmailAccountStatus(organizationId, provider, emailAddress) {
       const row = unwrap(

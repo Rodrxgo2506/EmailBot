@@ -16,7 +16,7 @@ import { formatDate } from "@/lib/utils";
 import { useAuth } from "@/providers/auth-provider";
 import { useOrganization } from "@/providers/organization-provider";
 import { useCurrentOrganization, useMembers, useOrganizationMutations, type SettingsPatch } from "./api";
-import { PlanCard } from "./plan-card";
+import { MyPlanSection } from "./plan-card";
 
 const INBOX_FILTER_LABELS: Record<(typeof INBOX_FILTERS)[number], string> = {
   ALL: "Todos",
@@ -218,7 +218,7 @@ export function SettingsPage() {
         }
       />
       <GeneralCard name={organization.name} slug={organization.slug} canEdit={can("organization:update")} />
-      <PlanCard />
+      <MyPlanSection />
       {settings ? <SettingsCard settings={settings} canEdit={can("settings:update")} /> : null}
       {role === "OWNER" ? <TransferOwnershipCard /> : null}
     </div>

@@ -2,8 +2,10 @@
 import type { Organization, OrganizationPlanOverview, OrganizationSettings } from "@emailbot/types";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { OrganizationContext, type OrganizationContextValue } from "@/providers/organization-provider";
+import { PLAN_CATALOG } from "@/test/plan-catalog-fixture";
 
 /*
  * Organization settings (EmailBot V2 phase 7): the panel only offers what
@@ -13,8 +15,8 @@ import { OrganizationContext, type OrganizationContextValue } from "@/providers/
  */
 
 // Hoisted: organization-provider (imported above) loads @/lib/api before this module's body runs.
-const { get, patch } = vi.hoisted(() => ({ get: vi.fn(), patch: vi.fn() }));
-vi.mock("@/lib/api", async () => ({ ...(await vi.importActual<typeof import("@/lib/api-client")>("@/lib/api-client")), api: { get, patch, post: vi.fn() } }));
+const { get, patch, post } = vi.hoisted(() => ({ get: vi.fn(), patch: vi.fn(), post: vi.fn() }));
+vi.mock("@/lib/api", async () => ({ ...(await vi.importActual<typeof import("@/lib/api-client")>("@/lib/api-client")), api: { get, patch, post } }));
 vi.mock("@/providers/auth-provider", () => ({ useAuth: () => ({ user: { id: "user-1" }, session: { user: { id: "user-1" } } }) }));
 vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
 
@@ -91,7 +93,9 @@ function renderSettings() {
   render(
     <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
       <OrganizationContext.Provider value={context}>
-        <SettingsPage />
+        <MemoryRouter>
+          <SettingsPage />
+        </MemoryRouter>
       </OrganizationContext.Provider>
     </QueryClientProvider>
   );
@@ -103,7 +107,11 @@ beforeEach(() => {
   currentOrganization = organization;
   planOverview = basicOverview({}, "FREE");
   get.mockImplementation(async (path: string) =>
-    path === "/api/organizations/current/plan" ? planOverview : { organization: currentOrganization, role: "ADMIN", settings }
+    path === "/api/organizations/current/plan"
+      ? planOverview
+      : path === "/api/plans"
+        ? { items: PLAN_CATALOG }
+        : { organization: currentOrganization, role: "ADMIN", settings }
   );
   patch.mockImplementation(async (_path: string, body: Partial<OrganizationSettings>) => ({ settings: { ...settings, ...body } }));
 });
@@ -189,5 +197,64 @@ describe("organization plan (Commercial V1)", () => {
     expect(screen.queryByText("Cuentas de correo")).not.toBeInTheDocument();
     expect(screen.queryByRole("list", { name: "Funcionalidades del plan" })).not.toBeInTheDocument();
     expect(screen.queryByText(/gratis|gratuit/i)).not.toBeInTheDocument();
+  });
+});
+
+describe("Mi plan: plans above the current one (catalog GET /api/plans; nothing is charged)", () => {
+  const overviewFor = (plan: "PRO" | "BUSINESS"): OrganizationPlanOverview => {
+    const base = basicOverview({}, "BASIC");
+    return { ...base, entitlements: { ...base.entitlements, plan, effectivePlan: plan, access: "SUBSCRIPTION" } };
+  };
+  const upgrades = () =>
+    screen
+      .getAllByRole("group")
+      .map((group) => group.getAttribute("aria-label"))
+      .filter((label) => label?.startsWith("Plan "));
+
+  it("Básico: offers Pro and Business with what each adds", async () => {
+    currentOrganization = { ...organization, plan: "BASIC" };
+    planOverview = basicOverview();
+    renderSettings();
+    expect(await screen.findByRole("heading", { name: "Mi plan" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Mejorar plan" })).toBeInTheDocument();
+    expect(upgrades()).toEqual(["Plan Pro", "Plan Business"]);
+    const pro = screen.getByRole("list", { name: "Qué obtienes con Pro" });
+    expect(pro).toHaveTextContent("5 cuentas de correo");
+    expect(pro).toHaveTextContent("Microsoft (Outlook / 365)");
+    expect(pro).toHaveTextContent("Portal de clientes");
+    expect(screen.getByText("S/ 39.90")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Comparar planes" })).toHaveAttribute("href", "/planes");
+  });
+
+  it("Pro: shows the Pro plan and offers only Business", async () => {
+    currentOrganization = { ...organization, plan: "PRO" };
+    planOverview = overviewFor("PRO");
+    renderSettings();
+    expect(await screen.findByRole("heading", { name: "Plan Pro" })).toBeInTheDocument();
+    await screen.findByRole("heading", { name: "Mejorar plan" });
+    expect(upgrades()).toEqual(["Plan Business"]);
+    const business = screen.getByRole("list", { name: "Qué obtienes con Business" });
+    expect(business).toHaveTextContent("20 cuentas de correo");
+    expect(business).not.toHaveTextContent(/Microsoft|Portal/); // Pro already has them
+  });
+
+  it("Business: the most complete plan, no upgrade offered", async () => {
+    currentOrganization = { ...organization, plan: "BUSINESS" };
+    planOverview = overviewFor("BUSINESS");
+    renderSettings();
+    expect(await screen.findByRole("heading", { name: "Plan Business" })).toBeInTheDocument();
+    expect(await screen.findByText("Actualmente tienes el plan más completo.")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Mejorar a/ })).not.toBeInTheDocument();
+  });
+
+  it("choosing an upgrade only informs: no request, no payment, nothing activated", async () => {
+    currentOrganization = { ...organization, plan: "BASIC" };
+    planOverview = basicOverview();
+    renderSettings();
+    fireEvent.click(await screen.findByRole("button", { name: "Mejorar a Pro" }));
+    expect(await screen.findByRole("dialog", { name: "Contratación en línea próximamente" })).toHaveTextContent("no se realiza ningún cobro");
+    expect(post).not.toHaveBeenCalled();
+    expect(patch).not.toHaveBeenCalled();
+    expect(get.mock.calls.map(([path]) => path).every((path) => !/culqi|checkout|payment|subscription/i.test(String(path)))).toBe(true);
   });
 });

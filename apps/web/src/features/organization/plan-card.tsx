@@ -2,9 +2,26 @@ import { Check, Minus } from "lucide-react";
 import { Badge, Card, CardContent, CardDescription, CardHeader, CardTitle, ErrorMessage } from "@/components/ui/display";
 import { SkeletonRows } from "@/components/ui/feedback";
 import { getErrorMessage } from "@/lib/errors";
+import { PlanUpgradeCard } from "@/features/plans/plan-upgrade-card";
 import { cn } from "@/lib/utils";
 import { usePlanOverview } from "./api";
 import { hasAccess, planDescription, planFeatures, planTitle, planUsageRows } from "./plan-model";
+
+/** Settings > Mi plan: the current plan (usage, features) and the plans above it. */
+export function MyPlanSection() {
+  const overview = usePlanOverview();
+  const currentPlan = overview.data && hasAccess(overview.data) ? overview.data.entitlements.effectivePlan : null;
+
+  return (
+    <section id="mi-plan" aria-labelledby="mi-plan-title" className="scroll-mt-20 space-y-4">
+      <h2 id="mi-plan-title" className="text-lg font-semibold tracking-tight">
+        Mi plan
+      </h2>
+      <PlanCard />
+      {overview.data ? <PlanUpgradeCard currentPlan={currentPlan} /> : null}
+    </section>
+  );
+}
 
 /**
  * Commercial V1 / V1.1: subscription, plan, usage and features of the

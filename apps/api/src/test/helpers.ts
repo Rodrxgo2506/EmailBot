@@ -125,7 +125,8 @@ export function createFakePrivileged(): { [K in keyof PrivilegedOperations]: Ret
     // Commercial V1 (OAuth callback): BUSINESS, nothing used, the mailbox is new.
     getOrganizationEntitlements: vi.fn(async () => entitlementsFor("BUSINESS")),
     getOrganizationUsage: vi.fn(async (_organizationId: string, keys: readonly string[]) => Object.fromEntries(keys.map((key) => [key, 0]))),
-    findOAuthEmailAccountStatus: vi.fn(async () => null)
+    findOAuthEmailAccountStatus: vi.fn(async () => null),
+    listPlanCatalog: unexpected("privileged.listPlanCatalog")
   };
 }
 
