@@ -1,6 +1,7 @@
 import { resolve } from "node:path";
 import { config as loadDotenv } from "dotenv";
 import {
+  createCulqiClient,
   encryptionKeyFingerprint,
   EXPIRE_SUBSCRIPTIONS_INTERVAL_MS,
   EXPIRE_SUBSCRIPTIONS_SCHEDULER_ID,
@@ -32,7 +33,8 @@ import {
   createEmailStore,
   createRealtimePublisher,
   createRoutingStore,
-  createSubscriptionMaintenance
+  createSubscriptionMaintenance,
+  createBillingStore
 } from "./infrastructure/supabase-stores.js";
 import { handleAccountFailure, NonRetryableError } from "./pipeline/failures.js";
 import { handleEmailEvent, SyncBusyError, type HandleEventDeps } from "./pipeline/handle-email-event.js";
@@ -126,7 +128,12 @@ const eventDeps: Omit<HandleEventDeps, "logger"> = {
   watchTopic: config.gmailPubSubTopic,
   microsoftPush: config.microsoftPush,
   microsoftSubscriptions: createMicrosoftSubscriptionClient(providerFetch),
-  subscriptions: createSubscriptionMaintenance(supabase)
+  subscriptions: createSubscriptionMaintenance(supabase),
+  // Commercial V1 phase 2: Culqi SANDBOX only (live keys are refused by the configuration).
+  billing: {
+    store: createBillingStore(supabase),
+    culqi: config.culqi ? createCulqiClient({ secretKey: config.culqi.secretKey, fetch: providerFetch, baseUrl: config.culqi.apiUrl }) : null
+  }
 };
 
 /**

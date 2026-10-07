@@ -17,6 +17,7 @@ import { ProviderHttpError } from "../providers/http.js";
 import type { MicrosoftSubscriptionClient } from "../providers/microsoft/subscriptions.js";
 import type { ProviderRegistry } from "../providers/registry.js";
 import { ProviderAuthError, ProviderTransientError, type ProviderContext, type WorkerAccount } from "../providers/types.js";
+import { handleCulqiEvent, reconcileCulqiSubscription, type BillingDeps, type BillingOutcome } from "./billing.js";
 import { hasCommercialAccess, withCommercialAccess } from "./commercial-access.js";
 import type { AccountStore, AuditRecorder, EmailStore, JobProducer, Logger, SubscriptionMaintenance, SyncLock } from "./ports.js";
 import { AttachmentsPendingError, type ProcessEmailOutcome } from "./process-email.js";
@@ -66,6 +67,8 @@ export interface HandleEventDeps {
   microsoftSubscriptions?: MicrosoftSubscriptionClient;
   /** Commercial V1.2: periodic expiration of subscriptions (EXPIRE_SUBSCRIPTIONS). */
   subscriptions?: SubscriptionMaintenance;
+  /** Commercial V1 phase 2 (Culqi sandbox): CULQI_EVENT / CULQI_RECONCILE. */
+  billing?: Omit<BillingDeps, "logger" | "now">;
   now?: () => number;
   logger: Logger;
 }
@@ -78,6 +81,8 @@ export interface HandleEventOutcome {
   processed?: number;
   /** Subscriptions expired by EXPIRE_SUBSCRIPTIONS. */
   expired?: number;
+  /** CULQI_EVENT / CULQI_RECONCILE result. */
+  billing?: BillingOutcome;
 }
 
 const POLL_BATCH = 500;
@@ -572,6 +577,18 @@ export async function handleEmailEvent(job: EmailEventJob, deps: HandleEventDeps
       const accounts = await withCommercialAccess(active, deps.accounts, deps.logger, "poll", job.type);
       for (const account of accounts) await deps.enqueueSync(account, "POLL");
       return { accounts: accounts.length, enqueued: accounts.length };
+    }
+
+    case "CULQI_EVENT":
+    case "CULQI_RECONCILE": {
+      if (!deps.billing) {
+        deps.logger.error({ event: "billing.culqi.not_configured", jobType: job.type }, "billing store not wired in this worker");
+        return { accounts: 0, enqueued: 0, billing: "not_configured" };
+      }
+      const billingDeps: BillingDeps = { ...deps.billing, logger: deps.logger, ...(deps.now ? { now: deps.now } : {}) };
+      const billing =
+        job.type === "CULQI_EVENT" ? await handleCulqiEvent(job.eventId, billingDeps) : await reconcileCulqiSubscription(job.billingSubscriptionId, billingDeps);
+      return { accounts: 0, enqueued: 0, billing };
     }
 
     case "EXPIRE_SUBSCRIPTIONS": {

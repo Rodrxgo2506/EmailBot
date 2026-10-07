@@ -6,6 +6,8 @@ import type {
   AccountStore,
   AttachmentStorage,
   AuditRecorder,
+  BillingStore,
+  BillingSubscriptionRow,
   CommercialAccess,
   EmailStore,
   IdentifierCandidate,
@@ -209,6 +211,131 @@ export function createSubscriptionMaintenance(db: SupabaseClient): SubscriptionM
   return {
     async expireDue() {
       return Number(check(await db.rpc("expire_due_subscriptions"), "expireDueSubscriptions") ?? 0);
+    }
+  };
+}
+
+const BILLING_COLUMNS = "id,organization_id,status,external_subscription_id,cancel_reason,price:plan_prices(billing_period)";
+
+function toBillingRow(row: Row): BillingSubscriptionRow {
+  const price = Array.isArray(row.price) ? row.price[0] : row.price;
+  return {
+    id: row.id,
+    organizationId: row.organization_id,
+    status: row.status,
+    externalSubscriptionId: row.external_subscription_id ?? null,
+    billingPeriod: price?.billing_period === "YEARLY" ? "YEARLY" : "MONTHLY",
+    cancelReason: row.cancel_reason ?? null
+  };
+}
+
+/** Commercial V1 phase 2 (Culqi sandbox): billing_* tables (service role) and the three billing functions. */
+export function createBillingStore(db: SupabaseClient): BillingStore {
+  const provider = "CULQI";
+  return {
+    async getWebhookEvent(eventId) {
+      const row = check(
+        await db.from("billing_webhook_events").select("status,attempts").eq("provider", provider).eq("external_event_id", eventId).maybeSingle(),
+        "getWebhookEvent"
+      ) as Row | null;
+      return row ? { status: row.status, attempts: Number(row.attempts) } : null;
+    },
+
+    async updateWebhookEvent(eventId, patch) {
+      const update: Row = {};
+      if (patch.status !== undefined) update.status = patch.status;
+      if (patch.eventType !== undefined) update.event_type = patch.eventType;
+      if (patch.lastError !== undefined) update.last_error = patch.lastError === null ? null : patch.lastError.slice(0, 500);
+      if (patch.externalSubscriptionId !== undefined) update.external_subscription_id = patch.externalSubscriptionId;
+      if (patch.externalChargeId !== undefined) update.external_charge_id = patch.externalChargeId;
+      if (patch.attempts !== undefined) update.attempts = patch.attempts;
+      if (patch.processed) update.processed_at = new Date().toISOString();
+      check(await db.from("billing_webhook_events").update(update).eq("provider", provider).eq("external_event_id", eventId), "updateWebhookEvent");
+    },
+
+    async getBillingSubscription(id) {
+      const row = check(await db.from("billing_subscriptions").select(BILLING_COLUMNS).eq("id", id).maybeSingle(), "getBillingSubscription") as Row | null;
+      return row ? toBillingRow(row) : null;
+    },
+
+    async findBillingSubscriptionByExternalId(externalSubscriptionId) {
+      const row = check(
+        await db.from("billing_subscriptions").select(BILLING_COLUMNS).eq("external_subscription_id", externalSubscriptionId).maybeSingle(),
+        "findBillingSubscription"
+      ) as Row | null;
+      return row ? toBillingRow(row) : null;
+    },
+
+    async activate(input) {
+      const rows = check(
+        await db.rpc("billing_activate_culqi_subscription", {
+          p_billing_subscription_id: input.billingSubscriptionId,
+          p_activation_key: input.activationKey,
+          p_event_type: input.eventType,
+          p_period_start: input.periodStart,
+          p_period_end: input.periodEnd,
+          p_current_period: input.currentPeriod,
+          p_external_charge_id: input.externalChargeId,
+          p_provider_status: input.providerStatus,
+          p_request_id: input.requestId
+        }),
+        "activateCulqiSubscription"
+      ) as Row[] | null;
+      const row = rows?.[0] ?? {};
+      return { outcome: String(row.outcome), subscriptionId: row.subscription_id ?? null, supersededExternalIds: (row.superseded_external_ids as string[] | null) ?? [] };
+    },
+
+    async recordChargeFailure(input) {
+      return String(
+        check(
+          await db.rpc("billing_record_culqi_charge_failure", {
+            p_billing_subscription_id: input.billingSubscriptionId,
+            p_external_event_id: input.externalEventId,
+            p_event_type: input.eventType,
+            p_external_charge_id: input.externalChargeId,
+            p_failure_code: input.failureCode,
+            p_failure_message: input.failureMessage,
+            p_provider_status: input.providerStatus,
+            p_request_id: input.requestId
+          }),
+          "recordCulqiChargeFailure"
+        )
+      );
+    },
+
+    async setStatus(input) {
+      return String(
+        check(
+          await db.rpc("billing_set_culqi_status", {
+            p_billing_subscription_id: input.billingSubscriptionId,
+            p_status: input.status,
+            p_provider_status: input.providerStatus,
+            p_cancel_reason: input.cancelReason,
+            p_failure_code: input.failureCode,
+            p_failure_message: input.failureMessage,
+            p_request_id: input.requestId
+          }),
+          "setCulqiStatus"
+        )
+      );
+    },
+
+    async listUnconfirmedCancellations(organizationId) {
+      const rows = check(
+        await db
+          .from("billing_subscriptions")
+          .select("id,external_subscription_id")
+          .eq("organization_id", organizationId)
+          .eq("cancel_reason", "UPGRADED")
+          .is("provider_canceled_at", null)
+          .not("external_subscription_id", "is", null),
+        "listUnconfirmedCancellations"
+      ) as Row[];
+      return rows.map((row) => ({ id: row.id as string, externalSubscriptionId: row.external_subscription_id as string }));
+    },
+
+    async markProviderCanceled(id) {
+      check(await db.from("billing_subscriptions").update({ provider_canceled_at: new Date().toISOString() }).eq("id", id), "markProviderCanceled");
     }
   };
 }

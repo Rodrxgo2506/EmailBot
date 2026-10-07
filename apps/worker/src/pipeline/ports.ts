@@ -72,6 +72,78 @@ export interface SubscriptionMaintenance {
   expireDue(): Promise<number>;
 }
 
+/* Commercial V1 phase 2 (Culqi sandbox): provider side of the subscriptions (billing_* tables). */
+
+export type BillingSubscriptionStatus = "PENDING" | "ACTIVE" | "PAST_DUE" | "CANCELED" | "EXPIRED" | "FAILED";
+
+export interface BillingSubscriptionRow {
+  id: string;
+  organizationId: string;
+  status: BillingSubscriptionStatus;
+  externalSubscriptionId: string | null;
+  billingPeriod: "MONTHLY" | "YEARLY";
+  cancelReason: "USER" | "PROVIDER" | "UPGRADED" | null;
+}
+
+export interface WebhookEventRow {
+  status: "RECEIVED" | "PROCESSED" | "IGNORED" | "FAILED";
+  attempts: number;
+}
+
+export interface BillingStore {
+  getWebhookEvent(eventId: string): Promise<WebhookEventRow | null>;
+  updateWebhookEvent(
+    eventId: string,
+    patch: {
+      status?: WebhookEventRow["status"];
+      eventType?: string | null;
+      lastError?: string | null;
+      externalSubscriptionId?: string | null;
+      externalChargeId?: string | null;
+      attempts?: number;
+      processed?: boolean;
+    }
+  ): Promise<void>;
+  getBillingSubscription(id: string): Promise<BillingSubscriptionRow | null>;
+  findBillingSubscriptionByExternalId(externalSubscriptionId: string): Promise<BillingSubscriptionRow | null>;
+  /** public.billing_activate_culqi_subscription (idempotent per activation key). */
+  activate(input: {
+    billingSubscriptionId: string;
+    activationKey: string;
+    eventType: string;
+    periodStart: string;
+    periodEnd: string;
+    currentPeriod: number | null;
+    externalChargeId: string | null;
+    providerStatus: number | null;
+    requestId: string;
+  }): Promise<{ outcome: string; subscriptionId: string | null; supersededExternalIds: string[] }>;
+  /** public.billing_record_culqi_charge_failure: RECORDED or DUPLICATE. */
+  recordChargeFailure(input: {
+    billingSubscriptionId: string;
+    externalEventId: string;
+    eventType: string;
+    externalChargeId: string | null;
+    failureCode: string | null;
+    failureMessage: string | null;
+    providerStatus: number | null;
+    requestId: string;
+  }): Promise<string>;
+  /** public.billing_set_culqi_status: CHANGED, UNCHANGED or IGNORED. */
+  setStatus(input: {
+    billingSubscriptionId: string;
+    status: Exclude<BillingSubscriptionStatus, "PENDING" | "ACTIVE">;
+    providerStatus: number | null;
+    cancelReason: "USER" | "PROVIDER" | "UPGRADED" | null;
+    failureCode: string | null;
+    failureMessage: string | null;
+    requestId: string;
+  }): Promise<string>;
+  /** Culqi subscriptions replaced by an upgrade whose cancellation Culqi has not confirmed yet. */
+  listUnconfirmedCancellations(organizationId: string): Promise<Array<{ id: string; externalSubscriptionId: string }>>;
+  markProviderCanceled(id: string): Promise<void>;
+}
+
 export interface OrganizationProcessingSettings {
   autoProcessingEnabled: boolean;
   processAttachments: boolean;

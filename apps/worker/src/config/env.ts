@@ -1,4 +1,4 @@
-import { encryptionKeyEnv, graphLifecycleUrl, optionalEnv, parseEnv, type OAuthClientConfig } from "@emailbot/shared";
+import { CULQI_API_URL, culqiKeyProblem, encryptionKeyEnv, graphLifecycleUrl, optionalEnv, parseEnv, type OAuthClientConfig } from "@emailbot/shared";
 import { productionUrlProblem, PUBLIC_URL, REDIS_URL } from "@emailbot/validation";
 import { z } from "zod";
 
@@ -57,9 +57,22 @@ const envSchema = z.object({
   WORKER_HEALTH_PORT: optionalEnv(z.coerce.number().int().min(1).max(65_535)),
   PORT: optionalEnv(z.coerce.number().int().min(1).max(65_535)),
   WORKER_HEALTH_HOST: z.string().min(1).default("0.0.0.0"),
-  SENTRY_DSN: optionalEnv(z.url())
+  SENTRY_DSN: optionalEnv(z.url()),
+
+  /**
+   * Commercial V1 phase 2 (Culqi SANDBOX only): secret key used to re-read Culqi webhook events and
+   * subscriptions and to cancel replaced subscriptions. Integration keys only (sk_test_); a live key is refused.
+   * Unset = Culqi jobs are not processed (recorded as FAILED, retried when configured).
+   */
+  CULQI_SECRET_KEY: optionalEnv(z.string().min(1)),
+  CULQI_API_URL: optionalEnv(z.url())
 }).superRefine((env, ctx) => {
   const issue = (path: string, message: string) => ctx.addIssue({ code: "custom", path: [path], message });
+
+  if (env.CULQI_SECRET_KEY !== undefined) {
+    const problem = culqiKeyProblem(env.CULQI_SECRET_KEY, "secret");
+    if (problem) issue("CULQI_SECRET_KEY", problem);
+  }
 
   // Every environment: subscriptions are created with the Microsoft account's delegated token.
   if (env.MICROSOFT_GRAPH_NOTIFICATION_URL !== undefined && !(env.MICROSOFT_CLIENT_ID && env.MICROSOFT_CLIENT_SECRET && env.MICROSOFT_REDIRECT_URI)) {
@@ -117,6 +130,8 @@ export interface WorkerConfig {
   /** null = health endpoint disabled. */
   health: { port: number; host: string } | null;
   sentryDsn: string | null;
+  /** Commercial V1 phase 2: Culqi sandbox; null = not configured. */
+  culqi: { secretKey: string; apiUrl: string } | null;
 }
 
 function oauth(
@@ -158,6 +173,7 @@ export function loadWorkerConfig(source: NodeJS.ProcessEnv = process.env): Worke
     health: (env.WORKER_HEALTH_PORT ?? env.PORT) !== undefined
       ? { port: (env.WORKER_HEALTH_PORT ?? env.PORT) as number, host: env.WORKER_HEALTH_HOST }
       : null,
-    sentryDsn: env.SENTRY_DSN ?? null
+    sentryDsn: env.SENTRY_DSN ?? null,
+    culqi: env.CULQI_SECRET_KEY ? { secretKey: env.CULQI_SECRET_KEY, apiUrl: env.CULQI_API_URL ?? CULQI_API_URL } : null
   };
 }
