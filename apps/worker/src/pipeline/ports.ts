@@ -80,9 +80,18 @@ export interface BillingSubscriptionRow {
   id: string;
   organizationId: string;
   status: BillingSubscriptionStatus;
+  environment: "test" | "live";
   externalSubscriptionId: string | null;
+  /** The Culqi plan mapped to the EmailBot price at checkout. */
+  externalPlanId: string;
+  externalCustomerId: string | null;
+  externalCardId: string | null;
   billingPeriod: "MONTHLY" | "YEARLY";
+  /** EmailBot catalog price of the subscribed plan (what every charge must be). */
+  amountCents: number;
+  currency: string;
   cancelReason: "USER" | "PROVIDER" | "UPGRADED" | null;
+  createdAt: string;
 }
 
 export interface WebhookEventRow {
@@ -142,6 +151,10 @@ export interface BillingStore {
   /** Culqi subscriptions replaced by an upgrade whose cancellation Culqi has not confirmed yet. */
   listUnconfirmedCancellations(organizationId: string): Promise<Array<{ id: string; externalSubscriptionId: string }>>;
   markProviderCanceled(id: string): Promise<void>;
+  /** F3: ACTIVE / PAST_DUE subscriptions whose period ends between the two instants (renewal window). */
+  listDueForReconciliation(input: { endBefore: string; endAfter: string; limit: number }): Promise<BillingSubscriptionRow[]>;
+  /** F4: PENDING checkouts older than the timeouts (with / without a Culqi subscription id). */
+  listStalePending(input: { withSubscriptionCreatedBefore: string; withoutSubscriptionCreatedBefore: string; limit: number }): Promise<BillingSubscriptionRow[]>;
 }
 
 export interface OrganizationProcessingSettings {

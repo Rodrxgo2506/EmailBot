@@ -215,7 +215,9 @@ export function createSubscriptionMaintenance(db: SupabaseClient): SubscriptionM
   };
 }
 
-const BILLING_COLUMNS = "id,organization_id,status,external_subscription_id,cancel_reason,price:plan_prices(billing_period)";
+const BILLING_COLUMNS =
+  "id,organization_id,status,environment,external_subscription_id,external_plan_id,external_customer_id,external_card_id,cancel_reason,created_at," +
+  "price:plan_prices(billing_period,amount_cents,currency)";
 
 function toBillingRow(row: Row): BillingSubscriptionRow {
   const price = Array.isArray(row.price) ? row.price[0] : row.price;
@@ -223,9 +225,17 @@ function toBillingRow(row: Row): BillingSubscriptionRow {
     id: row.id,
     organizationId: row.organization_id,
     status: row.status,
+    environment: row.environment === "live" ? "live" : "test",
     externalSubscriptionId: row.external_subscription_id ?? null,
+    externalPlanId: row.external_plan_id,
+    externalCustomerId: row.external_customer_id ?? null,
+    externalCardId: row.external_card_id ?? null,
     billingPeriod: price?.billing_period === "YEARLY" ? "YEARLY" : "MONTHLY",
-    cancelReason: row.cancel_reason ?? null
+    // Fail closed: an unreadable price never matches a charge.
+    amountCents: Number.isFinite(Number(price?.amount_cents)) ? Number(price.amount_cents) : -1,
+    currency: typeof price?.currency === "string" ? price.currency : "",
+    cancelReason: row.cancel_reason ?? null,
+    createdAt: row.created_at
   };
 }
 
@@ -336,6 +346,47 @@ export function createBillingStore(db: SupabaseClient): BillingStore {
 
     async markProviderCanceled(id) {
       check(await db.from("billing_subscriptions").update({ provider_canceled_at: new Date().toISOString() }).eq("id", id), "markProviderCanceled");
+    },
+
+    async listDueForReconciliation({ endBefore, endAfter, limit }) {
+      const rows = check(
+        await db
+          .from("billing_subscriptions")
+          .select(BILLING_COLUMNS)
+          .eq("provider", provider)
+          .in("status", ["ACTIVE", "PAST_DUE"])
+          .not("external_subscription_id", "is", null)
+          .lte("current_period_end", endBefore)
+          .gte("current_period_end", endAfter)
+          .order("current_period_end", { ascending: true })
+          .limit(limit),
+        "listDueForReconciliation"
+      ) as Row[];
+      return rows.map(toBillingRow);
+    },
+
+    async listStalePending({ withSubscriptionCreatedBefore, withoutSubscriptionCreatedBefore, limit }) {
+      const [withSubscription, withoutSubscription] = await Promise.all([
+        db
+          .from("billing_subscriptions")
+          .select(BILLING_COLUMNS)
+          .eq("provider", provider)
+          .eq("status", "PENDING")
+          .not("external_subscription_id", "is", null)
+          .lte("created_at", withSubscriptionCreatedBefore)
+          .order("created_at", { ascending: true })
+          .limit(limit),
+        db
+          .from("billing_subscriptions")
+          .select(BILLING_COLUMNS)
+          .eq("provider", provider)
+          .eq("status", "PENDING")
+          .is("external_subscription_id", null)
+          .lte("created_at", withoutSubscriptionCreatedBefore)
+          .order("created_at", { ascending: true })
+          .limit(limit)
+      ]);
+      return [...(check(withSubscription, "listStalePending") as Row[]), ...(check(withoutSubscription, "listStalePending") as Row[])].map(toBillingRow);
     }
   };
 }

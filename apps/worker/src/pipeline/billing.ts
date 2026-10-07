@@ -1,12 +1,16 @@
 import {
   collectCulqiIds,
+  CULQI_CHARGE_SUCCESS_CODE,
+  CULQI_INTERVAL_UNIT,
   culqiEnvironment,
   culqiTimestamp,
   CulqiApiError,
   isHandledCulqiEvent,
   mapCulqiSubscriptionStatus,
   serializeError,
+  type CulqiCharge,
   type CulqiClient,
+  type CulqiPlan,
   type CulqiSubscription
 } from "@emailbot/shared";
 import type { BillingStore, BillingSubscriptionRow, Logger } from "./ports.js";
@@ -14,29 +18,43 @@ import type { BillingStore, BillingSubscriptionRow, Logger } from "./ports.js";
 /*
  * Commercial V1 phase 2 (Culqi SANDBOX): webhook events and reconciliation.
  *
- * Nothing the webhook request contains is trusted: the event is re-read from
- * Culqi's API by its id (GET /v2/events/{id}, secret key) and the subscription
- * it mentions is re-read too (GET /v2/recurrent/subscriptions/{id}). EmailBot
- * applies the subscription's CURRENT state, so duplicated or out-of-order
- * events converge to the same result:
+ * ONE path applies Culqi to EmailBot (syncCulqiSubscription), used by the
+ * webhook (CULQI_EVENT), the post-checkout reconciliation (CULQI_RECONCILE),
+ * the periodic reconciliation and the expiry of stale checkouts
+ * (CULQI_RECONCILE_DUE):
  *
- *   Culqi status 3 (Activa) or a verified subscription.charge.succeeded
- *     -> public.billing_activate_culqi_subscription, keyed by
- *        (subscription, billing cycle): a webhook and a reconciliation of the
- *        same cycle are applied once; an older cycle never shortens the period.
- *   subscription.charge.failed -> declined charge recorded once (event id);
- *        billing row FAILED (first charge) or PAST_DUE (renewal); access unchanged.
- *   4 (Cancelada) / 6 (Vencida) -> CANCELED / EXPIRED (provider side only).
- *   1 / 2 / 5 without a failure -> still waiting.
+ *   1. the Culqi subscription is read back (GET /v2/recurrent/subscriptions/{id})
+ *      and checked against EmailBot (F2): id, environment, mapped plan,
+ *      the Culqi plan's amount / currency / interval vs the catalog, metadata;
+ *   2. every candidate charge (from the event and from the subscription's
+ *      periods) is read back (GET /v2/charges/{id}) and verified (F1): paid,
+ *      outcome "succesfull_charge", amount and currency of the catalog, linked
+ *      to this subscription (listed in it) or to its card / customer;
+ *   3. ONLY a verified paid charge activates, keyed by its charge id: a
+ *      webhook and a reconciliation of the same charge apply it once;
+ *   4. a declined charge is recorded once (charge id); Culqi statuses only
+ *      move the provider side to PAST_DUE / CANCELED / EXPIRED / FAILED.
  *
- * Culqi charges subscriptions in a daily batch, so the EmailBot period ends
- * CULQI_RENEWAL_GRACE_MS after Culqi's next billing date: the renewal has time
- * to arrive before the expiration sweep (provisional policy, see docs).
+ * A "subscription created" event or a Culqi status 3 ("Activa") never
+ * activates anything by itself. Nothing from the webhook request is trusted.
  */
 
+/** Culqi charges subscriptions in a daily batch: the EmailBot period ends this long after the paid interval. */
 export const CULQI_RENEWAL_GRACE_MS = 3 * 24 * 3600_000;
-
-const PERIOD_MS = { MONTHLY: 31 * 24 * 3600_000, YEARLY: 366 * 24 * 3600_000 } as const;
+/** F3: subscriptions are re-read from this long before the end of their period (renewal charge window). */
+export const CULQI_RECONCILE_WINDOW_MS = CULQI_RENEWAL_GRACE_MS + 24 * 3600_000;
+/** F3: and until this long after it (late renewals / retries). */
+export const CULQI_RECONCILE_LOOKBACK_MS = 7 * 24 * 3600_000;
+/**
+ * F4: a checkout whose Culqi subscription has no verified paid charge after
+ * this long is cancelled at Culqi and FAILED (confirmation_timeout). 48 h
+ * covers Culqi's daily charging batch plus a retry day.
+ */
+export const CULQI_PENDING_CONFIRMATION_TIMEOUT_MS = 48 * 3600_000;
+/** F4: a checkout that never got its Culqi subscription id (interrupted) is FAILED after this long. */
+export const CULQI_PENDING_INCOMPLETE_TIMEOUT_MS = 30 * 60_000;
+const BATCH = 100;
+const MAX_CHARGES = 24;
 
 export interface BillingDeps {
   store: BillingStore;
@@ -53,13 +71,15 @@ export type BillingOutcome =
   | "charge_failed"
   | "status_changed"
   | "pending"
+  | "rejected"
   | "ignored"
+  | "expired_pending"
   | "not_configured";
 
-/** The subscription has not been charged yet: the reconciliation job is retried later (BullMQ backoff). */
+/** The checkout has no verified paid charge yet: the reconciliation job is retried later (BullMQ backoff). */
 export class CulqiStillPendingError extends Error {
   constructor(readonly billingSubscriptionId: string) {
-    super("The Culqi subscription has not been charged yet");
+    super("The Culqi subscription has no verified paid charge yet");
     this.name = "CulqiStillPendingError";
   }
 }
@@ -71,107 +91,203 @@ function errorText(error: unknown): string {
   return error instanceof Error ? error.message.slice(0, 300) : "unknown error";
 }
 
-/** One key per (Culqi subscription, billing cycle): the cycle is identified by Culqi's next billing date. */
-export function activationKey(subscription: CulqiSubscription): string {
-  const cycle = culqiTimestamp(subscription.next_billing_date)?.getTime() ?? `p${subscription.current_period ?? 0}`;
-  return `culqi:${subscription.id}:${cycle}`;
+/* ------------------------------------------------------------------ F2: the subscription matches EmailBot */
+
+export type Verification = { ok: true } | { ok: false; reason: string };
+
+const planIdOf = (subscription: CulqiSubscription) =>
+  (typeof subscription.plan_id === "string" ? subscription.plan_id : null) ?? (typeof subscription.plan?.plan_id === "string" ? subscription.plan.plan_id : null);
+
+export function verifyCulqiSubscription(row: BillingSubscriptionRow, subscription: CulqiSubscription, plan: CulqiPlan | null, environment: string): Verification {
+  if (subscription.id !== row.externalSubscriptionId) return { ok: false, reason: "SUBSCRIPTION_ID_MISMATCH" };
+  if (culqiEnvironment(subscription.id) !== row.environment || row.environment !== environment) return { ok: false, reason: "ENVIRONMENT_MISMATCH" };
+  const planId = planIdOf(subscription);
+  if (!planId) return { ok: false, reason: "PLAN_NOT_REPORTED" };
+  if (planId !== row.externalPlanId) return { ok: false, reason: "PLAN_MISMATCH" };
+  if (!plan || plan.id !== row.externalPlanId) return { ok: false, reason: "PLAN_NOT_FOUND" };
+  if (Number(plan.amount) !== row.amountCents) return { ok: false, reason: "PLAN_AMOUNT_MISMATCH" };
+  if (plan.currency !== row.currency) return { ok: false, reason: "PLAN_CURRENCY_MISMATCH" };
+  if (Number(plan.interval_unit_time) !== CULQI_INTERVAL_UNIT[row.billingPeriod]) return { ok: false, reason: "PLAN_INTERVAL_MISMATCH" };
+  const metadata = subscription.metadata ?? {};
+  if (metadata.organization_id !== undefined && metadata.organization_id !== row.organizationId) return { ok: false, reason: "ORGANIZATION_MISMATCH" };
+  if (metadata.billing_subscription_id !== undefined && metadata.billing_subscription_id !== row.id) return { ok: false, reason: "BILLING_SUBSCRIPTION_MISMATCH" };
+  return { ok: true };
 }
 
-/** EmailBot period for a confirmed charge: until Culqi's next billing date + grace (or one plan interval). */
-export function confirmedPeriod(subscription: CulqiSubscription, billingPeriod: BillingSubscriptionRow["billingPeriod"], at: number) {
-  const next = culqiTimestamp(subscription.next_billing_date)?.getTime();
-  const end = (next !== undefined && next > at ? next : at + PERIOD_MS[billingPeriod]) + CULQI_RENEWAL_GRACE_MS;
-  return { start: new Date(at).toISOString(), end: new Date(end).toISOString() };
+/* ------------------------------------------------------------------ F1: the charge is a real payment of this subscription */
+
+export type ChargeVerdict = { kind: "PAID" } | { kind: "DECLINED"; code: string } | { kind: "REJECTED"; reason: string };
+
+export function verifyCulqiCharge(row: BillingSubscriptionRow, chargeId: string, charge: CulqiCharge | null, listedInSubscription: boolean): ChargeVerdict {
+  if (!charge) return { kind: "REJECTED", reason: "CHARGE_NOT_FOUND" };
+  if (charge.id !== chargeId) return { kind: "REJECTED", reason: "CHARGE_ID_MISMATCH" };
+  if (culqiEnvironment(charge.id) !== row.environment) return { kind: "REJECTED", reason: "CHARGE_ENVIRONMENT_MISMATCH" };
+
+  // The charge must belong to this subscription: listed in it, or made with its card / customer.
+  const sourceId = typeof charge.source?.id === "string" ? charge.source.id : null;
+  const sourceCustomer = typeof charge.source?.customer_id === "string" ? charge.source.customer_id : null;
+  if (sourceId?.startsWith("crd_") && row.externalCardId && sourceId !== row.externalCardId) return { kind: "REJECTED", reason: "CHARGE_CARD_MISMATCH" };
+  if (sourceCustomer && row.externalCustomerId && sourceCustomer !== row.externalCustomerId) return { kind: "REJECTED", reason: "CHARGE_CUSTOMER_MISMATCH" };
+  const linkedBySource = (sourceId !== null && sourceId === row.externalCardId) || (sourceCustomer !== null && sourceCustomer === row.externalCustomerId);
+  if (!listedInSubscription && !linkedBySource) return { kind: "REJECTED", reason: "CHARGE_NOT_LINKED" };
+
+  const outcome = charge.outcome?.code ?? null;
+  if (charge.paid === false || outcome === "card_declined") {
+    return { kind: "DECLINED", code: (charge.outcome?.decline_code ?? outcome ?? "charge_declined").slice(0, 100) };
+  }
+  if (Number(charge.amount) !== row.amountCents) return { kind: "REJECTED", reason: "CHARGE_AMOUNT_MISMATCH" };
+  if (charge.currency_code !== row.currency) return { kind: "REJECTED", reason: "CHARGE_CURRENCY_MISMATCH" };
+  if (charge.paid === true && outcome === CULQI_CHARGE_SUCCESS_CODE) return { kind: "PAID" };
+  return { kind: "REJECTED", reason: "CHARGE_NOT_CONFIRMED" };
+}
+
+/** EmailBot period paid by a charge: one plan interval from the charge, plus the renewal grace. */
+export function periodForCharge(charge: CulqiCharge, billingPeriod: BillingSubscriptionRow["billingPeriod"], at: number) {
+  const start = culqiTimestamp(charge.creation_date) ?? new Date(at);
+  const end = new Date(start.getTime());
+  if (billingPeriod === "YEARLY") end.setUTCFullYear(end.getUTCFullYear() + 1);
+  else end.setUTCMonth(end.getUTCMonth() + 1);
+  return { start: start.toISOString(), end: new Date(end.getTime() + CULQI_RENEWAL_GRACE_MS).toISOString() };
+}
+
+/* ------------------------------------------------------------------ the single application path */
+
+interface Trigger {
+  eventId: string | null;
+  eventType: string | null;
+  chargeIds: string[];
+}
+
+export interface SyncResult {
+  outcome: BillingOutcome;
+  /** Why nothing was applied (mismatch, no verified charge...). */
+  reason: string | null;
+  /** The billing row has a verified paid charge applied (now or before). */
+  paid: boolean;
 }
 
 async function cancelReplaced(organizationId: string, deps: BillingDeps & { culqi: CulqiClient }): Promise<void> {
   for (const replaced of await deps.store.listUnconfirmedCancellations(organizationId)) {
-    // Already gone at Culqi (404) counts as canceled. Any other error is retried with the job.
+    // Already gone at Culqi (404) counts as cancelled. Any other error is retried with the job.
     await deps.culqi.cancelSubscription(replaced.externalSubscriptionId);
     await deps.store.markProviderCanceled(replaced.id);
     deps.logger.info({ event: "billing.culqi.replaced_canceled", organizationId, billingSubscriptionId: replaced.id }, "replaced Culqi subscription canceled");
   }
 }
 
-interface Trigger {
-  eventId: string | null;
-  eventType: string | null;
-  chargeId: string | null;
-}
+export async function syncCulqiSubscription(row: BillingSubscriptionRow, trigger: Trigger, deps: BillingDeps & { culqi: CulqiClient }): Promise<SyncResult> {
+  const log = (event: string, extra: Record<string, unknown>, message: string, level: "info" | "warn" = "info") =>
+    deps.logger[level]({ event, organizationId: row.organizationId, billingSubscriptionId: row.id, ...extra }, message);
+  if (!row.externalSubscriptionId) return { outcome: "ignored", reason: "NO_SUBSCRIPTION_ID", paid: false };
 
-async function applySubscriptionState(
-  row: BillingSubscriptionRow,
-  subscription: CulqiSubscription,
-  trigger: Trigger,
-  deps: BillingDeps & { culqi: CulqiClient }
-): Promise<BillingOutcome> {
-  const requestId = trigger.eventId ?? `reconcile:${row.id}`;
+  const subscription = await deps.culqi.getSubscription(row.externalSubscriptionId);
+  if (!subscription) return { outcome: "rejected", reason: "SUBSCRIPTION_NOT_FOUND_AT_CULQI", paid: false };
+  const plan = await deps.culqi.getPlan(row.externalPlanId);
+  const check = verifyCulqiSubscription(row, subscription, plan, deps.culqi.environment);
+  if (!check.ok) {
+    log("billing.culqi.subscription_rejected", { reason: check.reason }, "Culqi subscription does not match EmailBot: nothing applied", "warn");
+    return { outcome: "rejected", reason: check.reason, paid: false };
+  }
+
   const providerStatus = Number.isInteger(subscription.status) ? subscription.status : null;
-  const base = { billingSubscriptionId: row.id, providerStatus, requestId };
+  const requestId = trigger.eventId ?? `reconcile:${row.id}`;
+  const listed = new Set(collectCulqiIds(subscription).chargeIds);
+  const candidates = [...new Set([...trigger.chargeIds, ...listed])].slice(0, MAX_CHARGES);
 
-  if (trigger.eventId && (trigger.eventType === "subscription.charge.failed" || trigger.eventType === "charge.creation.failed")) {
-    const recorded = await deps.store.recordChargeFailure({
-      ...base,
-      externalEventId: trigger.eventId,
-      eventType: trigger.eventType,
-      externalChargeId: trigger.chargeId,
-      // Culqi does not document the failure fields of the event data: a generic code (no card data).
-      failureCode: "charge_failed",
-      failureMessage: null
+  const charges: Array<{ id: string; charge: CulqiCharge | null }> = [];
+  for (const id of candidates) charges.push({ id, charge: await deps.culqi.getCharge(id) });
+  // Oldest first: a renewal extends the period of the previous charge.
+  charges.sort((a, b) => (culqiTimestamp(a.charge?.creation_date)?.getTime() ?? 0) - (culqiTimestamp(b.charge?.creation_date)?.getTime() ?? 0));
+
+  let applied = false;
+  let paid = row.status === "ACTIVE" || row.status === "PAST_DUE";
+  let duplicates = 0;
+  let declined = 0;
+  let rejectedReason: string | null = null;
+  for (const { id, charge } of charges) {
+    const verdict = verifyCulqiCharge(row, id, charge, listed.has(id));
+    if (verdict.kind === "PAID") {
+      const period = periodForCharge(charge as CulqiCharge, row.billingPeriod, now(deps));
+      if (Date.parse(period.end) <= now(deps)) {
+        duplicates += 1; // a charge whose paid period already ended: nothing to apply
+        continue;
+      }
+      const result = await deps.store.activate({
+        billingSubscriptionId: row.id,
+        activationKey: id,
+        externalChargeId: id,
+        eventType: trigger.eventType ?? "subscription.charge.reconciled",
+        periodStart: period.start,
+        periodEnd: period.end,
+        currentPeriod: typeof subscription.current_period === "number" ? subscription.current_period : null,
+        providerStatus,
+        requestId
+      });
+      log("billing.culqi.charge_applied", { charge: id, outcome: result.outcome }, "verified Culqi charge applied");
+      if (result.outcome === "IGNORED") continue;
+      paid = true;
+      if (result.outcome === "DUPLICATE" || result.outcome === "ALREADY_COVERED") duplicates += 1;
+      else applied = true;
+    } else if (verdict.kind === "DECLINED") {
+      const recorded = await deps.store.recordChargeFailure({
+        billingSubscriptionId: row.id,
+        externalEventId: id,
+        eventType: trigger.eventType === "subscription.charge.failed" || trigger.eventType === "charge.creation.failed" ? trigger.eventType : "subscription.charge.failed",
+        externalChargeId: id,
+        failureCode: verdict.code,
+        failureMessage: null,
+        providerStatus,
+        requestId
+      });
+      if (recorded === "RECORDED") declined += 1;
+      else duplicates += 1;
+    } else {
+      rejectedReason = verdict.reason;
+      log("billing.culqi.charge_rejected", { charge: id, reason: verdict.reason }, "Culqi charge not applied", "warn");
+    }
+  }
+
+  // Provider-side status (never an activation): creation failed, cancelled, expired, retrying.
+  let statusChanged = false;
+  const current = (await deps.store.getBillingSubscription(row.id)) ?? row;
+  const mapped = mapCulqiSubscriptionStatus(subscription.status, current.status);
+  const setStatus = async (status: "FAILED" | "PAST_DUE" | "CANCELED" | "EXPIRED", failureCode: string | null) => {
+    const result = await deps.store.setStatus({
+      billingSubscriptionId: row.id,
+      status,
+      providerStatus,
+      cancelReason: status === "CANCELED" ? (current.cancelReason ?? "PROVIDER") : null,
+      failureCode,
+      failureMessage: null,
+      requestId
     });
-    return recorded === "DUPLICATE" ? "duplicate" : "charge_failed";
+    statusChanged ||= result === "CHANGED";
+  };
+  if (trigger.eventType === "subscription.creation.failed" && !paid) await setStatus("FAILED", "subscription_creation_failed");
+  if (mapped === "CANCELED" || mapped === "EXPIRED") await setStatus(mapped, null);
+  else if (mapped === "PAST_DUE" && !applied) await setStatus("PAST_DUE", "charge_retrying");
+  else if (mapped === null) log("billing.culqi.unknown_status", { providerStatus }, "unknown Culqi subscription status", "warn");
+
+  if (applied) await cancelReplaced(row.organizationId, deps);
+
+  // F4: a first charge was declined: the Culqi subscription is stopped so it cannot charge later unnoticed.
+  if (declined > 0 && !paid && current.status === "FAILED") {
+    await deps.culqi.cancelSubscription(row.externalSubscriptionId);
+    await deps.store.markProviderCanceled(row.id);
+    log("billing.culqi.failed_subscription_canceled", {}, "Culqi subscription of a declined checkout canceled");
   }
 
-  if (trigger.eventType === "subscription.creation.failed") {
-    await deps.store.setStatus({ ...base, status: "FAILED", cancelReason: null, failureCode: "subscription_creation_failed", failureMessage: null });
-    return "status_changed";
-  }
-
-  const mapped = mapCulqiSubscriptionStatus(subscription.status, row.status);
-  const verifiedCharge = trigger.eventType === "subscription.charge.succeeded" && mapped !== "CANCELED" && mapped !== "EXPIRED";
-
-  if (mapped === "ACTIVE" || verifiedCharge) {
-    const at = now(deps);
-    const period = confirmedPeriod(subscription, row.billingPeriod, at);
-    const result = await deps.store.activate({
-      ...base,
-      activationKey: activationKey(subscription),
-      eventType: trigger.eventType ?? "subscription.charge.reconciled",
-      periodStart: period.start,
-      periodEnd: period.end,
-      currentPeriod: typeof subscription.current_period === "number" ? subscription.current_period : null,
-      externalChargeId: trigger.chargeId
-    });
-    deps.logger.info(
-      { event: "billing.culqi.activation", outcome: result.outcome, organizationId: row.organizationId, billingSubscriptionId: row.id },
-      "Culqi payment applied"
-    );
-    await cancelReplaced(row.organizationId, deps);
-    if (result.outcome === "DUPLICATE") return "duplicate";
-    if (result.outcome === "ALREADY_COVERED") return "already_covered";
-    if (result.outcome === "IGNORED") return "ignored";
-    return "activated";
-  }
-
-  if (mapped === "PAST_DUE" || mapped === "CANCELED" || mapped === "EXPIRED") {
-    const changed = await deps.store.setStatus({
-      ...base,
-      status: mapped,
-      cancelReason: mapped === "CANCELED" ? (row.cancelReason ?? "PROVIDER") : null,
-      failureCode: mapped === "PAST_DUE" ? "charge_retrying" : null,
-      failureMessage: null
-    });
-    return changed === "CHANGED" ? "status_changed" : "ignored";
-  }
-
-  if (mapped === null) {
-    deps.logger.warn({ event: "billing.culqi.unknown_status", billingSubscriptionId: row.id, providerStatus }, "unknown Culqi subscription status");
-    return "ignored";
-  }
-  return "pending";
+  if (applied) return { outcome: "activated", reason: null, paid: true };
+  if (declined > 0) return { outcome: "charge_failed", reason: null, paid };
+  if (statusChanged) return { outcome: "status_changed", reason: null, paid };
+  if (duplicates > 0) return { outcome: "duplicate", reason: null, paid };
+  if (rejectedReason) return { outcome: "rejected", reason: rejectedReason, paid };
+  return { outcome: "pending", reason: paid ? null : "NO_VERIFIED_CHARGE", paid };
 }
 
-/** CULQI_EVENT: the webhook event, re-read from Culqi and applied once. */
+/* ------------------------------------------------------------------ CULQI_EVENT */
+
+/** The webhook event, re-read from Culqi and applied through syncCulqiSubscription. */
 export async function handleCulqiEvent(eventId: string, deps: BillingDeps): Promise<BillingOutcome> {
   const stored = await deps.store.getWebhookEvent(eventId);
   if (!stored || stored.status === "PROCESSED" || stored.status === "IGNORED") return "duplicate";
@@ -199,21 +315,21 @@ export async function handleCulqiEvent(eventId: string, deps: BillingDeps): Prom
     if (!eventType || !isHandledCulqiEvent(eventType)) return await ignore("UNHANDLED_EVENT_TYPE", { eventType });
 
     const ids = collectCulqiIds(event.data);
-    const subscriptionId = ids.subscriptionIds[0] ?? null;
+    let subscriptionId = ids.subscriptionIds[0] ?? null;
     const chargeId = ids.chargeIds[0] ?? null;
+    // A charge event may not name its subscription: the charge itself is read back to find it.
+    if (!subscriptionId && chargeId) subscriptionId = collectCulqiIds(await deps.culqi.getCharge(chargeId)).subscriptionIds[0] ?? null;
     await deps.store.updateWebhookEvent(eventId, { eventType, externalSubscriptionId: subscriptionId, externalChargeId: chargeId });
     if (!subscriptionId) return await ignore("NO_SUBSCRIPTION");
 
     const row = await deps.store.findBillingSubscriptionByExternalId(subscriptionId);
     if (!row) return await ignore("UNKNOWN_SUBSCRIPTION");
 
-    const subscription = await deps.culqi.getSubscription(subscriptionId);
-    if (!subscription) return await ignore("SUBSCRIPTION_NOT_FOUND_AT_CULQI");
-
-    const outcome = await applySubscriptionState(row, subscription, { eventId, eventType, chargeId }, culqiDeps);
-    await deps.store.updateWebhookEvent(eventId, { status: "PROCESSED", lastError: null, processed: true });
-    deps.logger.info({ event: "billing.culqi.event_processed", eventId, eventType, outcome, billingSubscriptionId: row.id }, "Culqi event processed");
-    return outcome;
+    const result = await syncCulqiSubscription(row, { eventId, eventType, chargeIds: ids.chargeIds }, culqiDeps);
+    if (result.outcome === "rejected") return await ignore(`REJECTED:${result.reason ?? "UNKNOWN"}`, { eventType });
+    await deps.store.updateWebhookEvent(eventId, { status: "PROCESSED", lastError: result.reason, processed: true });
+    deps.logger.info({ event: "billing.culqi.event_processed", eventId, eventType, outcome: result.outcome, billingSubscriptionId: row.id }, "Culqi event processed");
+    return result.outcome;
   } catch (error) {
     await deps.store.updateWebhookEvent(eventId, { status: "FAILED", lastError: errorText(error) }).catch(() => undefined);
     deps.logger.warn({ event: "billing.culqi.event_failed", eventId, err: serializeError(error) }, "Culqi event processing failed; retried");
@@ -221,27 +337,90 @@ export async function handleCulqiEvent(eventId: string, deps: BillingDeps): Prom
   }
 }
 
+/* ------------------------------------------------------------------ CULQI_RECONCILE (after a checkout) */
+
 /**
- * CULQI_RECONCILE: re-reads one Culqi subscription after a checkout (works
- * without webhooks). Throws CulqiStillPendingError while Culqi has not charged
- * it, so BullMQ retries with backoff.
+ * Re-reads one Culqi subscription after a checkout (works without webhooks).
+ * Throws CulqiStillPendingError while there is no verified paid charge, so
+ * BullMQ retries with backoff (the periodic job closes it after the timeout).
  */
 export async function reconcileCulqiSubscription(billingSubscriptionId: string, deps: BillingDeps): Promise<BillingOutcome> {
   if (!deps.culqi) {
     deps.logger.error({ event: "billing.culqi.not_configured", billingSubscriptionId }, "Culqi reconciliation skipped: CULQI_SECRET_KEY is not configured on the worker");
     return "not_configured";
   }
-  const culqiDeps = { ...deps, culqi: deps.culqi };
   const row = await deps.store.getBillingSubscription(billingSubscriptionId);
   if (!row?.externalSubscriptionId || row.status === "CANCELED" || row.status === "EXPIRED") return "ignored";
-  if (row.status === "ACTIVE") {
-    await cancelReplaced(row.organizationId, culqiDeps);
-    return "duplicate";
+  const result = await syncCulqiSubscription(row, { eventId: null, eventType: null, chargeIds: [] }, { ...deps, culqi: deps.culqi });
+  if (row.status === "PENDING" && result.outcome === "pending") throw new CulqiStillPendingError(row.id);
+  return result.outcome;
+}
+
+/* ------------------------------------------------------------------ CULQI_RECONCILE_DUE (periodic: F3 + F4) */
+
+/** F4: closes a stale checkout. Never cancels a Culqi subscription that has a verified paid charge. */
+export async function expireStalePending(row: BillingSubscriptionRow, deps: BillingDeps & { culqi: CulqiClient }): Promise<BillingOutcome> {
+  const requestId = `expire:${row.id}`;
+  const fail = (failureCode: string) =>
+    deps.store.setStatus({ billingSubscriptionId: row.id, status: "FAILED", providerStatus: null, cancelReason: null, failureCode, failureMessage: null, requestId });
+
+  if (!row.externalSubscriptionId) {
+    await fail("checkout_incomplete");
+    // The Culqi subscription may exist without its id stored (interrupted checkout): its metadata names this row.
+    deps.logger.warn({ event: "billing.culqi.checkout_incomplete", organizationId: row.organizationId, billingSubscriptionId: row.id }, "checkout without Culqi subscription id closed; check Culqi for an orphan subscription with this billing_subscription_id");
+    return "expired_pending";
   }
 
-  const subscription = await deps.culqi.getSubscription(row.externalSubscriptionId);
-  if (!subscription) return "ignored";
-  const outcome = await applySubscriptionState(row, subscription, { eventId: null, eventType: null, chargeId: null }, culqiDeps);
-  if (outcome === "pending") throw new CulqiStillPendingError(row.id);
-  return outcome;
+  const first = await syncCulqiSubscription(row, { eventId: null, eventType: null, chargeIds: [] }, deps);
+  if (first.paid) return first.outcome;
+  if ((await deps.store.getBillingSubscription(row.id))?.status !== "PENDING") return first.outcome;
+
+  await deps.culqi.cancelSubscription(row.externalSubscriptionId);
+  // A charge made just before the cancellation still counts.
+  const second = await syncCulqiSubscription(row, { eventId: null, eventType: null, chargeIds: [] }, deps);
+  if (second.paid) return second.outcome;
+  await fail("confirmation_timeout");
+  await deps.store.markProviderCanceled(row.id);
+  deps.logger.info({ event: "billing.culqi.pending_expired", organizationId: row.organizationId, billingSubscriptionId: row.id, reason: first.reason }, "unconfirmed checkout cancelled at Culqi (confirmation_timeout)");
+  return "expired_pending";
+}
+
+export async function reconcileDueCulqiSubscriptions(deps: BillingDeps): Promise<{ reconciled: number; expired: number; failed: number }> {
+  if (!deps.culqi) return { reconciled: 0, expired: 0, failed: 0 };
+  const culqiDeps = { ...deps, culqi: deps.culqi };
+  const at = now(deps);
+  let reconciled = 0;
+  let expired = 0;
+  let failed = 0;
+
+  const due = await deps.store.listDueForReconciliation({
+    endBefore: new Date(at + CULQI_RECONCILE_WINDOW_MS).toISOString(),
+    endAfter: new Date(at - CULQI_RECONCILE_LOOKBACK_MS).toISOString(),
+    limit: BATCH
+  });
+  for (const row of due) {
+    try {
+      await syncCulqiSubscription(row, { eventId: null, eventType: null, chargeIds: [] }, culqiDeps);
+      reconciled += 1;
+    } catch (error) {
+      failed += 1;
+      deps.logger.warn({ event: "billing.culqi.reconcile_failed", billingSubscriptionId: row.id, err: serializeError(error) }, "periodic Culqi reconciliation failed; retried next run");
+    }
+  }
+
+  const stale = await deps.store.listStalePending({
+    withSubscriptionCreatedBefore: new Date(at - CULQI_PENDING_CONFIRMATION_TIMEOUT_MS).toISOString(),
+    withoutSubscriptionCreatedBefore: new Date(at - CULQI_PENDING_INCOMPLETE_TIMEOUT_MS).toISOString(),
+    limit: BATCH
+  });
+  for (const row of stale) {
+    try {
+      if ((await expireStalePending(row, culqiDeps)) === "expired_pending") expired += 1;
+    } catch (error) {
+      failed += 1;
+      deps.logger.warn({ event: "billing.culqi.expire_failed", billingSubscriptionId: row.id, err: serializeError(error) }, "stale checkout not closed; retried next run");
+    }
+  }
+  if (reconciled + expired + failed > 0) deps.logger.info({ event: "billing.culqi.reconcile_due", reconciled, expired, failed }, "periodic Culqi reconciliation");
+  return { reconciled, expired, failed };
 }

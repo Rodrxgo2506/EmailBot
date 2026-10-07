@@ -2,6 +2,8 @@ import { resolve } from "node:path";
 import { config as loadDotenv } from "dotenv";
 import {
   createCulqiClient,
+  CULQI_RECONCILE_DUE_INTERVAL_MS,
+  CULQI_RECONCILE_DUE_SCHEDULER_ID,
   encryptionKeyFingerprint,
   EXPIRE_SUBSCRIPTIONS_INTERVAL_MS,
   EXPIRE_SUBSCRIPTIONS_SCHEDULER_ID,
@@ -277,6 +279,17 @@ try {
     { every: EXPIRE_SUBSCRIPTIONS_INTERVAL_MS },
     { name: "EXPIRE_SUBSCRIPTIONS", data: { type: "EXPIRE_SUBSCRIPTIONS" }, opts: { removeOnComplete: true, removeOnFail: 100 } }
   );
+
+  // Commercial V1 phase 2 (Culqi sandbox): renewals and stale checkouts are reconciled with Culqi every hour.
+  if (config.culqi) {
+    await queues.emailEvents.upsertJobScheduler(
+      CULQI_RECONCILE_DUE_SCHEDULER_ID,
+      { every: CULQI_RECONCILE_DUE_INTERVAL_MS },
+      { name: "CULQI_RECONCILE_DUE", data: { type: "CULQI_RECONCILE_DUE" }, opts: { removeOnComplete: true, removeOnFail: 100 } }
+    );
+  } else {
+    await queues.emailEvents.removeJobScheduler(CULQI_RECONCILE_DUE_SCHEDULER_ID);
+  }
 
   // Resumes emails left RECEIVED / PROCESSING by jobs that exhausted their retries (migration 9).
   await queues.emailEvents.upsertJobScheduler(

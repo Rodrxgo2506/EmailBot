@@ -17,7 +17,7 @@ import { ProviderHttpError } from "../providers/http.js";
 import type { MicrosoftSubscriptionClient } from "../providers/microsoft/subscriptions.js";
 import type { ProviderRegistry } from "../providers/registry.js";
 import { ProviderAuthError, ProviderTransientError, type ProviderContext, type WorkerAccount } from "../providers/types.js";
-import { handleCulqiEvent, reconcileCulqiSubscription, type BillingDeps, type BillingOutcome } from "./billing.js";
+import { handleCulqiEvent, reconcileCulqiSubscription, reconcileDueCulqiSubscriptions, type BillingDeps, type BillingOutcome } from "./billing.js";
 import { hasCommercialAccess, withCommercialAccess } from "./commercial-access.js";
 import type { AccountStore, AuditRecorder, EmailStore, JobProducer, Logger, SubscriptionMaintenance, SyncLock } from "./ports.js";
 import { AttachmentsPendingError, type ProcessEmailOutcome } from "./process-email.js";
@@ -83,6 +83,8 @@ export interface HandleEventOutcome {
   expired?: number;
   /** CULQI_EVENT / CULQI_RECONCILE result. */
   billing?: BillingOutcome;
+  /** CULQI_RECONCILE_DUE: subscriptions re-read, stale checkouts closed, failures (retried next run). */
+  billingReconcile?: { reconciled: number; expired: number; failed: number };
 }
 
 const POLL_BATCH = 500;
@@ -577,6 +579,12 @@ export async function handleEmailEvent(job: EmailEventJob, deps: HandleEventDeps
       const accounts = await withCommercialAccess(active, deps.accounts, deps.logger, "poll", job.type);
       for (const account of accounts) await deps.enqueueSync(account, "POLL");
       return { accounts: accounts.length, enqueued: accounts.length };
+    }
+
+    case "CULQI_RECONCILE_DUE": {
+      if (!deps.billing) return { accounts: 0, enqueued: 0, billingReconcile: { reconciled: 0, expired: 0, failed: 0 } };
+      const billingReconcile = await reconcileDueCulqiSubscriptions({ ...deps.billing, logger: deps.logger, ...(deps.now ? { now: deps.now } : {}) });
+      return { accounts: 0, enqueued: 0, billingReconcile };
     }
 
     case "CULQI_EVENT":
