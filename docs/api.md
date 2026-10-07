@@ -56,6 +56,11 @@ rate limiting. No usarlo como health check de Render (igual que `/health/ready`)
 | PATCH / DELETE | `/api/organizations/current/members/:id` | `members:manage` |
 | GET | `/api/organizations/current/plan` | miembro — entitlements (`access`: `SUBSCRIPTION` / `LEGACY` / `NONE`), uso y suscripción actual (también con la organización suspendida o sin suscripción) |
 | GET | `/api/plans` | **público** (sin sesión) — catálogo activo `{ items: PlanCatalogEntry[] }`: planes, precios (`amount` decimal en texto + `amountCents`) y entitlements; cacheable 5 min, 60 req/min por IP |
+| GET | `/api/billing/config` | miembro — `{ enabled, environment }`: pago con tarjeta (Culqi, **solo sandbox**) disponible |
+| GET | `/api/billing/checkout?plan&billingPeriod` | `organization:update` — precio del catálogo + llave **pública** de Culqi; valida upgrade, mapeo y checkout pendiente ([detalle](billing-culqi.md)) |
+| POST | `/api/billing/subscriptions` | `organization:update` — `{ plan, billingPeriod, tokenId, acceptTerms: true, customer }` (estricto: nunca importe, moneda ni datos de tarjeta) → `202` `PENDING`; el plan se activa al confirmarse el pago; 10 req / 10 min por IP |
+| GET | `/api/billing/subscriptions/current` | miembro — última suscripción de Culqi de la organización (estado) |
+| POST | `/webhooks/culqi` | Culqi — solo el `id` del evento (se relee desde Culqi); `?token=` si `CULQI_WEBHOOK_TOKEN`; `404` sin Culqi configurado |
 
 **Planes y suscripción (Comercial V1 / V1.1, [detalle](commercial-plans.md))**: EmailBot es de pago. Sin una suscripción
 activa (ni acceso de legado) toda acción comercial responde `403 SUBSCRIPTION_REQUIRED` (`details: { subscriptionStatus }`).

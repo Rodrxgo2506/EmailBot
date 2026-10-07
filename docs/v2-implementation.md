@@ -23,7 +23,7 @@ explícita por fase.
 | C1.1 | Comercial V1, fase 1.1: suscripción obligatoria (sin plan gratuito), `subscriptions` + `payment_events`, núcleo único de activación, pagos manuales del Super Admin | completada; en `main` (PR #5), migraciones aplicadas en producción |
 | C1.2 | Comercial V1, fase 1.2: worker y portal bloqueados sin suscripción activa, expiración programada cada 5 minutos | completada; en `main` (PR #5), migraciones aplicadas en producción |
 | C1.3 | Comercial V1: página pública `/planes`, `GET /api/plans` (catálogo de la base) y «Mi plan» con «Mejorar plan» (aviso «Próximamente», sin cobro) | completada en la rama `feat/plans-page` (sin desplegar) |
-| C2 | Comercial V1, fase 2: pagos con Culqi (checkout, suscripciones, webhooks) | pendiente |
+| C2 | Comercial V1, fase 2: pagos con Culqi (checkout, suscripciones, webhooks) ([detalle](billing-culqi.md)) | implementada **solo en sandbox** en la rama `feat/culqi-subscriptions-sandbox` (sin desplegar; cobros reales pendientes) |
 
 ## Estado en producción
 
