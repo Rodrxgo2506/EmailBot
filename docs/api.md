@@ -54,6 +54,15 @@ rate limiting. No usarlo como health check de Render (igual que `/health/ready`)
 | GET | `/api/organizations/current/members` | `members:read` |
 | POST | `/api/organizations/current/members` | `members:manage` (`{ email, role }`) |
 | PATCH / DELETE | `/api/organizations/current/members/:id` | `members:manage` |
+| GET | `/api/organizations/current/plan` | miembro — entitlements (`access`: `SUBSCRIPTION` / `LEGACY` / `NONE`), uso y suscripción actual (también con la organización suspendida o sin suscripción) |
+
+**Planes y suscripción (Comercial V1 / V1.1, [detalle](commercial-plans.md))**: EmailBot es de pago. Sin una suscripción
+activa (ni acceso de legado) toda acción comercial responde `403 SUBSCRIPTION_REQUIRED` (`details: { subscriptionStatus }`).
+Con suscripción, crear lo que superaría un límite del plan responde
+`403 PLAN_LIMIT_REACHED` con `details: { limit, max, used, plan }`; usar una funcionalidad fuera del plan (Microsoft,
+Access ID del portal), `403 PLAN_FEATURE_UNAVAILABLE` con `details: { feature, plan }`. Afecta a la conexión de
+cuentas, reglas, bots activos, clientes activos, miembros y emisión de Access IDs. Lo existente nunca se borra ni se
+bloquea por el plan.
 
 ## Cuentas de correo
 
@@ -136,9 +145,13 @@ ni sesiones.
 |---|---|---|
 | GET | `/api/admin/stats` | Totales de la plataforma (organizaciones por estado, miembros, bots, clientes, cuentas, correos, entregas) |
 | GET | `/api/admin/organizations` | `search`, `status`, `plan`, `sort` (`created_desc`, `created_asc`, `name_asc`, `name_desc`), `page`, `pageSize` (≤ 100) |
-| POST | `/api/admin/organizations` | `{ name, ownerEmail, plan?, slug? }`: el OWNER debe ser un usuario existente con correo confirmado (`422 OWNER_NOT_FOUND`) |
+| POST | `/api/admin/organizations` | `{ name, ownerEmail, slug? }`: el OWNER debe ser un usuario existente con correo confirmado (`422 OWNER_NOT_FOUND`); nace sin plan |
 | GET | `/api/admin/organizations/:id` | Resumen, owner y contadores |
-| PATCH | `/api/admin/organizations/:id` | `{ plan?, status? }` (suspender / reactivar / cancelar) |
+| PATCH | `/api/admin/organizations/:id` | `{ status }` (suspender / reactivar / cancelar la organización; el plan solo cambia por la suscripción) |
+| GET | `/api/admin/plan-prices` | Precios activos del catálogo (PEN, IGV incluido) |
+| GET | `/api/admin/organizations/:id/subscription` | Suscripciones (abierta + historial) y últimos pagos |
+| POST | `/api/admin/organizations/:id/subscription/activate` | Pago manual `{ plan, billingPeriod, paymentMethod, amount: "39.90", periodStart, periodEnd, reference?, note? }` (método YAPE / CASH / TRANSFER / MANUAL): activa, renueva o cambia el plan (`outcome`); referencia repetida → `409 PAYMENT_ALREADY_RECORDED` |
+| POST | `/api/admin/subscriptions/:id/:action` | `action` = `suspend`, `reactivate`, `cancel` o `expire`; `{ reason? }` (máquina de estados en la base de datos) |
 | GET | `/api/admin/organizations/:id/members` | Nombre, correo, rol, fecha de alta |
 | GET | `/api/admin/organizations/:id/bots` | Estado, reglas, clientes asignados, entregas |
 | GET | `/api/admin/organizations/:id/customers` | Nombre, estado, bots, entregas (paginado) |
@@ -151,16 +164,20 @@ ni sesiones.
   no dan acceso a estas rutas, y ser administrador de plataforma no da acceso a los endpoints de una organización.
 - Cada ruta llama a una función `admin.*` con el usuario del JWT como actor, y la función lo vuelve a comprobar
   (`platform_stats`, `list_organizations`, `get_organization`, `create_organization`, `update_organization`,
-  `list_members`, `list_bots`, `list_customers`, `list_email_accounts`, `list_activity`, `list_audit`).
+  `list_members`, `list_bots`, `list_customers`, `list_email_accounts`, `list_activity`, `list_audit`,
+  `list_plan_prices`, `list_subscriptions`, `list_payment_events`, `activate_subscription`,
+  `update_subscription_status`).
 - Paginado de `organizations` y `customers`: `{ items, page, pageSize, total }`; `total` es el total real del
   filtro también en una página fuera de rango. `activity` y `audit`: `{ items, page, pageSize, hasMore }`.
 - `PATCH` con `status`: `ACTIVE`, `SUSPENDED` o `CANCELLED`. CANCELLED hoy tiene los mismos efectos que SUSPENDED
   y es reversible; nada se borra.
 - Errores: `400 VALIDATION_ERROR` / `INVALID_SLUG`, `403 PLATFORM_ADMIN_REQUIRED`, `404 NOT_FOUND`,
   `409 ALREADY_EXISTS` (slug duplicado), `422 OWNER_NOT_FOUND`, `429` (escrituras: 60/min).
-- Auditoría: cada creación y cada cambio de plan o estado escribe en `platform_audit_logs` en la misma transacción
-  (`organization.created`, `organization.plan_changed`, `organization.suspended`, `organization.reactivated`,
-  `organization.cancelled`), con el request id. Los registros son inmutables.
+- Auditoría: cada creación, cambio de estado y operación de suscripción escribe en `platform_audit_logs` en la misma
+  transacción (`organization.created`, `organization.suspended`, `organization.reactivated`, `organization.cancelled`,
+  `subscription.activated`, `subscription.renewed`, `subscription.plan_changed`, `subscription.suspended`,
+  `subscription.reactivated`, `subscription.canceled`, `subscription.expired`, `payment.recorded`;
+  `organization.plan_changed` solo en registros anteriores), con el request id. Los registros son inmutables.
 - `GET /api/me` incluye `isPlatformAdmin` (solo para mostrar la consola; la protección es la API).
 
 ## Webhooks

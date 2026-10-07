@@ -24,6 +24,7 @@ import { parseWith } from "../../lib/validation.js";
 import { getAuth } from "../../plugins/auth.js";
 import { getOrganization, requirePermission } from "../../plugins/organization.js";
 import { removeStoredObjects } from "../emails/routes.js";
+import { assertWithinLimit, canUseFeature, hasCommercialAccess, isWithinLimit, requestEntitlements } from "../plans/entitlements.js";
 import { fetchMailboxIdentity } from "./mailbox-identity.js";
 import { removeMicrosoftSubscription } from "./microsoft-subscription.js";
 
@@ -92,6 +93,19 @@ export function emailAccountRoutes(deps: AppDeps) {
       const config = providerConfig(deps.config, provider);
       if (!config) throw serviceUnavailable(`${slug} integration is not configured`, "PROVIDER_NOT_CONFIGURED");
 
+      // Commercial V1: the provider must be in the plan (Microsoft: PRO and BUSINESS).
+      const plans = requestEntitlements(request);
+      const entitlements = await plans.assertFeatureEnabled(provider);
+      // Early refusal at the account limit, unless this can be the re-authorization of a mailbox
+      // that already counts (same provider); the callback decides with the real mailbox address.
+      const used = (await plans.usage(["EMAIL_ACCOUNTS"])).EMAIL_ACCOUNTS ?? 0;
+      if (!isWithinLimit(entitlements, "EMAIL_ACCOUNTS", used)) {
+        const accounts = await getAuth(request).repos.emailAccounts.list(getOrganization(request).id);
+        if (!accounts.some((account) => account.provider === provider && account.status !== "DISCONNECTED")) {
+          assertWithinLimit(entitlements, "EMAIL_ACCOUNTS", used);
+        }
+      }
+
       const state = createOAuthState(
         { userId: getAuth(request).user.id, organizationId: getOrganization(request).id, provider },
         deps.config.oauthStateSecret
@@ -134,8 +148,40 @@ export function emailAccountRoutes(deps: AppDeps) {
         const role = await deps.privileged.getMemberRole(organizationId, userId);
         if (role !== "OWNER" && role !== "ADMIN") return fail("forbidden");
 
+        // Commercial V1, re-checked here: the plan may have changed since the start.
+        const entitlements = await deps.privileged.getOrganizationEntitlements(organizationId);
+        if (!entitlements || !hasCommercialAccess(entitlements)) {
+          request.log.info(
+            {
+              event: "subscription.access_denied",
+              organizationId,
+              subscriptionStatus: entitlements?.subscriptionStatus ?? null,
+              operation: "oauth_callback",
+              provider,
+              reason: "no_active_subscription"
+            },
+            "oauth connection refused: no active subscription"
+          );
+          return fail("subscription_required");
+        }
+        if (!canUseFeature(entitlements, provider)) {
+          request.log.info({ organizationId, provider, code: "PLAN_FEATURE_UNAVAILABLE" }, "oauth connection refused by the plan");
+          return fail("plan_feature");
+        }
+
         const tokens = await exchangeAuthorizationCode(provider, config, query.data.code, deps.fetch);
         const identity = await fetchMailboxIdentity(provider, tokens.accessToken, deps.fetch);
+
+        // Re-authorizing a mailbox that already counts is always allowed; a new (or
+        // disconnected) one needs room in the plan. The tokens just obtained are discarded.
+        const existing = await deps.privileged.findOAuthEmailAccountStatus(organizationId, provider, identity.emailAddress);
+        if (existing === null || existing === "DISCONNECTED") {
+          const used = (await deps.privileged.getOrganizationUsage(organizationId, ["EMAIL_ACCOUNTS"])).EMAIL_ACCOUNTS ?? 0;
+          if (!isWithinLimit(entitlements, "EMAIL_ACCOUNTS", used)) {
+            request.log.info({ organizationId, provider, code: "PLAN_LIMIT_REACHED", used }, "oauth connection refused by the plan");
+            return fail("plan_limit");
+          }
+        }
 
         const { account, created } = await deps.privileged.upsertOAuthEmailAccount({
           organizationId,
@@ -194,6 +240,7 @@ export function emailAccountRoutes(deps: AppDeps) {
         throw serviceUnavailable("IMAP accounts are not available yet", "IMAP_NOT_AVAILABLE");
       }
       const input = parseWith(imapAccountCreateSchema, request.body);
+      await requestEntitlements(request).assertWithinLimit("EMAIL_ACCOUNTS");
       const account = await deps.privileged.createImapEmailAccount({
         organizationId: getOrganization(request).id,
         emailAddress: input.emailAddress,
@@ -286,6 +333,8 @@ export function emailAccountRoutes(deps: AppDeps) {
         const account = await getAuth(request).repos.emailAccounts.get(organizationId, id);
         if (!account) throw notFound("Email account");
         if (account.status !== "ACTIVE") throw conflict("Only active accounts can be synchronized", "ACCOUNT_NOT_ACTIVE");
+        // Commercial V1.2: the worker would skip it anyway; say why instead of queuing a no-op.
+        await requestEntitlements(request).get();
 
         await deps.queue.enqueueEmailEvent(
           { type: "SYNC_ACCOUNT", emailAccountId: id, organizationId, requestedBy: getAuth(request).user.id },

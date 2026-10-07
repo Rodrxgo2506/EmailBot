@@ -194,14 +194,13 @@ describe("stats and organizations", () => {
 });
 
 describe("POST /api/admin/organizations", () => {
-  it("resolves the owner by confirmed e-mail, derives the slug and returns 201 with the new organization", async () => {
+  it("resolves the owner by confirmed e-mail, derives the slug and returns 201 with the new organization (without a plan)", async () => {
     const { app, admin, privileged } = await setup();
     privileged.findProfileIdByEmail.mockResolvedValue("55555555-5555-4555-8555-555555555555");
     admin.createOrganization.mockResolvedValue(ORG_NEW);
-    admin.getOrganization.mockResolvedValue(detail({ id: ORG_NEW, name: "Clínica Señal", slug: "clinica-senal", plan: "PRO" }));
+    admin.getOrganization.mockResolvedValue(detail({ id: ORG_NEW, name: "Clínica Señal", slug: "clinica-senal", plan: null }));
     const response = await inject(app, "POST", "/api/admin/organizations", platformAdmin, {
       name: "  Clínica Señal ",
-      plan: "PRO",
       ownerEmail: "Owner@Example.com"
     });
     expect(response.statusCode).toBe(201);
@@ -210,7 +209,6 @@ describe("POST /api/admin/organizations", () => {
     expect(admin.createOrganization).toHaveBeenCalledWith(platformAdmin.id, {
       name: "Clínica Señal",
       slug: "clinica-senal",
-      plan: "PRO",
       ownerUserId: "55555555-5555-4555-8555-555555555555",
       requestId: expect.any(String)
     });
@@ -238,6 +236,8 @@ describe("POST /api/admin/organizations", () => {
     [{ name: "Acme", ownerEmail: "o@example.com", status: "ACTIVE" }],
     [{ name: "Acme", ownerEmail: "o@example.com", ownerUserId: ORG_NEW }],
     [{ name: "Acme", ownerEmail: "o@example.com", plan: "ENTERPRISE" }],
+    // Commercial V1.1: the plan comes from a subscription, never from the organization.
+    [{ name: "Acme", ownerEmail: "o@example.com", plan: "PRO" }],
     [{ name: "!!", ownerEmail: "o@example.com" }]
   ])("rejects %j without creating anything", async (body) => {
     const { app, admin } = await setup();
@@ -249,10 +249,9 @@ describe("POST /api/admin/organizations", () => {
 
 describe("PATCH /api/admin/organizations/:id", () => {
   it.each([
-    [{ status: "SUSPENDED" }, { plan: undefined, status: "SUSPENDED" }],
-    [{ status: "ACTIVE" }, { plan: undefined, status: "ACTIVE" }],
-    [{ status: "CANCELLED" }, { plan: undefined, status: "CANCELLED" }],
-    [{ plan: "BUSINESS" }, { plan: "BUSINESS", status: undefined }]
+    [{ status: "SUSPENDED" }, { status: "SUSPENDED" }],
+    [{ status: "ACTIVE" }, { status: "ACTIVE" }],
+    [{ status: "CANCELLED" }, { status: "CANCELLED" }]
   ])("%j updates through the audited function and returns the fresh detail", async (body, patch) => {
     const { app, admin } = await setup();
     admin.updateOrganization.mockResolvedValue(true);
@@ -269,7 +268,7 @@ describe("PATCH /api/admin/organizations/:id", () => {
     expect((await inject(app, "PATCH", `/api/admin/organizations/${ORG_NEW}`, platformAdmin, { status: "SUSPENDED" })).statusCode).toBe(404);
   });
 
-  it.each([[{}], [{ name: "Otro" }], [{ status: "SUSPENDED", slug: "x" }], [{ status: "PAUSED" }]])("rejects %j (no mass assignment)", async (body) => {
+  it.each([[{}], [{ name: "Otro" }], [{ status: "SUSPENDED", slug: "x" }], [{ status: "PAUSED" }], [{ plan: "BUSINESS" }], [{ plan: "PRO", status: "ACTIVE" }]])("rejects %j (no mass assignment; the plan only changes through a subscription)", async (body) => {
     const { app, admin } = await setup();
     expect((await inject(app, "PATCH", `/api/admin/organizations/${ORG_A}`, platformAdmin, body)).statusCode).toBe(400);
     expect(admin.updateOrganization).not.toHaveBeenCalled();

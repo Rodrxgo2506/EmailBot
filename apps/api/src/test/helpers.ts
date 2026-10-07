@@ -8,6 +8,7 @@ import { createMemoryNonceStore } from "../infrastructure/nonces.js";
 import type { RateLimitRedis } from "../infrastructure/rate-limit-store.js";
 import type { AppDeps, AuthenticatedUser } from "../deps.js";
 import type { AdminOperations, PrivilegedOperations, Repositories } from "../repositories/types.js";
+import { entitlementsFor } from "./plan-fixtures.js";
 
 export const ORG_A = "11111111-1111-4111-8111-111111111111";
 export const ORG_B = "22222222-2222-4222-8222-222222222222";
@@ -78,12 +79,19 @@ export function createFakeRepositories(): DeepMock<Repositories> {
     audit: ["list"]
   };
 
-  return Object.fromEntries(
+  const repos = Object.fromEntries(
     Object.entries(groups).map(([group, methods]) => [
       group,
       Object.fromEntries(methods.map((method) => [method, unexpected(`${group}.${method}`)]))
     ])
   ) as unknown as DeepMock<Repositories>;
+  // Commercial V1: plan checks pass unless a test says otherwise (active BUSINESS subscription, nothing used yet).
+  repos.plans = {
+    entitlements: vi.fn(async () => entitlementsFor("BUSINESS")),
+    subscription: vi.fn(async () => null),
+    usage: vi.fn(async (_organizationId: string, keys: readonly string[] = []) => Object.fromEntries(keys.map((key) => [key, 0])))
+  };
+  return repos;
 }
 
 export function createFakePrivileged(): { [K in keyof PrivilegedOperations]: ReturnType<typeof vi.fn> } {
@@ -113,7 +121,11 @@ export function createFakePrivileged(): { [K in keyof PrivilegedOperations]: Ret
     syncHealthCounts: unexpected("privileged.syncHealthCounts"),
     findMicrosoftSubscription: unexpected("privileged.findMicrosoftSubscription"),
     getMicrosoftSubscriptionCredentials: unexpected("privileged.getMicrosoftSubscriptionCredentials"),
-    clearMicrosoftSubscription: unexpected("privileged.clearMicrosoftSubscription")
+    clearMicrosoftSubscription: unexpected("privileged.clearMicrosoftSubscription"),
+    // Commercial V1 (OAuth callback): BUSINESS, nothing used, the mailbox is new.
+    getOrganizationEntitlements: vi.fn(async () => entitlementsFor("BUSINESS")),
+    getOrganizationUsage: vi.fn(async (_organizationId: string, keys: readonly string[]) => Object.fromEntries(keys.map((key) => [key, 0]))),
+    findOAuthEmailAccountStatus: vi.fn(async () => null)
   };
 }
 
@@ -131,7 +143,12 @@ export function createFakeAdmin(platformAdmins: string[] = []): { [K in keyof Ad
     listCustomers: unexpected("admin.listCustomers"),
     listEmailAccounts: unexpected("admin.listEmailAccounts"),
     listActivity: unexpected("admin.listActivity"),
-    listAudit: unexpected("admin.listAudit")
+    listAudit: unexpected("admin.listAudit"),
+    listPlanPrices: unexpected("admin.listPlanPrices"),
+    listSubscriptions: unexpected("admin.listSubscriptions"),
+    listPaymentEvents: unexpected("admin.listPaymentEvents"),
+    activateSubscription: unexpected("admin.activateSubscription"),
+    updateSubscriptionStatus: unexpected("admin.updateSubscriptionStatus")
   };
 }
 
@@ -193,7 +210,7 @@ export async function createTestApp(
         id: organizationId,
         name: `Org ${organizationId.slice(0, 4)}`,
         slug: `org-${organizationId.slice(0, 4)}`,
-        plan: "FREE",
+        plan: "BASIC",
         status: statusOf(organizationId),
         createdAt: "2026-10-01T00:00:00.000Z",
         updatedAt: "2026-10-01T00:00:00.000Z"

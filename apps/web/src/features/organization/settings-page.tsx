@@ -11,11 +11,12 @@ import { ConfirmDialog, SkeletonRows } from "@/components/ui/feedback";
 import { Field } from "@/components/ui/field";
 import { CheckboxCard, Input, Select } from "@/components/ui/form-controls";
 import { getErrorMessage } from "@/lib/errors";
-import { ORGANIZATION_STATUS_LABELS } from "@/lib/labels";
+import { ORGANIZATION_STATUS_LABELS, planLabel } from "@/lib/labels";
 import { formatDate } from "@/lib/utils";
 import { useAuth } from "@/providers/auth-provider";
 import { useOrganization } from "@/providers/organization-provider";
 import { useCurrentOrganization, useMembers, useOrganizationMutations, type SettingsPatch } from "./api";
+import { PlanCard } from "./plan-card";
 
 const INBOX_FILTER_LABELS: Record<(typeof INBOX_FILTERS)[number], string> = {
   ALL: "Todos",
@@ -212,11 +213,12 @@ export function SettingsPage() {
         description="Los cambios quedan registrados en la auditoría."
         actions={
           <Badge variant="secondary">
-            Plan {organization.plan} · {ORGANIZATION_STATUS_LABELS[organization.status]}
+            {organization.plan ? `Plan ${planLabel(organization.plan)}` : "Sin plan"} · {ORGANIZATION_STATUS_LABELS[organization.status]}
           </Badge>
         }
       />
       <GeneralCard name={organization.name} slug={organization.slug} canEdit={can("organization:update")} />
+      <PlanCard />
       {settings ? <SettingsCard settings={settings} canEdit={can("settings:update")} /> : null}
       {role === "OWNER" ? <TransferOwnershipCard /> : null}
     </div>

@@ -6,7 +6,11 @@
 export const ORGANIZATION_ROLES = ["OWNER", "ADMIN", "OPERATOR", "VIEWER"] as const;
 export type OrganizationRole = (typeof ORGANIZATION_ROLES)[number];
 
-export const ORGANIZATION_PLANS = ["FREE", "PRO", "BUSINESS"] as const;
+/**
+ * Every value organizations.plan can hold. FREE is LEGACY (organizations
+ * created before Commercial V1); the plans sold are COMMERCIAL_PLANS (plans.ts).
+ */
+export const ORGANIZATION_PLANS = ["FREE", "BASIC", "PRO", "BUSINESS"] as const;
 export type OrganizationPlan = (typeof ORGANIZATION_PLANS)[number];
 
 export const ORGANIZATION_STATUSES = ["ACTIVE", "SUSPENDED", "CANCELLED"] as const;

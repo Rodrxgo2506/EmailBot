@@ -114,7 +114,7 @@ export function customerAccessRepository(db: SupabaseClient): CustomerAccessRepo
   };
 }
 
-const FAILURES: readonly PortalLoginFailure[] = ["INVALID", "REVOKED", "EXPIRED", "CUSTOMER_INACTIVE", "ORGANIZATION_INACTIVE"];
+const FAILURES: readonly PortalLoginFailure[] = ["INVALID", "REVOKED", "EXPIRED", "CUSTOMER_INACTIVE", "ORGANIZATION_INACTIVE", "SUBSCRIPTION_INACTIVE"];
 
 type PortalOperations = Pick<PrivilegedOperations, "createPortalSession" | "validatePortalSession" | "endPortalSession">;
 

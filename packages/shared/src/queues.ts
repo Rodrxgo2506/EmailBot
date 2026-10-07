@@ -22,6 +22,9 @@ export type QueueName = (typeof QUEUE_NAMES)[keyof typeof QUEUE_NAMES];
  * reads its next run (read-only) to detect a worker that stopped consuming.
  */
 export const POLL_SCHEDULER_ID = "poll-active-accounts";
+/** Commercial V1.2: expiration of subscriptions whose period ended, every 5 minutes. */
+export const EXPIRE_SUBSCRIPTIONS_SCHEDULER_ID = "expire-subscriptions";
+export const EXPIRE_SUBSCRIPTIONS_INTERVAL_MS = 5 * 60_000;
 
 /** Gmail Pub/Sub push notification (already decoded and verified by the API). */
 export interface GmailNotificationJob {
@@ -92,6 +95,14 @@ export interface RecoverIncompleteJob {
   type: "RECOVER_INCOMPLETE";
 }
 
+/**
+ * Periodic (job scheduler in the worker, Commercial V1.2): subscriptions whose
+ * period ended become EXPIRED (public.expire_due_subscriptions; idempotent).
+ */
+export interface ExpireSubscriptionsJob {
+  type: "EXPIRE_SUBSCRIPTIONS";
+}
+
 export type EmailEventJob =
   | GmailNotificationJob
   | MicrosoftNotificationJob
@@ -100,7 +111,8 @@ export type EmailEventJob =
   | PollAccountsJob
   | RecoverIncompleteJob
   | WatchAccountJob
-  | RenewWatchesJob;
+  | RenewWatchesJob
+  | ExpireSubscriptionsJob;
 
 /**
  * Sync jobs are coalesced per account: at most one waiting job

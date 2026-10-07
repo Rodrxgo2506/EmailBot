@@ -6,6 +6,7 @@ import { parseWith } from "../../lib/validation.js";
 import { getAuth } from "../../plugins/auth.js";
 import { getOrganization, requirePermission } from "../../plugins/organization.js";
 import type { BotWrite } from "../../repositories/types.js";
+import { requestEntitlements } from "../plans/entitlements.js";
 
 /*
  * Bots (EmailBot V2, phase 1). Organization-scoped; RLS repeats the role
@@ -45,6 +46,8 @@ export async function botRoutes(app: FastifyInstance) {
     if (input.description !== undefined) insert.description = input.description;
     if (input.customerResolution !== undefined) insert.customerResolution = input.customerResolution;
     if (input.portalSettings !== undefined) insert.portalSettings = input.portalSettings;
+    // Commercial V1: the BOTS limit counts ACTIVE bots (a bot with emails can only be paused).
+    if (insert.status === "ACTIVE") await requestEntitlements(request).assertWithinLimit("BOTS");
 
     const bot = await auth.repos.bots.create(getOrganization(request).id, auth.user.id, insert);
     await app.audit(request, {
@@ -72,6 +75,7 @@ export async function botRoutes(app: FastifyInstance) {
     if (input.status !== undefined) patch.status = input.status;
     if (input.customerResolution !== undefined) patch.customerResolution = input.customerResolution;
     if (input.portalSettings !== undefined) patch.portalSettings = input.portalSettings;
+    if (before.status !== "ACTIVE" && patch.status === "ACTIVE") await requestEntitlements(request).assertWithinLimit("BOTS");
 
     const bot = await auth.repos.bots.update(organizationId, id, auth.user.id, patch);
     if (!bot) throw notFound("Bot");

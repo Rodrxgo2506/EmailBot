@@ -33,7 +33,8 @@ export interface Organization {
   id: string;
   name: string;
   slug: string;
-  plan: OrganizationPlan;
+  /** Cache of the plan of the ACTIVE subscription; null = no commercial plan (Commercial V1.1). */
+  plan: OrganizationPlan | null;
   status: OrganizationStatus;
   createdAt: string;
   updatedAt: string;

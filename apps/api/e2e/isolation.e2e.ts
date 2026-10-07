@@ -38,7 +38,7 @@ import {
 import { processEmail, type ProcessEmailDeps } from "../../worker/src/pipeline/process-email.js";
 import type { ProviderRegistry } from "../../worker/src/providers/registry.js";
 import type { ProviderAdapter, WorkerAccount } from "../../worker/src/providers/types.js";
-import { localEnv } from "./local-supabase.js";
+import { localEnv, localSql } from "./local-supabase.js";
 
 /* ------------------------------------------------------------------ local stack only */
 
@@ -175,6 +175,28 @@ const operatorA = await newUser("operator-a");
 const ownerB = await newUser("owner-b");
 const orgA: string = must((await call("POST", "/api/organizations", ownerA.token, null, { name: `E2E A ${run}` })).json?.organization?.id, "org A");
 const orgB: string = must((await call("POST", "/api/organizations", ownerB.token, null, { name: `E2E B ${run}` })).json?.organization?.id, "org B");
+
+// Commercial V1.1: EmailBot is paid. A new organization has no plan and can do nothing commercial...
+const beforePayment = await call("POST", "/api/bots", ownerA.token, orgA, { name: "Antes del pago" });
+check(beforePayment.status === 403 && beforePayment.json?.error?.code === "SUBSCRIPTION_REQUIRED", "subscription: a new organization cannot create anything before paying", String(beforePayment.status));
+// ...until a platform admin of this run registers a manual payment (the real admin API path and subscription core).
+const root = await newUser("root");
+localSql(`insert into public.platform_admins (user_id) values ('${root.id}');
+`);
+for (const org of [orgA, orgB]) {
+  const activation = await call("POST", `/api/admin/organizations/${org}/subscription/activate`, root.token, null, {
+    plan: "PRO",
+    billingPeriod: "MONTHLY",
+    paymentMethod: "TRANSFER",
+    amount: "39.90",
+    periodStart: new Date().toISOString(),
+    periodEnd: new Date(Date.now() + 30 * 86_400_000).toISOString(),
+    reference: `e2e-${run}-${org}`
+  });
+  check(activation.json?.outcome === "ACTIVATED" && activation.json?.organization?.plan === "PRO", "subscription: manual payment activates PRO", String(activation.status));
+}
+const plan = await call("GET", "/api/organizations/current/plan", ownerA.token, orgA);
+check(plan.json?.entitlements?.access === "SUBSCRIPTION" && plan.json?.subscription?.paymentMethod === "TRANSFER", "subscription: the member sees the active subscription");
 must((await call("POST", "/api/organizations/current/members", ownerA.token, orgA, { email: operatorA.email, role: "OPERATOR" })).json?.member, "operator A");
 
 const RESOLUTION = { source: "RECIPIENT", onMultipleMatches: "DELIVER_ALL" };
@@ -401,6 +423,44 @@ for (const scenario of scenarios) {
   check((await call("PATCH", `/api/customers/${a2.id}`, ownerA.token, orgA, { status: "SUSPENDED" })).status === 200, "setup: customer A2 suspended");
   check((await portal("/api/portal/inbox", cookieA2)).status === 401, "suspended A2: portal session rejected");
   check((await portal("/api/portal/inbox", cookieA1)).status === 200, "A1 is unaffected by A2's suspension");
+}
+
+/* ------------------------------------------------------------------ Commercial V1.2: no subscription, no processing */
+
+{
+  const subscriptionB = must((await call("GET", `/api/admin/organizations/${orgB}/subscription`, root.token, null)).json?.subscriptions?.[0]?.id as string | undefined, "subscription B");
+  const cookieB1 = await portalLogin(b1.accessId);
+  const emailsOfB = async () => ((await userDb(ownerB.token).from("emails").select("id").eq("organization_id", orgB)).data ?? []).length;
+  const storedBefore = await emailsOfB();
+
+  check((await call("POST", `/api/admin/subscriptions/${subscriptionB}/suspend`, root.token, null, { reason: "e2e" })).status === 200, "subscription: B suspended by the platform admin");
+  const accessB = (await clients.service.rpc("organization_access", { p_organization_ids: [orgA, orgB] })).data as Array<{ organization_id: string; access: string }> | null;
+  check(
+    accessB?.find((row) => row.organization_id === orgB)?.access === "NONE" && accessB?.find((row) => row.organization_id === orgA)?.access === "SUBSCRIPTION",
+    "subscription: organization_access (service role, real PostgREST) -> B NONE, A SUBSCRIPTION"
+  );
+
+  messages.set("e6", mail("e6", [address("uno")], SUBJECT("E6 sin suscripcion")));
+  const skipped = await processEmail({ organizationId: orgB, emailAccountId: accountB, provider: "GMAIL", providerMessageId: "e6" }, processDeps);
+  check(skipped.status === "skipped" && skipped.reason === "subscription_inactive", "worker: B's email is skipped without subscription", JSON.stringify(skipped));
+  check((await emailsOfB()) === storedBefore, "worker: nothing stored for B; B's existing emails are kept", `${storedBefore}`);
+  check((await portal("/api/portal/inbox", cookieB1)).status === 401, "portal: B1's open session stops working");
+  const refusedLogin = await app.inject({
+    method: "POST",
+    url: "/api/portal/session",
+    remoteAddress: `203.0.113.${(ip++ % 250) + 1}`,
+    headers: { "content-type": "application/json" },
+    payload: JSON.stringify({ accessId: b1.accessId })
+  });
+  check(refusedLogin.statusCode === 401, "portal: B1 cannot log in without subscription (generic 401)", String(refusedLogin.statusCode));
+  const bot = await call("POST", "/api/bots", ownerB.token, orgB, { name: `Sin pago ${run}` });
+  check(bot.status === 403 && bot.json?.error?.code === "SUBSCRIPTION_REQUIRED", "API: B cannot create anything without subscription");
+  check((await portal("/api/portal/inbox", await portalLogin(a1.accessId))).status === 200, "A is unaffected by B's suspension");
+
+  check((await call("POST", `/api/admin/subscriptions/${subscriptionB}/reactivate`, root.token, null, {})).status === 200, "subscription: B reactivated");
+  check((await portal("/api/portal/inbox", cookieB1)).status === 200, "portal: the same B1 session works again (nothing was deleted)");
+  const processed = await processEmail({ organizationId: orgB, emailAccountId: accountB, provider: "GMAIL", providerMessageId: "e6" }, processDeps);
+  check(processed.status === "processed", "worker: B's email is processed again once the subscription is active");
 }
 
 await app.close();

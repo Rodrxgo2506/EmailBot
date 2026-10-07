@@ -1,5 +1,5 @@
 import { redactSensitive } from "@emailbot/shared";
-import type { OrganizationRole } from "@emailbot/types";
+import type { EmailAccountStatus, OrganizationRole } from "@emailbot/types";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { AppError, unwrap } from "../../lib/errors.js";
 import type { PrivilegedOperations } from "../types.js";
@@ -7,6 +7,7 @@ import { portalSessionOperations } from "./customer-access-repositories.js";
 import { portalDataOperations } from "./delivery-repositories.js";
 import { legalAcceptanceOperations } from "./legal-repositories.js";
 import { microsoftSubscriptionOperations } from "./microsoft-subscription-repositories.js";
+import { planRepository } from "./plan-repositories.js";
 import { syncHealthOperations } from "./sync-health-repositories.js";
 import { EMAIL_ACCOUNT_COLUMNS, toEmailAccount, type Row } from "./mappers.js";
 
@@ -27,6 +28,7 @@ export function withDownloadName(signedUrl: string, filename: string): string {
  * organization role. Never return credential columns from here.
  */
 export function privilegedOperations(service: SupabaseClient): PrivilegedOperations {
+  const plans = planRepository(service);
   return {
     ...portalSessionOperations(service),
     ...portalDataOperations(service),
@@ -44,6 +46,22 @@ export function privilegedOperations(service: SupabaseClient): PrivilegedOperati
       const { data, error } = await service.auth.admin.getUserById(row.id as string);
       if (error || !data.user?.email_confirmed_at) return null;
       return row.id as string;
+    },
+
+    getOrganizationEntitlements: (organizationId) => plans.entitlements(organizationId),
+    getOrganizationUsage: (organizationId, keys) => plans.usage(organizationId, keys),
+
+    async findOAuthEmailAccountStatus(organizationId, provider, emailAddress) {
+      const row = unwrap(
+        await service
+          .from("email_accounts")
+          .select("status")
+          .eq("organization_id", organizationId)
+          .eq("provider", provider)
+          .eq("email_address", emailAddress.trim().toLowerCase())
+          .maybeSingle()
+      ) as Row | null;
+      return (row?.status as EmailAccountStatus | undefined) ?? null;
     },
 
     async getMemberRole(organizationId, userId) {

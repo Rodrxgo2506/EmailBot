@@ -45,7 +45,8 @@ export interface AdminOrganizationSummary {
   id: string;
   name: string;
   slug: string;
-  plan: OrganizationPlan;
+  /** Cache of the plan of the ACTIVE subscription (null = none). */
+  plan: OrganizationPlan | null;
   status: OrganizationStatus;
   owner: AdminOwner | null;
   membersCount: number;

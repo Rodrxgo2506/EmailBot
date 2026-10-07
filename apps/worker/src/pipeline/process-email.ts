@@ -3,6 +3,7 @@ import { buildAttachmentPath, serializeError, type EmailProcessingJob } from "@e
 import type { NormalizedAttachment, NormalizedEmail } from "@emailbot/types";
 import type { ProviderRegistry } from "../providers/registry.js";
 import { ProviderAuthError, type ProviderContext, type WorkerAccount } from "../providers/types.js";
+import { hasCommercialAccess } from "./commercial-access.js";
 import { buildEmailRow } from "./email-row.js";
 import { routeEmail, type CustomerResolverInput } from "./resolve-customers.js";
 import type {
@@ -46,6 +47,7 @@ export type ProcessEmailOutcome =
       reason:
         | "account_not_found"
         | "organization_inactive"
+        | "subscription_inactive"
         | "account_inactive"
         | "auto_processing_disabled"
         | "duplicate"
@@ -111,6 +113,15 @@ export async function processEmail(
   // SUSPENDED / CANCELLED: data is kept, nothing new is processed or delivered (incomplete emails stay as they are).
   if (account.organizationStatus !== "ACTIVE") return { status: "skipped", reason: "organization_inactive" };
   if (account.status !== "ACTIVE") return { status: "skipped", reason: "account_inactive" };
+  // Commercial V1.2: checked for every message, at processing time (a job queued while the organization had
+  // access is skipped once it lost it: no rules, bots, deliveries or notifications; completed, never retried).
+  const allowed = await hasCommercialAccess(deps.accounts, log, {
+    organizationId: account.organizationId,
+    emailAccountId: account.id,
+    provider: account.provider,
+    operation: "process_email"
+  });
+  if (!allowed) return { status: "skipped", reason: "subscription_inactive" };
 
   const settings = await deps.emails.loadSettings(account.organizationId);
   if (!settings.autoProcessingEnabled) return { status: "skipped", reason: "auto_processing_disabled" };

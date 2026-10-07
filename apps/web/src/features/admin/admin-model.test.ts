@@ -75,6 +75,13 @@ describe("audit and activity labels", () => {
     expect(platformAuditDetail(entry("organization.suspended", { from: "ACTIVE", to: "SUSPENDED" }))).toBe("ACTIVE → SUSPENDED");
     expect(platformAuditDetail(entry("organization.created", { plan: "PRO", ownerUserId: "x" }))).toBe("Plan PRO");
     expect(platformAuditDetail(entry("organization.created", {}))).toBeNull();
+    // Commercial V1.1 subscriptions and payments
+    expect(platformActionLabel("subscription.activated")).toBe("Suscripción activada");
+    expect(platformActionLabel("payment.recorded")).toBe("Pago registrado");
+    expect(platformAuditDetail(entry("subscription.activated", { plan: "PRO", billingPeriod: "MONTHLY", paymentMethod: "YAPE" }))).toBe("Plan PRO · MONTHLY");
+    expect(platformAuditDetail(entry("subscription.plan_changed", { fromPlan: "PRO", plan: "BUSINESS" }))).toBe("PRO → BUSINESS");
+    expect(platformAuditDetail(entry("payment.recorded", { paymentMethod: "CASH", amount: 39.9 }))).toBe("CASH · S/ 39.90");
+    expect(platformAuditDetail(entry("subscription.suspended", { from: "ACTIVE", to: "SUSPENDED", reason: "x" }))).toBe("ACTIVE → SUSPENDED");
   });
 
   it("activity shows the event, otherwise action and entity type", () => {
@@ -113,8 +120,8 @@ describe("createAdminApi", () => {
     expect(http.get).toHaveBeenLastCalledWith("/api/admin/activity?page=1&pageSize=8");
     await api.audit({ organizationId: "o", page: 1, pageSize: 25 });
     expect(http.get).toHaveBeenLastCalledWith("/api/admin/audit?organizationId=o&page=1&pageSize=25");
-    expect(await api.createOrganization({ name: "Acme", ownerEmail: "o@example.com", plan: "FREE" })).toEqual({ id: "new" });
-    expect(http.post).toHaveBeenCalledWith("/api/admin/organizations", { name: "Acme", ownerEmail: "o@example.com", plan: "FREE" });
+    expect(await api.createOrganization({ name: "Acme", ownerEmail: "o@example.com" })).toEqual({ id: "new" });
+    expect(http.post).toHaveBeenCalledWith("/api/admin/organizations", { name: "Acme", ownerEmail: "o@example.com" });
     await api.updateOrganization("o", { status: "SUSPENDED" });
     expect(http.patch).toHaveBeenCalledWith("/api/admin/organizations/o", { status: "SUSPENDED" });
   });

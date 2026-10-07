@@ -1,4 +1,6 @@
+import type { PlanFeatureErrorDetails, PlanLimitErrorDetails } from "@emailbot/types";
 import { ApiError } from "./api-client";
+import { PLAN_FEATURE_LABELS, PLAN_LABELS, PLAN_LIMIT_LABELS } from "./labels";
 
 /** Friendly Spanish messages for stable API error codes. */
 const MESSAGES: Record<string, string> = {
@@ -30,13 +32,34 @@ const MESSAGES: Record<string, string> = {
   PLATFORM_ADMIN_REQUIRED: "Esta sección es solo para administradores de la plataforma.",
   OWNER_NOT_FOUND: "No existe un usuario con ese correo confirmado. Debe registrarse y confirmar su correo primero.",
   INVALID_SLUG: "Indica un slug: el nombre no tiene caracteres válidos para generarlo.",
-  VALIDATION_ERROR: "Revisa los datos del formulario."
+  VALIDATION_ERROR: "Revisa los datos del formulario.",
+  PLAN_LIMIT_REACHED: "Alcanzaste el límite de tu plan. Para agregar más se necesita un plan superior.",
+  PLAN_FEATURE_UNAVAILABLE: "Esta funcionalidad no está incluida en tu plan.",
+  PLAN_UNAVAILABLE: "No se pudo leer el plan de tu organización. Inténtalo de nuevo.",
+  SUBSCRIPTION_REQUIRED:
+    "Tu organización no tiene una suscripción activa. EmailBot es un servicio de pago: contrata o renueva un plan para continuar. Tus datos se conservan.",
+  PAYMENT_ALREADY_RECORDED: "Ese pago (método y referencia) ya fue registrado."
 };
+
+/** Commercial V1: the 403 of a plan limit / feature names what and which plan. */
+function planMessage(error: ApiError): string | null {
+  const details = error.details as Partial<PlanLimitErrorDetails & PlanFeatureErrorDetails> | undefined;
+  if (!details?.plan || !(details.plan in PLAN_LABELS)) return null;
+  const plan = PLAN_LABELS[details.plan];
+  if (error.code === "PLAN_LIMIT_REACHED" && details.limit && details.limit in PLAN_LIMIT_LABELS && typeof details.max === "number") {
+    return `Alcanzaste el límite de tu plan ${plan} (${PLAN_LIMIT_LABELS[details.limit].toLowerCase()}: ${details.max}). Para agregar más se necesita un plan superior.`;
+  }
+  if (error.code === "PLAN_FEATURE_UNAVAILABLE" && details.feature && details.feature in PLAN_FEATURE_LABELS) {
+    return `${PLAN_FEATURE_LABELS[details.feature]} no está incluido en tu plan ${plan}.`;
+  }
+  return null;
+}
 
 export function getErrorMessage(error: unknown): string {
   if (error instanceof ApiError) {
     if (error.code === "NOT_FOUND") return error.message;
     if (error.code === "BUSINESS_RULE_VIOLATION") return error.message;
+    if (error.code === "PLAN_LIMIT_REACHED" || error.code === "PLAN_FEATURE_UNAVAILABLE") return planMessage(error) ?? MESSAGES[error.code] ?? error.message;
     return MESSAGES[error.code] ?? error.message;
   }
   if (error instanceof Error) return error.message;

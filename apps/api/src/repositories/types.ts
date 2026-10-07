@@ -8,7 +8,11 @@ import type {
   AdminOrganizationDetail,
   AdminOrganizationSort,
   AdminOrganizationSummary,
+  AdminPaymentEvent,
+  AdminPlanPrice,
   AdminStats,
+  AdminSubscription,
+  AdminSubscriptionActivation,
   AuditAction,
   AuditLogEntry,
   Bot,
@@ -34,17 +38,24 @@ import type {
   LegalDocument,
   Organization,
   OrganizationMember,
+  OrganizationEntitlements,
   OrganizationMembership,
   OrganizationPlan,
   OrganizationRole,
   OrganizationSettings,
   OrganizationStatus,
   Paginated,
+  PlanUsage,
+  PlanUsageKey,
   PortalEmailDetail,
   PortalFilters,
   PortalInboxItem,
   PortalProfile,
-  PortalSettings
+  PortalSettings,
+  OrganizationSubscriptionSummary,
+  SubscriptionAction,
+  SubscriptionActivationOutcome,
+  SubscriptionStatus
 } from "@emailbot/types";
 import type { CustomerListQuery, EmailListQuery, RuleAction, RuleCondition } from "@emailbot/validation";
 import type { SyncHealthCounts } from "../modules/health/sync-health.js";
@@ -283,6 +294,19 @@ export interface AttachmentRepository {
   listStoredObjects(organizationId: string, scope: { emailId: string } | { accountId: string }): Promise<StoredObjectRef[]>;
 }
 
+/**
+ * Commercial V1: entitlements of the organization's plan and current usage
+ * (public.organization_entitlements / organization_usage). `entitlements`
+ * is null when the organization is not visible or has no catalog plan.
+ */
+export interface PlanRepository {
+  entitlements(organizationId: string): Promise<OrganizationEntitlements | null>;
+  /** Only the requested keys (default: every measured limit). */
+  usage(organizationId: string, keys?: readonly PlanUsageKey[]): Promise<Partial<PlanUsage>>;
+  /** Commercial V1.1: the open subscription, or else the latest one; null = never subscribed. */
+  subscription(organizationId: string): Promise<OrganizationSubscriptionSummary | null>;
+}
+
 export interface AuditRepository {
   list(
     organizationId: string,
@@ -306,6 +330,7 @@ export interface Repositories {
   emails: EmailRepository;
   attachments: AttachmentRepository;
   audit: AuditRepository;
+  plans: PlanRepository;
 }
 
 export interface AuditEntry {
@@ -343,7 +368,8 @@ export interface ImapAccountInsert {
 }
 
 /** Outcome categories of portal.create_session (never shown to the client). */
-export type PortalLoginFailure = "INVALID" | "REVOKED" | "EXPIRED" | "CUSTOMER_INACTIVE" | "ORGANIZATION_INACTIVE";
+/** SUBSCRIPTION_INACTIVE (Commercial V1.2): the organization has no commercial access (or its plan has no portal). */
+export type PortalLoginFailure = "INVALID" | "REVOKED" | "EXPIRED" | "CUSTOMER_INACTIVE" | "ORGANIZATION_INACTIVE" | "SUBSCRIPTION_INACTIVE";
 
 export type PortalLoginResult =
   | {
@@ -454,6 +480,18 @@ export interface PrivilegedOperations {
   ): Promise<{ subscriptionId: string | null; accessTokenEncrypted: string | null; refreshTokenEncrypted: string | null; tokenExpiresAt: string | null } | null>;
   /** Forgets the subscription (provider_metadata keys + watch_* columns); other metadata is kept. */
   clearMicrosoftSubscription(organizationId: string, id: string): Promise<void>;
+  /*
+   * Commercial V1: plan checks of the OAuth callback (no bearer token there; the
+   * signed state names the organization and the role is re-checked first).
+   */
+  getOrganizationEntitlements(organizationId: string): Promise<OrganizationEntitlements | null>;
+  getOrganizationUsage(organizationId: string, keys: readonly PlanUsageKey[]): Promise<Partial<PlanUsage>>;
+  /** Status of the mailbox the OAuth upsert would update (same organization, provider and address), or null. */
+  findOAuthEmailAccountStatus(
+    organizationId: string,
+    provider: Exclude<EmailProvider, "IMAP">,
+    emailAddress: string
+  ): Promise<EmailAccountStatus | null>;
 }
 
 /* ------------------------------------------------------------------ platform administration (V2 phase 6) */
@@ -478,18 +516,34 @@ export interface AdminOperations {
   stats(actorId: string): Promise<AdminStats>;
   listOrganizations(actorId: string, query: AdminOrganizationQuery): Promise<{ items: AdminOrganizationSummary[]; total: number }>;
   getOrganization(actorId: string, organizationId: string): Promise<AdminOrganizationDetail | null>;
-  /** Organization + OWNER membership + audit, atomically. Returns the new id. */
-  createOrganization(
-    actorId: string,
-    input: { name: string; slug: string; plan: OrganizationPlan; ownerUserId: string; requestId: string }
-  ): Promise<string>;
-  /** Returns false when the organization does not exist. */
-  updateOrganization(
+  /** Organization (without a plan: it comes from a subscription) + OWNER membership + audit, atomically. Returns the new id. */
+  createOrganization(actorId: string, input: { name: string; slug: string; ownerUserId: string; requestId: string }): Promise<string>;
+  /** Operational status only. Returns false when the organization does not exist. */
+  updateOrganization(actorId: string, organizationId: string, patch: { status: OrganizationStatus }, requestId: string): Promise<boolean>;
+  /*
+   * Commercial V1.1: subscriptions. activateSubscription and
+   * updateSubscriptionStatus reach the single subscription core in the
+   * database (private.activate_subscription / change_subscription_status),
+   * the same one the payment provider webhook will use.
+   */
+  listPlanPrices(actorId: string): Promise<AdminPlanPrice[]>;
+  listSubscriptions(actorId: string, organizationId: string): Promise<AdminSubscription[]>;
+  listPaymentEvents(actorId: string, organizationId: string, limit: number): Promise<AdminPaymentEvent[]>;
+  /** DUPLICATE = the same payment method + reference was already registered (nothing changed). */
+  activateSubscription(
     actorId: string,
     organizationId: string,
-    patch: { plan?: OrganizationPlan | undefined; status?: OrganizationStatus | undefined },
+    input: AdminSubscriptionActivation,
     requestId: string
-  ): Promise<boolean>;
+  ): Promise<{ subscriptionId: string; outcome: SubscriptionActivationOutcome | "DUPLICATE" }>;
+  /** null when the subscription does not exist. */
+  updateSubscriptionStatus(
+    actorId: string,
+    subscriptionId: string,
+    action: SubscriptionAction,
+    reason: string | null,
+    requestId: string
+  ): Promise<{ subscriptionId: string; organizationId: string; status: SubscriptionStatus } | null>;
   listMembers(actorId: string, organizationId: string): Promise<AdminMember[]>;
   listBots(actorId: string, organizationId: string): Promise<AdminBot[]>;
   listCustomers(actorId: string, organizationId: string, page: { limit: number; offset: number }): Promise<{ items: AdminCustomer[]; total: number }>;

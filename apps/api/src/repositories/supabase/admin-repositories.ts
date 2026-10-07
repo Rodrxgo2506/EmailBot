@@ -7,11 +7,15 @@ import type {
   AdminMember,
   AdminOrganizationDetail,
   AdminOrganizationSummary,
-  AdminStats
+  AdminPaymentEvent,
+  AdminPlanPrice,
+  AdminStats,
+  AdminSubscription
 } from "@emailbot/types";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { unwrap } from "../../lib/errors.js";
 import type { AdminOperations } from "../types.js";
+import { toDecimalString } from "./plan-repositories.js";
 import type { Row } from "./mappers.js";
 
 /*
@@ -101,7 +105,7 @@ export function adminOperations(service: SupabaseClient): AdminOperations {
           p_actor_id: actorId,
           p_name: input.name,
           p_slug: input.slug,
-          p_plan: input.plan,
+          p_plan: null,
           p_owner_user_id: input.ownerUserId,
           p_request_id: input.requestId
         })
@@ -113,12 +117,108 @@ export function adminOperations(service: SupabaseClient): AdminOperations {
         await admin().rpc("update_organization", {
           p_actor_id: actorId,
           p_organization_id: organizationId,
-          p_plan: patch.plan ?? null,
-          p_status: patch.status ?? null,
+          p_plan: null,
+          p_status: patch.status,
           p_request_id: requestId
         })
       ) as Row[];
       return rows.length > 0;
+    },
+
+    async listPlanPrices(actorId) {
+      const rows = unwrap(await admin().rpc("list_plan_prices", { p_actor_id: actorId })) as Row[];
+      return rows.map(
+        (row): AdminPlanPrice => ({
+          id: row.plan_price_id,
+          plan: row.plan,
+          planName: row.plan_name,
+          billingPeriod: row.billing_period,
+          currency: row.currency,
+          amount: toDecimalString(row.amount),
+          amountCents: Number(row.amount_cents)
+        })
+      );
+    },
+
+    async listSubscriptions(actorId, organizationId) {
+      const rows = unwrap(await admin().rpc("list_subscriptions", { p_actor_id: actorId, p_organization_id: organizationId })) as Row[];
+      return rows.map(
+        (row): AdminSubscription => ({
+          id: row.id,
+          status: row.status,
+          plan: row.plan,
+          billingPeriod: row.billing_period,
+          currency: row.currency,
+          listAmount: toDecimalString(row.list_amount),
+          paymentMethod: row.payment_method,
+          origin: row.origin,
+          startedAt: row.started_at,
+          currentPeriodStart: row.current_period_start,
+          currentPeriodEnd: row.current_period_end,
+          canceledAt: row.canceled_at ?? null,
+          suspendedAt: row.suspended_at ?? null,
+          expiredAt: row.expired_at ?? null,
+          createdAt: row.created_at,
+          updatedAt: row.updated_at
+        })
+      );
+    },
+
+    async listPaymentEvents(actorId, organizationId, limit) {
+      const rows = unwrap(
+        await admin().rpc("list_payment_events", { p_actor_id: actorId, p_organization_id: organizationId, p_limit: limit })
+      ) as Row[];
+      return rows.map(
+        (row): AdminPaymentEvent => ({
+          id: row.id,
+          subscriptionId: row.subscription_id ?? null,
+          eventType: row.event_type,
+          paymentMethod: row.payment_method,
+          amount: row.amount === null || row.amount === undefined ? null : toDecimalString(row.amount),
+          currency: row.currency,
+          status: row.status,
+          reference: row.reference ?? null,
+          note: row.note ?? null,
+          occurredAt: row.occurred_at,
+          processedAt: row.processed_at ?? null
+        })
+      );
+    },
+
+    async activateSubscription(actorId, organizationId, input, requestId) {
+      const rows = unwrap(
+        await admin().rpc("activate_subscription", {
+          p_actor_id: actorId,
+          p_organization_id: organizationId,
+          p_plan: input.plan,
+          p_billing_period: input.billingPeriod,
+          p_payment_method: input.paymentMethod,
+          // Decimal string: PostgreSQL parses it as numeric (never a float on the way).
+          p_amount: input.amount,
+          p_period_start: input.periodStart,
+          p_period_end: input.periodEnd,
+          p_reference: input.reference ?? null,
+          p_note: input.note ?? null,
+          p_request_id: requestId
+        })
+      ) as Row[];
+      const row = rows[0];
+      if (!row) throw new Error("admin.activate_subscription returned no row");
+      return { subscriptionId: row.subscription_id, outcome: row.outcome };
+    },
+
+    async updateSubscriptionStatus(actorId, subscriptionId, action, reason, requestId) {
+      const rows = unwrap(
+        await admin().rpc("update_subscription_status", {
+          p_actor_id: actorId,
+          p_subscription_id: subscriptionId,
+          p_action: action.toUpperCase(),
+          p_reason: reason,
+          p_request_id: requestId
+        })
+      ) as Row[];
+      const row = rows[0];
+      return row ? { subscriptionId: row.subscription_id, organizationId: row.organization_id, status: row.status } : null;
     },
 
     async listMembers(actorId, organizationId) {

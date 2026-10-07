@@ -77,7 +77,26 @@ async function seedTenantData(t: TestDatabase, orgId: string, ownerId: string, p
   });
 }
 
-/** Two organizations (A with every role, B with only an owner) plus an outsider. */
+/**
+ * ACTIVE subscription to `plan` (monthly), started yesterday, through
+ * private.activate_subscription as the database owner. Returns its id.
+ */
+export async function activateSubscription(t: TestDatabase, orgId: string, plan: "BASIC" | "PRO" | "BUSINESS" = "PRO"): Promise<string> {
+  return t.asAdmin(async (tx) => {
+    const row = await one<{ subscription_id: string }>(
+      tx,
+      `select a.subscription_id from private.activate_subscription(
+         $1,
+         (select p.id from public.plan_prices p join public.plan_catalog c on c.id = p.plan_id where c.code = $2 and p.billing_period = 'MONTHLY' and p.active),
+         'MANUAL', 'ADMIN', now() - interval '1 day', now() + interval '1 month', null, 'PEN', null, null, null, 'fixture'
+       ) a`,
+      [orgId, plan]
+    );
+    return row.subscription_id;
+  });
+}
+
+/** Two organizations (A with every role, B with only an owner), both with an ACTIVE PRO subscription, plus an outsider. */
 export async function seedTwoTenants(t: TestDatabase): Promise<Fixtures> {
   const ownerA = await t.createUser("owner@a.test");
   const adminA = await t.createUser("admin@a.test");
@@ -106,6 +125,14 @@ export async function seedTwoTenants(t: TestDatabase): Promise<Fixtures> {
       ]);
     }
   });
+
+  // Commercial V1.1 / 1.2: paying tenants. Both have an ACTIVE PRO subscription (the real
+  // subscription core; no payment event, actor NULL), so the worker and the portal serve them.
+  // (Only when the subscription migrations are applied: some tests stop before them.)
+  const subscriptionsExist = await t.asAdmin((tx) =>
+    one<{ exists: boolean }>(tx, "select to_regclass('public.subscriptions') is not null as exists")
+  );
+  if (subscriptionsExist.exists) for (const orgId of [orgA.id, orgB.id]) await activateSubscription(t, orgId, "PRO");
 
   const dataA = await seedTenantData(t, orgA.id, ownerA, "a");
   const dataB = await seedTenantData(t, orgB.id, ownerB, "b");
