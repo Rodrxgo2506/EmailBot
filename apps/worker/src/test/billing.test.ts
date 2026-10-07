@@ -134,7 +134,7 @@ function makeCulqi(options: CulqiOptions = {}) {
     options.subscription === null
       ? null
       : { id: SXN, status: 3, current_period: 1, plan: { plan_id: PLAN }, metadata: { organization_id: "org-1", billing_subscription_id: "bill-1" }, ...(options.subscription ?? {}) };
-  const plan: CulqiPlan | null = options.plan === null ? null : { id: PLAN, amount: 3990, currency: "PEN", interval_unit_time: 3, ...(options.plan ?? {}) };
+  const plan: CulqiPlan | null = options.plan === null ? null : { id: PLAN, amount: 3990, currency: "PEN", interval_unit_time: 3, interval_count: 1, ...(options.plan ?? {}) };
   const charges = options.charges ?? {};
   return {
     environment: options.environment ?? "test",
@@ -172,6 +172,13 @@ describe("F1: only a verified charge activates", () => {
     expect(store.activate).not.toHaveBeenCalled();
   });
 
+  it("Culqi amounts with float noise (charge and plan in céntimos) are the catalog price: ACTIVE", async () => {
+    const store = makeStore([row({ amountCents: 1990, externalPlanId: PLAN })], received());
+    const culqi = makeCulqi({ plan: { amount: 1989.9999999999998 }, charges: { [CHR]: paidCharge({ amount: 1989.9999999999998 }) } });
+    expect(await handleCulqiEvent(EVT, deps(store, culqi))).toBe("activated");
+    expect(verifyCulqiCharge(row({ amountCents: 1990 }), CHR, paidCharge({ amount: 1989.9999999999998 }), true)).toEqual({ kind: "PAID" });
+  });
+
   it("charge paid=true, succesfull_charge, catalog amount and currency, own card: ACTIVE, keyed by the charge id", async () => {
     const store = makeStore([row()], received());
     const culqi = makeCulqi({ charges: { [CHR]: paidCharge() } });
@@ -193,6 +200,8 @@ describe("F1: only a verified charge activates", () => {
   it.each([
     ["paid=false", paidCharge({ paid: false, outcome: { code: "card_declined", decline_code: "insufficient_funds" } }), "DECLINED"],
     ["wrong amount", paidCharge({ amount: 100 }), "CHARGE_AMOUNT_MISMATCH"],
+    ["one céntimo less (S/39.89)", paidCharge({ amount: 3989 }), "CHARGE_AMOUNT_MISMATCH"],
+    ["an amount that is not a number", paidCharge({ amount: Number.NaN }), "CHARGE_AMOUNT_MISMATCH"],
     ["wrong currency", paidCharge({ currency_code: "USD" }), "CHARGE_CURRENCY_MISMATCH"],
     ["no success outcome", paidCharge({ outcome: { code: "other" } }), "CHARGE_NOT_CONFIRMED"],
     ["another card", paidCharge({ source: { object: "card", id: "crd_test_OTHERCARD0001" } }), "CHARGE_CARD_MISMATCH"],
@@ -250,6 +259,10 @@ describe("F2: the Culqi subscription must match EmailBot before anything is appl
     ["Culqi plan amount", { plan: { amount: 2990 } }, "PLAN_AMOUNT_MISMATCH"],
     ["Culqi plan currency", { plan: { currency: "USD" } }, "PLAN_CURRENCY_MISMATCH"],
     ["Culqi plan interval", { plan: { interval_unit_time: 4 } }, "PLAN_INTERVAL_MISMATCH"],
+    ["Culqi plan interval_count 0 (open-ended)", { plan: { interval_count: 0 } }, "PLAN_INTERVAL_COUNT_MISMATCH"],
+    ["Culqi plan interval_count 2", { plan: { interval_count: 2 } }, "PLAN_INTERVAL_COUNT_MISMATCH"],
+    ["Culqi plan interval_count missing", { plan: { interval_count: undefined } }, "PLAN_INTERVAL_COUNT_MISMATCH"],
+    ["Culqi returns another plan object", { plan: { id: "pln_test_OTHERPLAN000001" } }, "PLAN_ID_MISMATCH"],
     ["Culqi plan missing", { plan: null }, "PLAN_NOT_FOUND"],
     ["another organization", { subscription: { metadata: { organization_id: "org-2", billing_subscription_id: "bill-1" } } }, "ORGANIZATION_MISMATCH"],
     ["another billing subscription", { subscription: { metadata: { organization_id: "org-1", billing_subscription_id: "bill-9" } } }, "BILLING_SUBSCRIPTION_MISMATCH"],
@@ -260,6 +273,14 @@ describe("F2: the Culqi subscription must match EmailBot before anything is appl
     expect(await handleCulqiEvent(EVT, deps(store, culqi))).toBe("ignored");
     expect(store.activate).not.toHaveBeenCalled();
     expect(store.updates.at(-1)?.patch).toMatchObject({ status: "IGNORED", lastError: `REJECTED:${reason}` });
+  });
+
+  it("plan check: interval_count 1 + catalog price accepted; a live plan in a test row rejected", () => {
+    const sub = { id: SXN, status: 3, plan: { plan_id: PLAN } };
+    const plan = { id: PLAN, amount: 3990, currency: "PEN", interval_unit_time: 3, interval_count: 1 };
+    expect(verifyCulqiSubscription(row(), sub, plan, "test")).toEqual({ ok: true });
+    const live = "pln_live_PROMONTHLY0001";
+    expect(verifyCulqiSubscription(row({ externalPlanId: live }), { ...sub, plan: { plan_id: live } }, { ...plan, id: live }, "test")).toEqual({ ok: false, reason: "PLAN_ENVIRONMENT_MISMATCH" });
   });
 
   it("a subscription of another environment is rejected", () => {

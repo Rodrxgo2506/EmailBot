@@ -1,8 +1,9 @@
 import {
   collectCulqiIds,
   CULQI_CHARGE_SUCCESS_CODE,
-  CULQI_INTERVAL_UNIT,
+  culqiAmountToCents,
   culqiEnvironment,
+  culqiPlanMismatch,
   culqiTimestamp,
   CulqiApiError,
   isHandledCulqiEvent,
@@ -104,10 +105,9 @@ export function verifyCulqiSubscription(row: BillingSubscriptionRow, subscriptio
   const planId = planIdOf(subscription);
   if (!planId) return { ok: false, reason: "PLAN_NOT_REPORTED" };
   if (planId !== row.externalPlanId) return { ok: false, reason: "PLAN_MISMATCH" };
-  if (!plan || plan.id !== row.externalPlanId) return { ok: false, reason: "PLAN_NOT_FOUND" };
-  if (Number(plan.amount) !== row.amountCents) return { ok: false, reason: "PLAN_AMOUNT_MISMATCH" };
-  if (plan.currency !== row.currency) return { ok: false, reason: "PLAN_CURRENCY_MISMATCH" };
-  if (Number(plan.interval_unit_time) !== CULQI_INTERVAL_UNIT[row.billingPeriod]) return { ok: false, reason: "PLAN_INTERVAL_MISMATCH" };
+  if (!plan) return { ok: false, reason: "PLAN_NOT_FOUND" };
+  const planMismatch = culqiPlanMismatch(plan, { planId: row.externalPlanId, environment: row.environment, amountCents: row.amountCents, currency: row.currency, billingPeriod: row.billingPeriod });
+  if (planMismatch) return { ok: false, reason: planMismatch };
   const metadata = subscription.metadata ?? {};
   if (metadata.organization_id !== undefined && metadata.organization_id !== row.organizationId) return { ok: false, reason: "ORGANIZATION_MISMATCH" };
   if (metadata.billing_subscription_id !== undefined && metadata.billing_subscription_id !== row.id) return { ok: false, reason: "BILLING_SUBSCRIPTION_MISMATCH" };
@@ -135,7 +135,7 @@ export function verifyCulqiCharge(row: BillingSubscriptionRow, chargeId: string,
   if (charge.paid === false || outcome === "card_declined") {
     return { kind: "DECLINED", code: (charge.outcome?.decline_code ?? outcome ?? "charge_declined").slice(0, 100) };
   }
-  if (Number(charge.amount) !== row.amountCents) return { kind: "REJECTED", reason: "CHARGE_AMOUNT_MISMATCH" };
+  if (culqiAmountToCents(charge.amount) !== row.amountCents) return { kind: "REJECTED", reason: "CHARGE_AMOUNT_MISMATCH" };
   if (charge.currency_code !== row.currency) return { kind: "REJECTED", reason: "CHARGE_CURRENCY_MISMATCH" };
   if (charge.paid === true && outcome === CULQI_CHARGE_SUCCESS_CODE) return { kind: "PAID" };
   return { kind: "REJECTED", reason: "CHARGE_NOT_CONFIRMED" };

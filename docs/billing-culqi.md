@@ -148,14 +148,16 @@ pnpm --filter @emailbot/api culqi:sync-plans --apply
 
 - Sin `--apply` es solo dry-run.
 - Por cada precio activo (BÁSICO / PRO / BUSINESS × mensual / anual):
-  - crea el plan con `amount` en céntimos, `currency` `PEN`, `interval_unit_time` (3 mensual, 4 anual) e `interval_count: 0`;
+  - crea el plan con `amount` en céntimos, `currency` `PEN`, `interval_unit_time` (3 mensual, 4 anual), `interval_count: 1` (un cobro cada mes / año; nunca 0) e `initial_cycles` con la misma unidad y sin cargo inicial;
+  - la descripción solo lleva letras, números y espacios (`culqiSafeDescription`): el sandbox rechazó una con paréntesis y punto (`400 parameter_error`);
   - guarda el id en `billing_provider_plans`.
 - Si el mapeo ya existe, verifica el plan contra el catálogo.
 - Se niega a escribir en una BD no local salvo con `--allow-remote-database`.
 - Solo usa llaves `sk_test_`.
 
-En cada checkout, la API vuelve a leer el plan de Culqi y rechaza (`503 BILLING_PLAN_MISMATCH`) si el importe, la
-moneda o el intervalo no coinciden con el catálogo. Los ids de plan nunca llegan al navegador.
+En cada checkout, la API vuelve a leer el plan de Culqi y rechaza (`503 BILLING_PLAN_MISMATCH`) si el id, el entorno, el
+importe, la moneda, el intervalo o `interval_count` (debe ser 1) no coinciden con el catálogo. La comparación es la
+misma en la API y en el worker (`culqiPlanMismatch`, `packages/shared/src/culqi.ts`). Los ids de plan nunca llegan al navegador.
 
 ## Checkout
 
@@ -244,14 +246,20 @@ una función de Culqi).
 
 ### Verificación de suscripción y cargo
 
+**Importes.** Culqi expresa `amount` (planes y cargos) en **céntimos**, pero puede devolverlo con ruido de coma
+flotante: el plan de S/19.90 vuelve como `1989.9999999999998` (verificado en sandbox). Toda comparación con el catálogo
+pasa por `culqiAmountToCents` (`Math.round`, entero de céntimos). Un valor no numérico, infinito, negativo o con una
+fracción real de céntimo se rechaza (`*_AMOUNT_MISMATCH`), nunca se redondea a ciegas.
+
 **Suscripción (F2, `verifyCulqiSubscription`).** Antes de aplicar nada se comprueba:
 - `id` = el guardado y del mismo entorno (`sxn_test_…` en sandbox);
 - `plan_id` = el plan mapeado del checkout;
-- plan de Culqi (`GET` plan): importe = catálogo, `PEN`, intervalo = periodo;
+- plan de Culqi (`GET` plan): mismo id y entorno, importe = catálogo, `PEN`, intervalo = periodo, `interval_count = 1`
+  (si falta, se rechaza);
 - `metadata.organization_id` y `metadata.billing_subscription_id`, si vienen, = los de EmailBot.
 
 Si algo no coincide: no se activa, el evento queda `IGNORED` con `REJECTED:<motivo>` (p. ej. `PLAN_MISMATCH`,
-`PLAN_AMOUNT_MISMATCH`, `ORGANIZATION_MISMATCH`) y se registra en el log.
+`PLAN_AMOUNT_MISMATCH`, `PLAN_INTERVAL_COUNT_MISMATCH`, `ORGANIZATION_MISMATCH`) y se registra en el log.
 
 **Cargo (F1, `verifyCulqiCharge`).** Candidatos: los `chr_…` del evento y de `periods[].charges[]` de la suscripción.
 Cada uno se lee con `GET /v2/charges/{id}`:
@@ -355,7 +363,7 @@ Nada en `connect-src`: la tarjeta y el token viajan dentro del iframe de Culqi. 
 | Forma de `data` por tipo de evento | Worker | Búsqueda de ids por prefijo documentado y relectura de la suscripción |
 | Si el estado 3 «Activa» implica primer cobro hecho | Activación | Ya no importa: solo activa un cargo verificado con `GET /v2/charges/{id}`. Confirmar en sandbox que `periods[].charges[]` o el evento traen el `chr_` |
 | Estado 8 (aceptado por los SDK, no documentado) | Mapper | Sin cambio de estado; se registra |
-| Semántica de `interval_count` («si envía 0 se cobrará de forma indefinida») | Planes | Se envía 0. Confirmar en el plan creado (`GET`) y en la primera renovación |
+| Semántica de `interval_count` («si envía 0 se cobrará de forma indefinida») | Planes | Verificado en sandbox: se envía y Culqi registra `interval_count: 1`, `interval_unit_time: 3` y los mismos `initial_cycles`. Falta confirmar la primera renovación |
 | Unidades de `next_billing_date` (los ejemplos mezclan segundos y ms) | Periodo | Se aceptan ambos |
 | Respuesta al crear un cliente con email repetido | Checkout | Si Culqi lo rechaza, se busca el cliente por email y se reutiliza |
 | Si las tarjetas de prueba piden 3DS (`action_code: REVIEW`) | Checkout | Se responde `THREE_DS_REQUIRED`. Culqi3DS no está integrado |

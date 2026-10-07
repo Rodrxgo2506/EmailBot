@@ -75,7 +75,7 @@ const BODY = {
 function culqiFake(overrides: Record<string, { status: number; body: unknown }> = {}) {
   const calls: Array<{ key: string; body: unknown; authorization: string | null }> = [];
   const defaults: Record<string, { status: number; body: unknown }> = {
-    "GET /v2/recurrent/plans/pln_test_PROMONTHLY": { status: 200, body: { id: "pln_test_PROMONTHLY", amount: 3990, currency: "PEN", interval_unit_time: 3 } },
+    "GET /v2/recurrent/plans/pln_test_PROMONTHLY": { status: 200, body: { id: "pln_test_PROMONTHLY", amount: 3990, currency: "PEN", interval_unit_time: 3, interval_count: 1 } },
     "POST /v2/customers": { status: 201, body: { id: "cus_test_CUSTOMER1" } },
     "POST /v2/cards": { status: 201, body: { id: "crd_test_CARD1" } },
     "POST /v2/recurrent/subscriptions/create": { status: 201, body: { id: "sxn_test_SUB1", status: 1 } }
@@ -277,14 +277,46 @@ describe("POST /api/billing/subscriptions", () => {
     expect(culqi.calls).toEqual([]);
   });
 
-  it("the Culqi plan must match the EmailBot price: a mismatch stops before creating anything", async () => {
-    const culqi = culqiFake({ "GET /v2/recurrent/plans/pln_test_PROMONTHLY": { status: 200, body: { id: "pln_test_PROMONTHLY", amount: 100, currency: "PEN", interval_unit_time: 3 } } });
+  const GOOD_PLAN = { id: "pln_test_PROMONTHLY", amount: 3990, currency: "PEN", interval_unit_time: 3, interval_count: 1 };
+
+  it.each([
+    ["amount", { amount: 100 }],
+    ["currency", { currency: "USD" }],
+    ["interval_unit_time (daily)", { interval_unit_time: 1 }],
+    ["interval_unit_time (yearly)", { interval_unit_time: 4 }],
+    ["interval_count 0 (open-ended)", { interval_count: 0 }],
+    ["interval_count 2", { interval_count: 2 }],
+    ["interval_count missing", { interval_count: undefined }],
+    ["plan id", { id: "pln_test_OTHERPLAN" }],
+    ["environment (live plan)", { id: "pln_live_PROMONTHLY" }]
+  ])("the Culqi plan must match the EmailBot price: wrong %s stops before creating anything (503, nothing reserved)", async (_label, change) => {
+    const culqi = culqiFake({ "GET /v2/recurrent/plans/pln_test_PROMONTHLY": { status: 200, body: { ...GOOD_PLAN, ...change } } });
     const ctx = await setup({ fetch: culqi.fetch });
     const response = await subscribe(ctx);
     expect(response.statusCode).toBe(503);
     expect(response.json().error.code).toBe("BILLING_PLAN_MISMATCH");
     expect(culqi.calls.map((call) => call.key)).toEqual(["GET /v2/recurrent/plans/pln_test_PROMONTHLY"]);
     expect(ctx.billing.createPending).not.toHaveBeenCalled();
+    expect(ctx.queue.enqueueEmailEvent).not.toHaveBeenCalled();
+  });
+
+  it("a Culqi plan that is not found stops the checkout (503)", async () => {
+    const culqi = culqiFake({ "GET /v2/recurrent/plans/pln_test_PROMONTHLY": { status: 404, body: { object: "error" } } });
+    const ctx = await setup({ fetch: culqi.fetch });
+    expect((await subscribe(ctx)).json().error.code).toBe("BILLING_PLAN_MISMATCH");
+    expect(ctx.billing.createPending).not.toHaveBeenCalled();
+  });
+
+  it("a Culqi amount with float noise (S/39.90 returned as 3989.9999999999995 céntimos) is the catalog price: accepted", async () => {
+    const culqi = culqiFake({ "GET /v2/recurrent/plans/pln_test_PROMONTHLY": { status: 200, body: { ...GOOD_PLAN, amount: 3989.9999999999995 } } });
+    const ctx = await setup({ fetch: culqi.fetch });
+    expect((await subscribe(ctx)).statusCode).toBe(202);
+  });
+
+  it("the plan with interval_count 1 and the catalog price is accepted", async () => {
+    const culqi = culqiFake({ "GET /v2/recurrent/plans/pln_test_PROMONTHLY": { status: 200, body: GOOD_PLAN } });
+    const ctx = await setup({ fetch: culqi.fetch });
+    expect((await subscribe(ctx)).statusCode).toBe(202);
   });
 
   it("declined card: 402 PAYMENT_DECLINED, the checkout is marked FAILED, no subscription is created", async () => {

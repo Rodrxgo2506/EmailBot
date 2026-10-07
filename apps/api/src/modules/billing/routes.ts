@@ -1,6 +1,6 @@
 import {
-  CULQI_INTERVAL_UNIT,
   CulqiApiError,
+  culqiPlanMismatch,
   createCulqiClient,
   culqiEnvironment,
   culqiEventJobId,
@@ -123,13 +123,11 @@ export function billingRoutes(deps: AppDeps) {
         const culqiPlan = await culqi.getPlan(externalPlanId).catch((error: unknown) => {
           throw toCulqiError(request, error, "getPlan");
         });
-        if (
-          !culqiPlan ||
-          Number(culqiPlan.amount) !== price.amountCents ||
-          culqiPlan.currency !== price.currency ||
-          Number(culqiPlan.interval_unit_time) !== CULQI_INTERVAL_UNIT[price.billingPeriod]
-        ) {
-          request.log.error({ event: "billing.culqi.plan_mismatch", plan: price.plan, billingPeriod: price.billingPeriod, externalPlanId }, "Culqi plan does not match the EmailBot price");
+        const planMismatch = culqiPlan
+          ? culqiPlanMismatch(culqiPlan, { planId: externalPlanId, environment, amountCents: price.amountCents, currency: price.currency, billingPeriod: price.billingPeriod })
+          : "PLAN_NOT_FOUND";
+        if (planMismatch) {
+          request.log.error({ event: "billing.culqi.plan_mismatch", reason: planMismatch, plan: price.plan, billingPeriod: price.billingPeriod, externalPlanId }, "Culqi plan does not match the EmailBot price");
           throw serviceUnavailable("This plan cannot be paid by card yet", "BILLING_PLAN_MISMATCH");
         }
 

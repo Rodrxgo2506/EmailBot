@@ -61,6 +61,51 @@ export const CULQI_ID_PATTERNS = {
 /** Culqi interval_unit_time: 1 daily, 2 weekly, 3 monthly, 4 yearly, 5 quarterly, 6 half-yearly. */
 export const CULQI_INTERVAL_UNIT = { MONTHLY: 3, YEARLY: 4 } as const;
 
+/**
+ * Culqi amounts (plans and charges) are in CÉNTIMOS ("S/ 1.00 = 100"), but may come back as floats with binary
+ * representation noise: the S/19.90 plan is returned as 1989.9999999999998 (sandbox, verified). This is the one
+ * normalization used before comparing with the catalog's integer amount_cents: Math.round to an integer of céntimos.
+ * Returns null (never a guessed number) for data that is not an amount: missing, non-numeric, NaN, Infinity,
+ * negative, or with a real fraction of a céntimo (e.g. 1989.5, which is not representation noise).
+ */
+export function culqiAmountToCents(amount: unknown): number | null {
+  const value = typeof amount === "number" ? amount : typeof amount === "string" && amount.trim() !== "" ? Number(amount) : Number.NaN;
+  if (!Number.isFinite(value) || value < 0) return null;
+  const cents = Math.round(value);
+  // Float noise is ~1e-12 for these magnitudes; anything larger is a real fractional value: refused, not rounded away.
+  if (Math.abs(value - cents) > 1e-6) return null;
+  return cents;
+}
+
+/** Every EmailBot plan charges once per unit (month / year): interval_count 1, verified in the sandbox. Never 0. */
+export const CULQI_PLAN_INTERVAL_COUNT = 1;
+
+export type CulqiPlanMismatch =
+  | "PLAN_ID_MISMATCH"
+  | "PLAN_ENVIRONMENT_MISMATCH"
+  | "PLAN_AMOUNT_MISMATCH"
+  | "PLAN_CURRENCY_MISMATCH"
+  | "PLAN_INTERVAL_MISMATCH"
+  | "PLAN_INTERVAL_COUNT_MISMATCH";
+
+/**
+ * First difference between a Culqi plan (GET /v2/recurrent/plans/{id}) and the EmailBot price it must charge, or
+ * null when it matches. Shared by the checkout (API) and the activation (worker). A missing interval_count fails
+ * closed (Culqi returns it on GET).
+ */
+export function culqiPlanMismatch(
+  plan: CulqiPlan,
+  expected: { planId: string; environment: CulqiEnvironment; amountCents: number; currency: string; billingPeriod: keyof typeof CULQI_INTERVAL_UNIT }
+): CulqiPlanMismatch | null {
+  if (plan.id !== expected.planId) return "PLAN_ID_MISMATCH";
+  if (culqiEnvironment(plan.id) !== expected.environment) return "PLAN_ENVIRONMENT_MISMATCH";
+  if (culqiAmountToCents(plan.amount) !== expected.amountCents) return "PLAN_AMOUNT_MISMATCH";
+  if (plan.currency !== expected.currency) return "PLAN_CURRENCY_MISMATCH";
+  if (Number(plan.interval_unit_time) !== CULQI_INTERVAL_UNIT[expected.billingPeriod]) return "PLAN_INTERVAL_MISMATCH";
+  if (Number(plan.interval_count) !== CULQI_PLAN_INTERVAL_COUNT) return "PLAN_INTERVAL_COUNT_MISMATCH";
+  return null;
+}
+
 /* ------------------------------------------------------------------ subscription statuses */
 
 /** Culqi subscription status codes (GET /v2/recurrent/subscriptions: 1 Creada, 2 Periodo de prueba, 3 Activa, 4 Cancelada, 5 En cola, 6 Vencida). */
