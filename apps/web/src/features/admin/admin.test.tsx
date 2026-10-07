@@ -90,6 +90,34 @@ const auditEntry: AdminAuditEntry = {
   createdAt: "2026-10-05T09:30:00.000Z"
 };
 
+const SUB = "77777777-7777-4777-8777-777777777777";
+const PRICES = [
+  { id: "p1", plan: "BASIC", planName: "Básico", billingPeriod: "MONTHLY", currency: "PEN", amount: "19.90", amountCents: 1990 },
+  { id: "p2", plan: "BASIC", planName: "Básico", billingPeriod: "YEARLY", currency: "PEN", amount: "199.00", amountCents: 19900 },
+  { id: "p3", plan: "PRO", planName: "Pro", billingPeriod: "MONTHLY", currency: "PEN", amount: "39.90", amountCents: 3990 },
+  { id: "p4", plan: "PRO", planName: "Pro", billingPeriod: "YEARLY", currency: "PEN", amount: "399.00", amountCents: 39900 },
+  { id: "p5", plan: "BUSINESS", planName: "Business", billingPeriod: "MONTHLY", currency: "PEN", amount: "89.90", amountCents: 8990 },
+  { id: "p6", plan: "BUSINESS", planName: "Business", billingPeriod: "YEARLY", currency: "PEN", amount: "899.00", amountCents: 89900 }
+];
+const activeSubscription = {
+  id: SUB,
+  status: "ACTIVE",
+  plan: "PRO",
+  billingPeriod: "MONTHLY",
+  currency: "PEN",
+  listAmount: "39.90",
+  paymentMethod: "YAPE",
+  origin: "ADMIN",
+  startedAt: "2026-10-06T05:00:00.000Z",
+  currentPeriodStart: "2026-10-06T05:00:00.000Z",
+  currentPeriodEnd: "2099-11-06T05:00:00.000Z",
+  canceledAt: null,
+  suspendedAt: null,
+  expiredAt: null,
+  createdAt: "2026-10-06T05:00:00.000Z",
+  updatedAt: "2026-10-06T05:00:00.000Z"
+};
+
 const page = <T,>(items: T[], total = items.length): Paginated<T> => ({ items, page: 1, pageSize: 25, total });
 const logPage = <T,>(items: T[], hasMore = false): OffsetPage<T> => ({ items, page: 1, pageSize: 25, hasMore });
 
@@ -117,7 +145,11 @@ function fakeApi(overrides: Partial<Record<keyof AdminApi, unknown>> = {}) {
       }
     ]),
     activity: vi.fn(async () => logPage([activityItem])),
-    audit: vi.fn(async () => logPage([auditEntry]))
+    audit: vi.fn(async () => logPage([auditEntry])),
+    planPrices: vi.fn(async () => PRICES),
+    subscription: vi.fn(async (): Promise<{ subscriptions: unknown[]; paymentEvents: unknown[] }> => ({ subscriptions: [], paymentEvents: [] })),
+    activateSubscription: vi.fn(async () => ({ subscriptionId: SUB, outcome: "ACTIVATED", organization: detail() })),
+    subscriptionAction: vi.fn(async () => ({ organization: detail() }))
   };
   // Overrides replace mocks with other mocks: keep the mock types for assertions.
   return { ...base, ...overrides } as typeof base;
@@ -336,17 +368,20 @@ describe("organizations table", () => {
     expect(await within(dialog).findByRole("alert")).toHaveTextContent("solo para administradores de la plataforma");
   });
 
-  it("edit plan", async () => {
-    const { api } = renderAdmin("/admin/organizations");
-    await screen.findByRole("table");
-    fireEvent.click(screen.getByRole("button", { name: "Editar plan de Acme" }));
-    const dialog = await screen.findByRole("dialog");
-    fireEvent.change(within(dialog).getByLabelText("Plan"), { target: { value: "BUSINESS" } });
-    fireEvent.click(within(dialog).getByRole("button", { name: "Guardar" }));
-    await waitFor(() => expect(api.updateOrganization).toHaveBeenCalledWith(ORG_A, { plan: "BUSINESS" }));
+  it("Commercial V1.1: the plan is never edited on the organization (it comes from a subscription)", async () => {
+    const { api } = renderAdmin("/admin/organizations", fakeApi({
+      listOrganizations: vi.fn(async () => page([summary(), summary({ id: ORG_B, name: "Beta", slug: "beta", plan: "FREE" }), summary({ id: SUB, name: "Gamma", slug: "gamma", plan: null })]))
+    }));
+    const table = await screen.findByRole("table");
+    expect(within(table).getByText("Free (legado)")).toBeInTheDocument();
+    expect(within(table).getByText("Sin plan")).toBeInTheDocument();
+    // The filter still finds legacy organizations.
+    expect(within(screen.getByLabelText("Plan")).getByRole("option", { name: "Free (legado)" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Editar plan/ })).not.toBeInTheDocument();
+    expect(api.updateOrganization).not.toHaveBeenCalled();
   });
 
-  it("create: validates, sends name, owner e-mail and plan, then opens the new organization", async () => {
+  it("create: validates, sends name and owner e-mail (no plan), then opens the new organization", async () => {
     const { api } = renderAdmin("/admin/organizations");
     await screen.findByRole("table");
     fireEvent.click(screen.getByRole("button", { name: /Nueva organización/ }));
@@ -355,9 +390,10 @@ describe("organizations table", () => {
     expect(await within(dialog).findByRole("alert")).toHaveTextContent("entre 2 y 120");
     fireEvent.change(within(dialog).getByLabelText("Nombre de la empresa"), { target: { value: " Nueva " } });
     fireEvent.change(within(dialog).getByLabelText("Correo del propietario"), { target: { value: "boss@nueva.test" } });
-    fireEvent.change(within(dialog).getByLabelText("Plan"), { target: { value: "PRO" } });
+    expect(within(dialog).queryByLabelText("Plan")).not.toBeInTheDocument();
+    expect(within(dialog).getByText(/Se crea sin plan ni acceso al producto/)).toBeInTheDocument();
     fireEvent.click(within(dialog).getByRole("button", { name: "Crear organización" }));
-    await waitFor(() => expect(api.createOrganization).toHaveBeenCalledWith({ name: "Nueva", ownerEmail: "boss@nueva.test", plan: "PRO" }));
+    await waitFor(() => expect(api.createOrganization).toHaveBeenCalledWith({ name: "Nueva", ownerEmail: "boss@nueva.test" }));
     expect(await screen.findByRole("heading", { name: "Acme" })).toBeInTheDocument();
     expect(api.getOrganization).toHaveBeenCalled();
   });
@@ -443,15 +479,73 @@ describe("organization detail", () => {
     await waitFor(() => expect(api.audit.mock.calls.length).toBeGreaterThan(audits));
   });
 
-  it("a plan change refreshes the activity", async () => {
+  it("a manual payment (transfer) activates the subscription with the list price and Lima dates, then refreshes", async () => {
     const { api } = renderAdmin(`/admin/organizations/${ORG_A}`);
-    fireEvent.click(await screen.findByRole("button", { name: "Editar plan" }));
+    expect(await screen.findByText("Sin suscripción activa. Registra el pago para activarla.")).toBeInTheDocument();
     await waitFor(() => expect(api.activity).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole("button", { name: "Activar suscripción" }));
     const dialog = await screen.findByRole("dialog");
-    fireEvent.change(within(dialog).getByLabelText("Plan"), { target: { value: "BUSINESS" } });
-    fireEvent.click(within(dialog).getByRole("button", { name: "Guardar" }));
-    await waitFor(() => expect(api.updateOrganization).toHaveBeenCalledWith(ORG_A, { plan: "BUSINESS" }));
-    await waitFor(() => expect(api.activity).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(within(dialog).getByLabelText("Importe pagado (S/)")).toHaveValue("19.90"));
+    expect(within(within(dialog).getByLabelText("Método de pago")).getAllByRole("option").map((option) => option.textContent)).toEqual([
+      "Yape",
+      "Efectivo",
+      "Transferencia",
+      "Otro pago manual"
+    ]);
+    fireEvent.change(within(dialog).getByLabelText("Plan"), { target: { value: "PRO" } });
+    expect(within(dialog).getByLabelText("Importe pagado (S/)")).toHaveValue("39.90");
+    fireEvent.change(within(dialog).getByLabelText("Método de pago"), { target: { value: "TRANSFER" } });
+    fireEvent.change(within(dialog).getByLabelText("Inicio"), { target: { value: "2026-10-06" } });
+    expect(within(dialog).getByLabelText("Vencimiento")).toHaveValue("2026-11-06");
+    fireEvent.change(within(dialog).getByLabelText("Referencia del pago (opcional)"), { target: { value: " BCP-123 " } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Activar suscripción" }));
+    await waitFor(() =>
+      expect(api.activateSubscription).toHaveBeenCalledWith(ORG_A, {
+        plan: "PRO",
+        billingPeriod: "MONTHLY",
+        paymentMethod: "TRANSFER",
+        amount: "39.90",
+        periodStart: "2026-10-06T00:00:00-05:00",
+        periodEnd: "2026-11-06T00:00:00-05:00",
+        reference: "BCP-123"
+      })
+    );
+    // Refreshed after the activation: subscription, audit and activity are fetched again.
+    await waitFor(() => expect(api.subscription.mock.calls.length).toBeGreaterThanOrEqual(2));
+    await waitFor(() => expect(api.activity.mock.calls.length).toBeGreaterThanOrEqual(2));
+  });
+
+  it("an invalid amount is caught before calling the API", async () => {
+    const { api } = renderAdmin(`/admin/organizations/${ORG_A}`);
+    await screen.findByText("Sin suscripción activa. Registra el pago para activarla.");
+    fireEvent.click(screen.getByRole("button", { name: "Activar suscripción" }));
+    const dialog = await screen.findByRole("dialog");
+    await waitFor(() => expect(within(dialog).getByLabelText("Importe pagado (S/)")).toHaveValue("19.90"));
+    fireEvent.change(within(dialog).getByLabelText("Importe pagado (S/)"), { target: { value: "39,90" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Activar suscripción" }));
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent("Indica el importe pagado");
+    expect(api.activateSubscription).not.toHaveBeenCalled();
+  });
+
+  it("an active subscription is shown with its actions; suspending goes through the API after confirmation", async () => {
+    const api = fakeApi({
+      subscription: vi.fn(async () => ({
+        subscriptions: [activeSubscription],
+        paymentEvents: [
+          { id: "e1", subscriptionId: SUB, eventType: "payment.manual", paymentMethod: "YAPE", amount: "39.90", currency: "PEN", status: "PROCESSED", reference: "yape:OP-9", note: "Pago de octubre", occurredAt: "2026-10-06T15:00:00.000Z", processedAt: "2026-10-06T15:00:00.000Z" }
+        ]
+      }))
+    });
+    renderAdmin(`/admin/organizations/${ORG_A}`, api);
+    expect(await screen.findByText("Pro · Mensual · S/ 39.90")).toBeInTheDocument();
+    expect(screen.getByText("yape:OP-9")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Registrar pago" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Reactivar suscripción" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Suspender suscripción" }));
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText(/No se borra ningún dato/)).toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Suspender suscripción" }));
+    await waitFor(() => expect(api.subscriptionAction).toHaveBeenCalledWith(SUB, "suspend", undefined));
   });
 
   it("an unknown organization shows 'Organización no encontrada'", async () => {

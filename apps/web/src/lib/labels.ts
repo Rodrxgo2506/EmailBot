@@ -5,8 +5,14 @@ import type {
   CustomerStatus,
   EmailAccountStatus,
   EmailProvider,
+  OrganizationPlan,
   OrganizationRole,
-  OrganizationStatus
+  OrganizationStatus,
+  BillingPeriod,
+  PaymentMethod,
+  PlanFeatureKey,
+  PlanLimitKey,
+  SubscriptionStatus
 } from "@emailbot/types";
 
 export const ROLE_LABELS: Record<OrganizationRole, string> = {
@@ -105,3 +111,62 @@ export const ORGANIZATION_STATUS_LABELS: Record<OrganizationStatus, string> = {
   SUSPENDED: "Suspendida",
   CANCELLED: "Cancelada"
 };
+
+/** Commercial V1. FREE only exists in organizations created before it (entitled as Básico). EmailBot has no free plan. */
+export const PLAN_LABELS: Record<OrganizationPlan, string> = {
+  FREE: "Free (legado)",
+  BASIC: "Básico",
+  PRO: "Pro",
+  BUSINESS: "Business"
+};
+
+export const PLAN_LIMIT_LABELS: Record<PlanLimitKey, string> = {
+  EMAIL_ACCOUNTS: "Cuentas de correo",
+  RULES: "Reglas",
+  BOTS: "Bots activos",
+  MONTHLY_EMAILS: "Correos este mes",
+  MEMBERS: "Miembros",
+  CUSTOMERS: "Clientes activos",
+  STORAGE_BYTES: "Almacenamiento de adjuntos",
+  RETENTION_DAYS: "Retención de correos"
+};
+
+export const PLAN_FEATURE_LABELS: Record<PlanFeatureKey, string> = {
+  GMAIL: "Gmail",
+  MICROSOFT: "Microsoft (Outlook / 365)",
+  ADVANCED_STATS: "Estadísticas avanzadas",
+  PORTAL: "Portal de clientes",
+  API: "API",
+  PRIORITY_SUPPORT: "Soporte prioritario"
+};
+
+/** organizations.plan is null until a subscription is activated (Commercial V1.1). */
+export function planLabel(plan: OrganizationPlan | null | undefined): string {
+  return plan ? PLAN_LABELS[plan] : "Sin plan";
+}
+
+export const BILLING_PERIOD_LABELS: Record<BillingPeriod, string> = {
+  MONTHLY: "Mensual",
+  YEARLY: "Anual"
+};
+
+export const SUBSCRIPTION_STATUS_LABELS: Record<SubscriptionStatus, string> = {
+  ACTIVE: "Activa",
+  PAST_DUE: "Pago pendiente",
+  SUSPENDED: "Suspendida",
+  CANCELED: "Cancelada",
+  EXPIRED: "Vencida"
+};
+
+export const PAYMENT_METHOD_LABELS: Record<PaymentMethod, string> = {
+  CULQI: "Tarjeta (Culqi)",
+  YAPE: "Yape",
+  CASH: "Efectivo",
+  TRANSFER: "Transferencia",
+  MANUAL: "Otro pago manual"
+};
+
+/** Prices are in PEN and include IGV (commercial decision; no tax logic in the product yet). */
+export function formatPen(amount: string): string {
+  return `S/ ${amount}`;
+}

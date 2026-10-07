@@ -51,6 +51,25 @@ export interface AccountStore {
     tokens: { accessTokenEncrypted: string; refreshTokenEncrypted: string | null; tokenExpiresAt: string | null }
   ): Promise<void>;
   markError(id: string, error: { code: string; message: string; status?: "ERROR" }): Promise<void>;
+  /**
+   * Commercial V1.2: commercial access of organizations (public.organization_access,
+   * the same definition the API and the portal use). An organization missing
+   * from the result has no access (fail closed).
+   */
+  commercialAccess(organizationIds: string[]): Promise<Map<string, CommercialAccess>>;
+}
+
+/** SUBSCRIPTION (ACTIVE, period started and not ended), LEGACY (never subscribed, pre-subscription plan) or NONE. */
+export interface CommercialAccess {
+  allowed: boolean;
+  access: "SUBSCRIPTION" | "LEGACY" | "NONE";
+  subscriptionStatus: "ACTIVE" | "PAST_DUE" | "SUSPENDED" | "CANCELED" | "EXPIRED" | null;
+}
+
+/** Commercial V1.2: periodic expiration (public.expire_due_subscriptions; idempotent). */
+export interface SubscriptionMaintenance {
+  /** How many subscriptions became EXPIRED. */
+  expireDue(): Promise<number>;
 }
 
 export interface OrganizationProcessingSettings {

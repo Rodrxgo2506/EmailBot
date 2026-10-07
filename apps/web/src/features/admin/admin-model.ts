@@ -1,15 +1,11 @@
-import type { AdminActivityItem, AdminAuditEntry, AdminOrganizationSort, OrganizationPlan, OrganizationStatus } from "@emailbot/types";
+import type { AdminActivityItem, AdminAuditEntry, AdminOrganizationSort, OrganizationStatus } from "@emailbot/types";
 import type { AdminOrganizationListParams } from "./admin-api";
 
 export const ADMIN_PAGE_SIZE = 25;
 export const ADMIN_LOG_PAGE_SIZE = 25;
 export const ADMIN_RECENT_ACTIVITY = 8;
 
-export const PLAN_LABELS: Record<OrganizationPlan, string> = {
-  FREE: "Free",
-  PRO: "Pro",
-  BUSINESS: "Business"
-};
+export { PLAN_LABELS } from "@/lib/labels";
 
 export const SORT_LABELS: Record<AdminOrganizationSort, string> = {
   created_desc: "Más recientes",
@@ -107,18 +103,32 @@ const PLATFORM_ACTIONS: Record<string, string> = {
   "organization.plan_changed": "Plan cambiado",
   "organization.suspended": "Organización suspendida",
   "organization.reactivated": "Organización reactivada",
-  "organization.cancelled": "Organización cancelada"
+  "organization.cancelled": "Organización cancelada",
+  // Commercial V1.1
+  "subscription.activated": "Suscripción activada",
+  "subscription.renewed": "Suscripción renovada",
+  "subscription.plan_changed": "Plan de la suscripción cambiado",
+  "subscription.suspended": "Suscripción suspendida",
+  "subscription.reactivated": "Suscripción reactivada",
+  "subscription.past_due": "Suscripción con pago pendiente",
+  "subscription.canceled": "Suscripción cancelada",
+  "subscription.expired": "Suscripción vencida",
+  "payment.recorded": "Pago registrado"
 };
 
 export function platformActionLabel(action: string): string {
   return PLATFORM_ACTIONS[action] ?? action;
 }
 
-/** "from → to" for plan / status changes, the plan and owner id for creations; nothing else is shown. */
+/** "from → to" for status / plan changes, the plan for creations and activations, method and amount for payments; nothing else. */
 export function platformAuditDetail(entry: AdminAuditEntry): string | null {
-  const { from, to, plan } = entry.metadata as { from?: unknown; to?: unknown; plan?: unknown };
+  const { from, to, plan, fromPlan, billingPeriod, paymentMethod, amount } = entry.metadata as Record<string, unknown>;
+  if (typeof fromPlan === "string" && typeof plan === "string") return `${fromPlan} → ${plan}`;
   if (typeof from === "string" && typeof to === "string") return `${from} → ${to}`;
-  if (typeof plan === "string") return `Plan ${plan}`;
+  if (typeof paymentMethod === "string" && (typeof amount === "number" || typeof amount === "string")) {
+    return `${paymentMethod} · S/ ${Number(amount).toFixed(2)}`;
+  }
+  if (typeof plan === "string") return typeof billingPeriod === "string" ? `Plan ${plan} · ${billingPeriod}` : `Plan ${plan}`;
   return null;
 }
 

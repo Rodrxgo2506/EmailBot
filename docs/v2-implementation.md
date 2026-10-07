@@ -19,7 +19,10 @@ explícita por fase.
 | 5.7 | Auditoría de preparación de producción de Gmail push + portal ([runbook](v2-production-rollout.md)) | completada |
 | 6 | Super Admin (`platform_admins`, `/api/admin/*`, consola `/admin`) | completada, en `main` (sin desplegar en producción) |
 | 7 | Calidad y lanzamiento: privacidad y términos V2, realtime del portal, E2E de aislamiento, documentación | completada en la rama `feat/emailbot-f7-quality-launch` (sin merge, sin desplegar) |
-| — | Monetización: planes, límites por plan, pagos | pendiente (requiere decisiones de negocio) |
+| C1 | Comercial V1, fase 1: catálogo BÁSICO / PRO / BUSINESS, precios, entitlements y límites aplicados en el backend ([detalle](commercial-plans.md)) | completada en la rama `feat/commercial-plans-v1` (sin commit, sin desplegar) |
+| C1.1 | Comercial V1, fase 1.1: suscripción obligatoria (sin plan gratuito), `subscriptions` + `payment_events`, núcleo único de activación, pagos manuales del Super Admin | completada en la misma rama (sin commit, sin desplegar) |
+| C1.2 | Comercial V1, fase 1.2: worker y portal bloqueados sin suscripción activa, expiración programada cada 5 minutos | completada en la misma rama (sin commit, sin desplegar) |
+| C2 | Comercial V1, fase 2: pagos con Culqi (checkout, suscripciones, webhooks) | pendiente |
 
 ## Estado en producción
 

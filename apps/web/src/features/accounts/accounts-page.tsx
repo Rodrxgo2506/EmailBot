@@ -10,6 +10,7 @@ import { getErrorMessage } from "@/lib/errors";
 import { ACCOUNT_ERROR_LABELS, ACCOUNT_STATUS_LABELS, PROVIDER_LABELS } from "@/lib/labels";
 import { formatDate } from "@/lib/utils";
 import { useOrganization } from "@/providers/organization-provider";
+import { usePlanOverview } from "@/features/organization/api";
 import { useEmailAccountMutations, useEmailAccounts, useEmailProviders, type OAuthProviderSlug } from "./api";
 import { ImapDialog } from "./imap-dialog";
 
@@ -26,7 +27,10 @@ const OAUTH_ERRORS: Record<string, string> = {
   invalid_request: "Respuesta inválida del proveedor.",
   forbidden: "Tu rol ya no permite conectar cuentas en esta organización.",
   not_configured: "El proveedor no está configurado en el servidor.",
-  connection_failed: "No se pudo completar la conexión con el proveedor."
+  connection_failed: "No se pudo completar la conexión con el proveedor.",
+  plan_feature: "Tu plan no incluye este proveedor de correo. Microsoft está disponible en los planes Pro y Business.",
+  plan_limit: "Alcanzaste el límite de cuentas de correo de tu plan. Para conectar otra se necesita un plan superior.",
+  subscription_required: "Tu organización no tiene una suscripción activa. Contrata o renueva un plan para conectar cuentas."
 };
 
 const PROVIDER_SLUG: Record<"GMAIL" | "MICROSOFT", OAuthProviderSlug> = { GMAIL: "gmail", MICROSOFT: "microsoft" };
@@ -138,6 +142,11 @@ export function AccountsPage() {
   const canManage = can("email-accounts:manage");
   const accounts = useEmailAccounts();
   const providers = useEmailProviders();
+  // Commercial V1 / V1.1: connecting needs an active subscription and Microsoft needs PRO or BUSINESS
+  // (the API refuses both anyway; an unknown plan lets the API decide).
+  const plan = usePlanOverview();
+  const noSubscription = plan.data?.entitlements?.access === "NONE";
+  const microsoftInPlan = noSubscription || (plan.data?.entitlements?.features?.MICROSOFT ?? true);
   const { startOAuth, disconnect, remove } = useEmailAccountMutations();
   const [searchParams, setSearchParams] = useSearchParams();
   const [imapOpen, setImapOpen] = useState(false);
@@ -177,16 +186,31 @@ export function AccountsPage() {
               <ErrorMessage error={new Error(getErrorMessage(providers.error))} />
             ) : (
               <>
+                {noSubscription ? (
+                  <p role="status" className="w-full text-sm text-muted-foreground">
+                    Tu organización no tiene una suscripción activa. EmailBot es un servicio de pago: contrata o renueva un plan para conectar cuentas.
+                  </p>
+                ) : null}
                 {/* Only what the server can connect right now (GET /api/email-accounts/providers). */}
                 {providers.data.GMAIL ? (
-                  <Button onClick={() => connect("gmail")} disabled={startOAuth.isPending}>
+                  <Button onClick={() => connect("gmail")} disabled={startOAuth.isPending || noSubscription}>
                     <Mailbox /> Conectar Gmail
                   </Button>
                 ) : null}
-                {providers.data.MICROSOFT ? (
-                  <Button onClick={() => connect("microsoft")} disabled={startOAuth.isPending}>
+                {providers.data.MICROSOFT && microsoftInPlan ? (
+                  <Button onClick={() => connect("microsoft")} disabled={startOAuth.isPending || noSubscription}>
                     <Mailbox /> Conectar Microsoft / Outlook
                   </Button>
+                ) : null}
+                {providers.data.MICROSOFT && !microsoftInPlan ? (
+                  <div className="flex items-center gap-2">
+                    <Button variant="outline" disabled aria-describedby="microsoft-plan-hint">
+                      <Mailbox /> Conectar Microsoft / Outlook
+                    </Button>
+                    <span id="microsoft-plan-hint" className="text-sm text-muted-foreground">
+                      Disponible en los planes Pro y Business.
+                    </span>
+                  </div>
                 ) : null}
                 {providers.data.IMAP ? (
                   <Button variant="outline" onClick={() => setImapOpen(true)}>

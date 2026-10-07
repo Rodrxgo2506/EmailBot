@@ -26,6 +26,7 @@ let sequence = 0;
 const hex = (label: string) => createHash("sha256").update(`${label}-${++sequence}`).digest("hex");
 
 const ADMIN_FUNCTIONS = [
+  "admin.activate_subscription",
   "admin.create_organization",
   "admin.get_organization",
   "admin.is_platform_admin",
@@ -36,8 +37,12 @@ const ADMIN_FUNCTIONS = [
   "admin.list_email_accounts",
   "admin.list_members",
   "admin.list_organizations",
+  "admin.list_payment_events",
+  "admin.list_plan_prices",
+  "admin.list_subscriptions",
   "admin.platform_stats",
-  "admin.update_organization"
+  "admin.update_organization",
+  "admin.update_subscription_status"
 ];
 
 /** Every guarded admin.* call with harmless arguments for a given actor. */
@@ -45,7 +50,18 @@ const guardedCalls = (orgId: string): Array<[string, (actor: string) => [string,
   ["platform_stats", (actor) => ["select admin.platform_stats($1)", [actor]]],
   ["list_organizations", (actor) => ["select * from admin.list_organizations($1, null, null, null, null, 25, 0)", [actor]]],
   ["get_organization", (actor) => ["select * from admin.get_organization($1, $2)", [actor, orgId]]],
-  ["create_organization", (actor) => ["select admin.create_organization($1, 'Nueva', 'nueva', 'FREE', $1, null)", [actor]]],
+  ["create_organization", (actor) => ["select admin.create_organization($1, 'Nueva', 'nueva', null, $1, null)", [actor]]],
+  ["list_plan_prices", (actor) => ["select * from admin.list_plan_prices($1)", [actor]]],
+  ["list_subscriptions", (actor) => ["select * from admin.list_subscriptions($1, $2)", [actor, orgId]]],
+  ["list_payment_events", (actor) => ["select * from admin.list_payment_events($1, $2, 25)", [actor, orgId]]],
+  [
+    "activate_subscription",
+    (actor) => [
+      "select * from admin.activate_subscription($1, $2, 'PRO', 'MONTHLY', 'YAPE', 39.90, now(), now() + interval '1 month', null, null, null)",
+      [actor, orgId]
+    ]
+  ],
+  ["update_subscription_status", (actor) => ["select * from admin.update_subscription_status($1, gen_random_uuid(), 'SUSPEND', null, null)", [actor]]],
   ["update_organization", (actor) => ["select * from admin.update_organization($1, $2, null, 'SUSPENDED', null)", [actor, orgId]]],
   ["list_members", (actor) => ["select * from admin.list_members($1, $2)", [actor, orgId]]],
   ["list_bots", (actor) => ["select * from admin.list_bots($1, $2)", [actor, orgId]]],
@@ -302,7 +318,8 @@ describe("organizations list", () => {
     expect(a).toMatchObject({
       name: "Org A",
       slug: "org-a",
-      plan: "FREE",
+      // Commercial V1.1: the plan of its ACTIVE subscription (seeded PRO).
+      plan: "PRO",
       status: "ACTIVE",
       owner_user_id: f.a.ownerId,
       owner_email: "owner@a.test"
@@ -326,15 +343,25 @@ describe("organizations list", () => {
     expect(await listOrganizations({ search: "no-match" })).toEqual([]);
   });
 
-  it("filters by status and plan", async () => {
-    await t.asAdmin((tx) => tx.query("update public.organizations set plan = 'PRO' where id = $1", [f.b.orgId]));
+  it("filters by status and plan (the plan of the active subscription)", async () => {
+    const change = (plan: string) =>
+      asService("select * from admin.activate_subscription($1, $2, $3, 'MONTHLY', 'TRANSFER', 39.90, now(), now() + interval '1 month', null, null, null)", [
+        platformAdmin,
+        f.b.orgId,
+        plan
+      ]);
+    await change("BUSINESS");
     try {
-      expect((await listOrganizations({ plan: "PRO" })).map((row) => row.id)).toEqual([f.b.orgId]);
+      expect((await listOrganizations({ plan: "BUSINESS" })).map((row) => row.id)).toEqual([f.b.orgId]);
+      expect((await listOrganizations({ plan: "PRO" })).map((row) => row.id)).toEqual([f.a.orgId]);
       expect((await listOrganizations({ status: "SUSPENDED" })).map((row) => row.id)).toEqual([]);
-      expect((await listOrganizations({ status: "ACTIVE", plan: "FREE" })).map((row) => row.id)).toContain(f.a.orgId);
+      expect((await listOrganizations({ status: "ACTIVE" })).map((row) => row.id)).toContain(f.a.orgId);
+      expect(await listOrganizations({ plan: "BASIC" })).toEqual([]);
+      expect(await listOrganizations({ plan: "FREE" })).toEqual([]);
     } finally {
-      await t.asAdmin((tx) => tx.query("update public.organizations set plan = 'FREE' where id = $1", [f.b.orgId]));
+      await change("PRO");
     }
+    expect((await listOrganizations({ plan: "PRO" })).map((row) => row.id).sort()).toEqual([f.a.orgId, f.b.orgId].sort());
   });
 
   it("sorts only by the whitelist and paginates with a total", async () => {
@@ -422,9 +449,9 @@ describe("organization detail and metadata", () => {
 });
 
 describe("create organization", () => {
-  it("creates the organization, its OWNER and its settings atomically, and audits it", async () => {
+  it("creates the organization (without a plan), its OWNER and its settings atomically, and audits it", async () => {
     const owner = await t.createUser("new-owner@c.test");
-    const [created] = await asService<{ id: string }>("select admin.create_organization($1, '  Cliente Nuevo  ', 'cliente-nuevo', 'PRO', $2, 'req-1') as id", [
+    const [created] = await asService<{ id: string }>("select admin.create_organization($1, '  Cliente Nuevo  ', 'cliente-nuevo', null, $2, 'req-1') as id", [
       platformAdmin,
       owner
     ]);
@@ -434,9 +461,9 @@ describe("create organization", () => {
       owners: await count(tx, "select 1 from public.organization_members where organization_id = $1 and role = 'OWNER' and user_id = $2", [id, owner]),
       settings: await count(tx, "select 1 from public.organization_settings where organization_id = $1", [id])
     }));
-    expect(state).toEqual({ org: { name: "Cliente Nuevo", plan: "PRO", status: "ACTIVE" }, owners: 1, settings: 1 });
+    expect(state).toEqual({ org: { name: "Cliente Nuevo", plan: null, status: "ACTIVE" }, owners: 1, settings: 1 });
     expect(await platformAudit(id)).toEqual([
-      { action: "organization.created", actor_user_id: platformAdmin, metadata: { plan: "PRO", ownerUserId: owner }, request_id: "req-1" }
+      { action: "organization.created", actor_user_id: platformAdmin, metadata: { ownerUserId: owner }, request_id: "req-1" }
     ]);
     // The new OWNER sees the organization through the normal RLS; the platform admin does not.
     expect(await t.asUser(owner, (tx) => count(tx, "select 1 from public.organizations where id = $1", [id]))).toBe(1);
@@ -444,10 +471,11 @@ describe("create organization", () => {
   });
 
   it.each([
-    ["unknown owner", "select admin.create_organization($1, 'Fallida', 'fallida', 'FREE', '99999999-9999-4999-8999-999999999999', null)", /Owner user does not exist/],
-    ["duplicated slug", "select admin.create_organization($1, 'Fallida', 'org-a', 'FREE', $1, null)", /duplicate key|organizations_slug_key/],
-    ["invalid slug", "select admin.create_organization($1, 'Fallida', 'No Valido', 'FREE', $1, null)", /Invalid organization slug/],
-    ["name too short", "select admin.create_organization($1, 'x', 'fallida', 'FREE', $1, null)", /between 2 and 120/]
+    ["unknown owner", "select admin.create_organization($1, 'Fallida', 'fallida', null, '99999999-9999-4999-8999-999999999999', null)", /Owner user does not exist/],
+    ["duplicated slug", "select admin.create_organization($1, 'Fallida', 'org-a', null, $1, null)", /duplicate key|organizations_slug_key/],
+    ["invalid slug", "select admin.create_organization($1, 'Fallida', 'No Valido', null, $1, null)", /Invalid organization slug/],
+    ["name too short", "select admin.create_organization($1, 'x', 'fallida', null, $1, null)", /between 2 and 120/],
+    ["a plan (it comes from a subscription)", "select admin.create_organization($1, 'Fallida', 'fallida', 'PRO', $1, null)", /comes from a subscription/]
   ])("leaves nothing behind on failure: %s", async (_label, sql, error) => {
     const before = await t.asAdmin((tx) => count(tx, "select 1 from public.organizations"));
     const auditBefore = await t.asAdmin((tx) => count(tx, "select 1 from public.platform_audit_logs"));
@@ -473,16 +501,13 @@ describe("update organization (plan, status) and suspension", () => {
     }));
   }
 
-  it("changes the plan with one audit record", async () => {
-    const [row] = await update(f.b.orgId, "BUSINESS", null, "req-plan");
-    expect(row).toMatchObject({ id: f.b.orgId, plan: "BUSINESS", status: "ACTIVE" });
-    const audit = await platformAudit(f.b.orgId);
-    expect(audit.at(-1)).toEqual({
-      action: "organization.plan_changed",
-      actor_user_id: platformAdmin,
-      metadata: { from: "FREE", to: "BUSINESS" },
-      request_id: "req-plan"
-    });
+  it("refuses a plan: it only changes through a subscription (no audit, row untouched)", async () => {
+    const before = await platformAudit(f.b.orgId);
+    for (const plan of ["BUSINESS", "FREE"]) {
+      await expect(update(f.b.orgId, plan, null, "req-plan")).rejects.toThrow(/comes from a subscription/);
+    }
+    expect(await t.asAdmin((tx) => one<{ plan: string | null }>(tx, "select plan from public.organizations where id = $1", [f.b.orgId]))).toEqual({ plan: "PRO" });
+    expect(await platformAudit(f.b.orgId)).toEqual(before);
   });
 
   it("an unchanged value writes no audit record and does not touch the row", async () => {
@@ -490,8 +515,8 @@ describe("update organization (plan, status) and suspension", () => {
     const { updated_at: updatedBefore } = await t.asAdmin((tx) =>
       one<{ updated_at: string }>(tx, "select updated_at from public.organizations where id = $1", [f.b.orgId])
     );
-    const [row] = await update(f.b.orgId, "BUSINESS", "ACTIVE");
-    expect(row).toMatchObject({ plan: "BUSINESS", status: "ACTIVE" });
+    const [row] = await update(f.b.orgId, null, "ACTIVE");
+    expect(row).toMatchObject({ status: "ACTIVE" });
     expect(String(row?.updated_at)).toBe(String(updatedBefore));
     expect(await platformAudit(f.b.orgId)).toEqual(before);
   });
@@ -565,9 +590,10 @@ describe("platform audit", () => {
   it("survives the deletion of the acting admin (actor anonymized, record kept)", async () => {
     const temporary = await t.createUser("temporary-admin@platform.test");
     await t.asAdmin((tx) => tx.query("insert into public.platform_admins (user_id) values ($1)", [temporary]));
-    await t.asService((tx) => tx.query("select * from admin.update_organization($1, $2, 'PRO', null, null)", [temporary, f.b.orgId]));
+    await t.asService((tx) => tx.query("select * from admin.update_organization($1, $2, null, 'SUSPENDED', null)", [temporary, f.b.orgId]));
+    await t.asService((tx) => tx.query("select * from admin.update_organization($1, $2, null, 'ACTIVE', null)", [temporary, f.b.orgId]));
     await t.asAdmin((tx) => tx.query("delete from auth.users where id = $1", [temporary]));
     const last = (await platformAudit(f.b.orgId)).at(-1);
-    expect(last).toMatchObject({ action: "organization.plan_changed", actor_user_id: null, metadata: { from: "BUSINESS", to: "PRO" } });
+    expect(last).toMatchObject({ action: "organization.reactivated", actor_user_id: null, metadata: { from: "SUSPENDED", to: "ACTIVE" } });
   });
 });

@@ -1,8 +1,9 @@
 // @vitest-environment jsdom
 import type { EmailAccount, EmailProviderAvailability, Organization } from "@emailbot/types";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, within } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
+import { toast } from "sonner";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "@/lib/api-client";
 import { OrganizationContext, type OrganizationContextValue } from "@/providers/organization-provider";
@@ -48,11 +49,33 @@ const account = (overrides: Partial<EmailAccount>): EmailAccount => ({
 
 let providers: EmailProviderAvailability | Error;
 let accounts: EmailAccount[];
+/** Commercial V1: does the organization's plan include Microsoft (PRO / BUSINESS)? */
+let microsoftInPlan: boolean;
+/** Commercial V1.1: does the organization have an active subscription? */
+let subscribed: boolean;
+
+const planOverview = () => ({
+  entitlements: {
+    plan: subscribed ? (microsoftInPlan ? "PRO" : "BASIC") : null,
+    effectivePlan: subscribed ? (microsoftInPlan ? "PRO" : "BASIC") : null,
+    access: subscribed ? "SUBSCRIPTION" : "NONE",
+    subscriptionStatus: subscribed ? "ACTIVE" : null,
+    limits: {},
+    features: subscribed
+      ? { GMAIL: true, MICROSOFT: microsoftInPlan, ADVANCED_STATS: microsoftInPlan, PORTAL: microsoftInPlan, API: false, PRIORITY_SUPPORT: microsoftInPlan }
+      : { GMAIL: false, MICROSOFT: false, ADVANCED_STATS: false, PORTAL: false, API: false, PRIORITY_SUPPORT: false }
+  },
+  usage: {},
+  subscription: null
+});
 
 beforeEach(() => {
   get.mockReset();
   accounts = [];
+  microsoftInPlan = true;
+  subscribed = true;
   get.mockImplementation(async (path: string) => {
+    if (path === "/api/organizations/current/plan") return planOverview();
     if (path === "/api/email-accounts/providers") {
       if (providers instanceof Error) throw providers;
       return { providers };
@@ -62,7 +85,7 @@ beforeEach(() => {
   });
 });
 
-function renderPage(role: OrganizationContextValue["role"] = "OWNER") {
+function renderPage(role: OrganizationContextValue["role"] = "OWNER", entry = "/accounts") {
   const context: OrganizationContextValue = {
     me: undefined,
     loading: false,
@@ -79,7 +102,7 @@ function renderPage(role: OrganizationContextValue["role"] = "OWNER") {
   render(
     <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
       <OrganizationContext.Provider value={context}>
-        <MemoryRouter initialEntries={["/accounts"]}>
+        <MemoryRouter initialEntries={[entry]}>
           <AccountsPage />
         </MemoryRouter>
       </OrganizationContext.Provider>
@@ -124,6 +147,52 @@ describe("connect options follow the server's provider availability", () => {
     renderPage("VIEWER");
     expect(await screen.findByText("No hay cuentas conectadas")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Conectar/ })).not.toBeInTheDocument();
+  });
+});
+
+describe("Commercial V1: Microsoft needs the PRO or BUSINESS plan", () => {
+  it("BASIC: the Microsoft button is disabled with the reason; Gmail stays available", async () => {
+    providers = { GMAIL: true, MICROSOFT: true, IMAP: false };
+    microsoftInPlan = false;
+    renderPage();
+    expect(await screen.findByText("Disponible en los planes Pro y Business.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Conectar Microsoft \/ Outlook/ })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /Conectar Gmail/ })).toBeEnabled();
+  });
+
+  it("PRO / BUSINESS: Microsoft can be connected", async () => {
+    providers = { GMAIL: true, MICROSOFT: true, IMAP: false };
+    renderPage();
+    expect(await screen.findByRole("button", { name: /Conectar Microsoft \/ Outlook/ })).toBeEnabled();
+    expect(screen.queryByText("Disponible en los planes Pro y Business.")).not.toBeInTheDocument();
+  });
+
+  it.each([
+    ["plan_feature", "Tu plan no incluye este proveedor de correo. Microsoft está disponible en los planes Pro y Business."],
+    ["plan_limit", "Alcanzaste el límite de cuentas de correo de tu plan. Para conectar otra se necesita un plan superior."]
+  ])("the OAuth callback refusal %s is explained", async (reason, message) => {
+    providers = { GMAIL: true, MICROSOFT: true, IMAP: false };
+    renderPage("OWNER", `/accounts?oauth=error&reason=${reason}`);
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith(message));
+  });
+});
+
+describe("Commercial V1.1: no active subscription, no connection (EmailBot is paid)", () => {
+  it("explains it and disables every connect button", async () => {
+    providers = { GMAIL: true, MICROSOFT: true, IMAP: false };
+    subscribed = false;
+    renderPage();
+    expect(await screen.findByText(/no tiene una suscripción activa/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Conectar Gmail/ })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /Conectar Microsoft \/ Outlook/ })).toBeDisabled();
+  });
+
+  it("the OAuth callback refusal subscription_required is explained", async () => {
+    providers = { GMAIL: true, MICROSOFT: true, IMAP: false };
+    renderPage("OWNER", "/accounts?oauth=error&reason=subscription_required");
+    await waitFor(() =>
+      expect(toast.error).toHaveBeenCalledWith("Tu organización no tiene una suscripción activa. Contrata o renueva un plan para conectar cuentas.")
+    );
   });
 });
 

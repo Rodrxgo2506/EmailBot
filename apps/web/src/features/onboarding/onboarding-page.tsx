@@ -45,7 +45,7 @@ export function OnboardingPage() {
   return (
     <AuthLayout
       title="Crea tu organización"
-      description="Una organización agrupa tus cuentas de correo, reglas y miembros."
+      description="Una organización agrupa tus cuentas de correo, reglas y miembros. EmailBot es un servicio de pago: para usarla necesitará una suscripción activa."
       footer={
         memberships.length > 0 ? (
           <Button variant="link" onClick={() => navigate("/")}>

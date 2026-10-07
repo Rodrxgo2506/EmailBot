@@ -1,4 +1,5 @@
 export * from "./enums.js";
+export * from "./plans.js";
 export * from "./permissions.js";
 export * from "./email.js";
 export * from "./entities.js";

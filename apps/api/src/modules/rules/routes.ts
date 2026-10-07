@@ -21,6 +21,7 @@ import { RATE_LIMITS } from "../../lib/rate-limits.js";
 import { compact, parseWith } from "../../lib/validation.js";
 import { getAuth } from "../../plugins/auth.js";
 import { getOrganization, requirePermission } from "../../plugins/organization.js";
+import { requestEntitlements } from "../plans/entitlements.js";
 import type { EmailRule, RuleWrite } from "../../repositories/types.js";
 
 /** A rule may only reference a category of the same organization. */
@@ -109,6 +110,7 @@ export async function ruleRoutes(app: FastifyInstance) {
     const input = parseWith(ruleCreateSchema, request.body);
     await assertCategoryInOrganization(request, input.categoryId);
     await assertBotInOrganization(request, input.botId);
+    await requestEntitlements(request).assertWithinLimit("RULES");
 
     const rule = await auth.repos.rules.create(getOrganization(request).id, auth.user.id, compact(input) as RuleWrite & {
       name: string;

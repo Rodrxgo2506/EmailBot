@@ -7,6 +7,7 @@ import { emailDeliveryRepository } from "./delivery-repositories.js";
 import { botCustomerRepository, customerIdentifierRepository, customerRepository } from "./customer-repositories.js";
 import { attachmentRepository, auditRepository, emailRepository } from "./email-repositories.js";
 import { memberRepository, membershipRepository, organizationRepository } from "./organization-repositories.js";
+import { planRepository } from "./plan-repositories.js";
 import { privilegedOperations } from "./privileged.js";
 import { categoryRepository, emailAccountRepository, ruleRepository } from "./resource-repositories.js";
 
@@ -58,7 +59,8 @@ export function createSupabaseRepositories(db: SupabaseClient): Repositories {
     rules: ruleRepository(db),
     emails: emailRepository(db),
     attachments: attachmentRepository(db),
-    audit: auditRepository(db)
+    audit: auditRepository(db),
+    plans: planRepository(db)
   };
 }
 

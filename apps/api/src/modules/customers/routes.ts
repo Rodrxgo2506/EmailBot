@@ -18,6 +18,7 @@ import { parseWith } from "../../lib/validation.js";
 import { getAuth } from "../../plugins/auth.js";
 import { getOrganization, requirePermission } from "../../plugins/organization.js";
 import type { CustomerIdentifierWrite, CustomerWrite } from "../../repositories/types.js";
+import { requestEntitlements } from "../plans/entitlements.js";
 
 /*
  * Customers, identifiers and bot assignments (EmailBot V2, phase 2).
@@ -85,6 +86,8 @@ export async function customerRoutes(app: FastifyInstance) {
     const insert: CustomerWrite & { displayName: string } = { displayName: input.displayName, status: input.status };
     if (input.externalRef !== undefined) insert.externalRef = input.externalRef;
     if (input.notes !== undefined) insert.notes = input.notes;
+    // Commercial V1: the CUSTOMERS limit counts ACTIVE customers (customers are suspended, never deleted).
+    if (insert.status === "ACTIVE") await requestEntitlements(request).assertWithinLimit("CUSTOMERS");
 
     const customer = await auth.repos.customers.create(getOrganization(request).id, auth.user.id, insert);
     await app.audit(request, {
@@ -108,6 +111,7 @@ export async function customerRoutes(app: FastifyInstance) {
     if (input.status !== undefined) patch.status = input.status;
     if (input.externalRef !== undefined) patch.externalRef = input.externalRef;
     if (input.notes !== undefined) patch.notes = input.notes;
+    if (before.status !== "ACTIVE" && patch.status === "ACTIVE") await requestEntitlements(request).assertWithinLimit("CUSTOMERS");
 
     const customer = await auth.repos.customers.update(organizationId, id, patch);
     if (!customer) throw notFound("Customer");

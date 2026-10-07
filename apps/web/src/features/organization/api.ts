@@ -3,6 +3,7 @@ import type {
   AuditLogEntry,
   Organization,
   OrganizationMember,
+  OrganizationPlanOverview,
   OrganizationRole,
   OrganizationSettings,
   Paginated
@@ -28,6 +29,16 @@ export function useCurrentOrganization() {
     queryKey: queryKeys.current(organizationId),
     queryFn: () => api.get<CurrentOrganization>("/api/organizations/current"),
     staleTime: 60_000
+  });
+}
+
+/** Commercial V1: plan, entitlements and usage of the active organization (every member). */
+export function usePlanOverview() {
+  const organizationId = useOrganizationId();
+  return useQuery({
+    queryKey: queryKeys.plan(organizationId),
+    queryFn: () => api.get<OrganizationPlanOverview>("/api/organizations/current/plan"),
+    staleTime: 30_000
   });
 }
 

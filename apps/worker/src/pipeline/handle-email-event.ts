@@ -17,7 +17,8 @@ import { ProviderHttpError } from "../providers/http.js";
 import type { MicrosoftSubscriptionClient } from "../providers/microsoft/subscriptions.js";
 import type { ProviderRegistry } from "../providers/registry.js";
 import { ProviderAuthError, ProviderTransientError, type ProviderContext, type WorkerAccount } from "../providers/types.js";
-import type { AccountStore, AuditRecorder, EmailStore, JobProducer, Logger, SyncLock } from "./ports.js";
+import { hasCommercialAccess, withCommercialAccess } from "./commercial-access.js";
+import type { AccountStore, AuditRecorder, EmailStore, JobProducer, Logger, SubscriptionMaintenance, SyncLock } from "./ports.js";
 import { AttachmentsPendingError, type ProcessEmailOutcome } from "./process-email.js";
 
 /*
@@ -36,6 +37,11 @@ import { AttachmentsPendingError, type ProcessEmailOutcome } from "./process-ema
  * authority: a Gmail historyId or a Graph resourceData.id is only a trigger,
  * the stored cursor (history id / delta link) decides.
  * Polling is the recovery mechanism, not the primary ingestion.
+ *
+ * Commercial V1.2: every path also requires commercial access (an ACTIVE
+ * subscription inside its period, or legacy access), checked in the database
+ * right before the operation (see commercial-access.ts). Without it nothing
+ * is synced, processed or (re)subscribed; nothing is deleted.
  */
 
 export interface HandleEventDeps {
@@ -58,6 +64,8 @@ export interface HandleEventDeps {
   microsoftPush?: { notificationUrl: string; lifecycleNotificationUrl: string } | null;
   /** Graph /subscriptions client (required with microsoftPush). */
   microsoftSubscriptions?: MicrosoftSubscriptionClient;
+  /** Commercial V1.2: periodic expiration of subscriptions (EXPIRE_SUBSCRIPTIONS). */
+  subscriptions?: SubscriptionMaintenance;
   now?: () => number;
   logger: Logger;
 }
@@ -68,6 +76,8 @@ export interface HandleEventOutcome {
   enqueued: number;
   /** Messages handled by the pipeline in this run. */
   processed?: number;
+  /** Subscriptions expired by EXPIRE_SUBSCRIPTIONS. */
+  expired?: number;
 }
 
 const POLL_BATCH = 500;
@@ -186,6 +196,16 @@ export async function syncAccount(account: WorkerAccount, deps: HandleEventDeps,
   const empty: SyncResult = { found: 0, processed: 0, skipped: 0, historyGap: false, hasMore: false, cursorAdvanced: false };
   // Inactive account / organization: nothing is listed and the cursor does not move, so no mail is lost or processed.
   if (account.status !== "ACTIVE" || account.organizationStatus !== "ACTIVE") return empty;
+  // Commercial V1.2: same without commercial access (checked now, not when the job was queued);
+  // the cursor stays where it is, so the mailbox resumes from it once the organization pays again.
+  const allowed = await hasCommercialAccess(deps.accounts, deps.logger, {
+    organizationId: account.organizationId,
+    emailAccountId: account.id,
+    provider: account.provider,
+    operation: "sync",
+    jobType: reason
+  });
+  if (!allowed) return empty;
 
   const now = deps.now ?? Date.now;
   const lockToken = deps.lock ? await deps.lock.acquire(account.id, SYNC_LOCK_TTL_MS) : "unlocked";
@@ -268,6 +288,16 @@ export async function ensureWatch(emailAccountId: string, organizationId: string
   const account = await deps.accounts.getAccount(emailAccountId);
   if (!account || account.organizationId !== organizationId) return false;
   if (account.status !== "ACTIVE" || account.organizationStatus !== "ACTIVE") return false;
+  // Commercial V1.2: no push subscription is created or renewed without commercial access. An existing
+  // one is NOT removed: it simply lapses (Gmail 7 days, Graph ~70 h) and RENEW_WATCHES recreates it
+  // once the organization has access again; meanwhile its notifications are ignored (see below).
+  const allowed = await hasCommercialAccess(deps.accounts, deps.logger, {
+    organizationId: account.organizationId,
+    emailAccountId: account.id,
+    provider: account.provider,
+    operation: "watch"
+  });
+  if (!allowed) return false;
   if (account.provider === "MICROSOFT") return ensureMicrosoftSubscription(account, deps);
   if (account.provider !== "GMAIL" || !deps.watchTopic) return false;
 
@@ -412,12 +442,19 @@ async function ensureMicrosoftSubscription(account: WorkerAccount, deps: HandleE
   }
 }
 
-/** The ACTIVE Microsoft account (of an ACTIVE organization) a Graph subscription belongs to. */
-async function microsoftAccountBySubscription(subscriptionId: string, deps: HandleEventDeps): Promise<WorkerAccount | null> {
+/** The ACTIVE Microsoft account (of an ACTIVE organization with commercial access) a Graph subscription belongs to. */
+async function microsoftAccountBySubscription(subscriptionId: string, deps: HandleEventDeps, jobType: string): Promise<WorkerAccount | null> {
   if (!isGraphSubscriptionId(subscriptionId)) return null;
   const account = await deps.accounts.findAccountBySubscription(subscriptionId);
   if (!account || account.provider !== "MICROSOFT" || account.status !== "ACTIVE" || account.organizationStatus !== "ACTIVE") return null;
-  return account;
+  const allowed = await hasCommercialAccess(deps.accounts, deps.logger, {
+    organizationId: account.organizationId,
+    emailAccountId: account.id,
+    provider: account.provider,
+    operation: "push_notification",
+    jobType
+  });
+  return allowed ? account : null;
 }
 
 export async function handleEmailEvent(job: EmailEventJob, deps: HandleEventDeps): Promise<HandleEventOutcome> {
@@ -425,7 +462,8 @@ export async function handleEmailEvent(job: EmailEventJob, deps: HandleEventDeps
     case "GMAIL_NOTIFICATION": {
       // The push only triggers a sync; the historyId is not trusted (the stored cursor decides).
       // The same mailbox may be connected to several organizations; each has its own rules.
-      const accounts = await deps.accounts.findActiveAccountsByAddress("GMAIL", job.emailAddress);
+      const found = await deps.accounts.findActiveAccountsByAddress("GMAIL", job.emailAddress);
+      const accounts = await withCommercialAccess(found, deps.accounts, deps.logger, "push_notification", job.type);
       for (const account of accounts) await deps.enqueueSync(account, "PUBSUB");
       return { accounts: accounts.length, enqueued: accounts.length };
     }
@@ -433,14 +471,14 @@ export async function handleEmailEvent(job: EmailEventJob, deps: HandleEventDeps
     case "MICROSOFT_NOTIFICATION": {
       // Like a Gmail push: the notification only triggers the account's (coalesced, locked) sync;
       // the delta cursor decides what is new. job.messageId is never processed directly.
-      const account = await microsoftAccountBySubscription(job.subscriptionId, deps);
+      const account = await microsoftAccountBySubscription(job.subscriptionId, deps, job.type);
       if (!account) return { accounts: 0, enqueued: 0 };
       await deps.enqueueSync(account, "GRAPH");
       return { accounts: 1, enqueued: 1 };
     }
 
     case "MICROSOFT_LIFECYCLE": {
-      const account = await microsoftAccountBySubscription(job.subscriptionId, deps);
+      const account = await microsoftAccountBySubscription(job.subscriptionId, deps, job.type);
       if (!account) return { accounts: 0, enqueued: 0 };
       const nowIso = new Date((deps.now ?? Date.now)()).toISOString();
       const resubscribe = () => (deps.enqueueWatch ? deps.enqueueWatch(account) : ensureWatch(account.id, account.organizationId, deps).then(() => undefined));
@@ -489,7 +527,8 @@ export async function handleEmailEvent(job: EmailEventJob, deps: HandleEventDeps
       const providers = [...(deps.watchTopic ? (["GMAIL"] as const) : []), ...(deps.microsoftPush ? (["MICROSOFT"] as const) : [])];
       if (providers.length === 0 || !deps.enqueueWatch) return { accounts: 0, enqueued: 0 };
       const renewBefore = new Date((deps.now ?? Date.now)() + WATCH_RENEW_MARGIN_MS).toISOString();
-      const accounts = await deps.accounts.listAccountsNeedingWatch({ renewBefore, limit: WATCH_RENEW_BATCH, providers: [...providers] });
+      const due = await deps.accounts.listAccountsNeedingWatch({ renewBefore, limit: WATCH_RENEW_BATCH, providers: [...providers] });
+      const accounts = await withCommercialAccess(due, deps.accounts, deps.logger, "renew_watch", job.type);
       for (const account of accounts) await deps.enqueueWatch(account);
       if (accounts.length > 0) deps.logger.info({ accounts: accounts.length, providers }, "push subscription renewals queued");
       return { accounts: accounts.length, enqueued: accounts.length };
@@ -497,7 +536,9 @@ export async function handleEmailEvent(job: EmailEventJob, deps: HandleEventDeps
 
     case "RECOVER_INCOMPLETE": {
       const startedBefore = new Date(Date.now() - RECOVERY_STALE_MS).toISOString();
-      const incomplete = await deps.emails.listIncompleteEmails({ startedBefore, limit: RECOVERY_BATCH });
+      const stale = await deps.emails.listIncompleteEmails({ startedBefore, limit: RECOVERY_BATCH });
+      // Without commercial access an incomplete email is left as it is (no attempt consumed, nothing queued).
+      const incomplete = await withCommercialAccess(stale, deps.accounts, deps.logger, "recover_incomplete", job.type);
       let enqueued = 0;
       for (const email of incomplete) {
         if (email.processingAttempts >= MAX_PROCESSING_ATTEMPTS) {
@@ -527,9 +568,18 @@ export async function handleEmailEvent(job: EmailEventJob, deps: HandleEventDeps
 
     case "POLL_ACCOUNTS": {
       // Recovery polling: catches missed / lost pushes, expired watches and accounts without push.
-      const accounts = await deps.accounts.listActiveOAuthAccounts(POLL_BATCH);
+      const active = await deps.accounts.listActiveOAuthAccounts(POLL_BATCH);
+      const accounts = await withCommercialAccess(active, deps.accounts, deps.logger, "poll", job.type);
       for (const account of accounts) await deps.enqueueSync(account, "POLL");
       return { accounts: accounts.length, enqueued: accounts.length };
+    }
+
+    case "EXPIRE_SUBSCRIPTIONS": {
+      // Commercial V1.2 (every 5 minutes): idempotent; access already stops at the period end without it.
+      if (!deps.subscriptions) return { accounts: 0, enqueued: 0, expired: 0 };
+      const expired = await deps.subscriptions.expireDue();
+      if (expired > 0) deps.logger.info({ event: "subscription.expired", count: expired }, "subscriptions expired at the end of their period");
+      return { accounts: 0, enqueued: 0, expired };
     }
   }
 }

@@ -6,11 +6,13 @@ import type {
   AccountStore,
   AttachmentStorage,
   AuditRecorder,
+  CommercialAccess,
   EmailStore,
   IdentifierCandidate,
   OrganizationProcessingSettings,
   RealtimePublisher,
-  RoutingStore
+  RoutingStore,
+  SubscriptionMaintenance
 } from "../pipeline/ports.js";
 import type { WorkerAccount } from "../providers/types.js";
 
@@ -165,6 +167,18 @@ export function createAccountStore(db: SupabaseClient): AccountStore {
       return rows.map((row) => ({ id: row.id, organizationId: row.organization_id }));
     },
 
+    async commercialAccess(organizationIds) {
+      const ids = [...new Set(organizationIds)];
+      const access = new Map<string, CommercialAccess>();
+      if (ids.length === 0) return access;
+      const rows = check(await db.rpc("organization_access", { p_organization_ids: ids }), "organizationAccess") as Row[] | null;
+      for (const row of rows ?? []) {
+        const level = row.access === "SUBSCRIPTION" || row.access === "LEGACY" ? row.access : "NONE";
+        access.set(row.organization_id, { allowed: level !== "NONE", access: level, subscriptionStatus: row.subscription_status ?? null });
+      }
+      return access;
+    },
+
     async saveTokens(id, tokens) {
       const columns: Row = {
         access_token_encrypted: tokens.accessTokenEncrypted,
@@ -186,6 +200,15 @@ export function createAccountStore(db: SupabaseClient): AccountStore {
           .eq("id", id),
         "markError"
       );
+    }
+  };
+}
+
+/** Commercial V1.2: the expiration job (public.expire_due_subscriptions, service role EXECUTE only). */
+export function createSubscriptionMaintenance(db: SupabaseClient): SubscriptionMaintenance {
+  return {
+    async expireDue() {
+      return Number(check(await db.rpc("expire_due_subscriptions"), "expireDueSubscriptions") ?? 0);
     }
   };
 }

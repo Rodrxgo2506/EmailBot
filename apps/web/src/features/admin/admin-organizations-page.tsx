@@ -14,12 +14,12 @@ import { Badge, Card, EmptyState, ErrorMessage, PageHeader } from "@/components/
 import { Pagination, SkeletonRows } from "@/components/ui/feedback";
 import { Input, Select } from "@/components/ui/form-controls";
 import { getErrorMessage } from "@/lib/errors";
-import { ORGANIZATION_STATUS_LABELS } from "@/lib/labels";
+import { ORGANIZATION_STATUS_LABELS, planLabel } from "@/lib/labels";
 import { formatShortDate } from "@/lib/utils";
 import type { AdminOrganizationListParams } from "./admin-api";
 import { DEFAULT_ORGANIZATION_PARAMS, formatCount, PLAN_LABELS, SORT_LABELS, STATUS_BADGE, statusChange, type StatusTarget } from "./admin-model";
 import { useAdminOrganizations } from "./admin-queries";
-import { CreateOrganizationDialog, OrganizationPlanDialog, OrganizationStatusDialog, type OrganizationRef } from "./organization-dialogs";
+import { CreateOrganizationDialog, OrganizationStatusDialog, type OrganizationRef } from "./organization-dialogs";
 
 export function AdminOrganizationsPage() {
   const navigate = useNavigate();
@@ -27,7 +27,6 @@ export function AdminOrganizationsPage() {
   const [search, setSearch] = useState("");
   const [createOpen, setCreateOpen] = useState(false);
   const [statusTarget, setStatusTarget] = useState<StatusTarget<OrganizationRef> | null>(null);
-  const [planTarget, setPlanTarget] = useState<OrganizationRef | null>(null);
   const organizations = useAdminOrganizations(params);
 
   // Debounced search (name, slug or owner e-mail).
@@ -143,7 +142,7 @@ export function AdminOrganizationsPage() {
                       </Link>
                       <p className="font-mono text-xs text-muted-foreground">{organization.slug}</p>
                     </td>
-                    <td className="px-3 py-2.5">{PLAN_LABELS[organization.plan]}</td>
+                    <td className="px-3 py-2.5">{planLabel(organization.plan)}</td>
                     <td className="px-3 py-2.5">
                       <Badge variant={STATUS_BADGE[organization.status]}>{ORGANIZATION_STATUS_LABELS[organization.status]}</Badge>
                     </td>
@@ -162,9 +161,6 @@ export function AdminOrganizationsPage() {
                           <Link to={`/admin/organizations/${organization.id}`} aria-label={`Ver ${organization.name}`}>
                             Ver
                           </Link>
-                        </Button>
-                        <Button variant="ghost" size="sm" aria-label={`Editar plan de ${organization.name}`} onClick={() => setPlanTarget(ref)}>
-                          Editar
                         </Button>
                         <Button
                           variant="ghost"
@@ -198,7 +194,6 @@ export function AdminOrganizationsPage() {
 
       <CreateOrganizationDialog open={createOpen} onOpenChange={setCreateOpen} onCreated={(organization) => navigate(`/admin/organizations/${organization.id}`)} />
       <OrganizationStatusDialog target={statusTarget} onOpenChange={(open) => (open ? undefined : setStatusTarget(null))} />
-      <OrganizationPlanDialog organization={planTarget} onOpenChange={(open) => (open ? undefined : setPlanTarget(null))} />
     </div>
   );
 }

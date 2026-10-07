@@ -1,4 +1,4 @@
-import type { OrganizationPlan, OrganizationStatus } from "@emailbot/types";
+import type { AdminOrganizationDetail, AdminSubscriptionActivation, OrganizationStatus, SubscriptionAction } from "@emailbot/types";
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useAdminApi, type AdminLogParams, type AdminOrganizationCreate, type AdminOrganizationListParams } from "./admin-api";
 
@@ -16,6 +16,8 @@ export const adminKeys = {
   bots: (id: string) => ["admin", "organizations", "detail", id, "bots"] as const,
   customers: (id: string, page: number) => ["admin", "organizations", "detail", id, "customers", page] as const,
   emailAccounts: (id: string) => ["admin", "organizations", "detail", id, "email-accounts"] as const,
+  subscription: (id: string) => ["admin", "organizations", "detail", id, "subscription"] as const,
+  planPrices: ["admin", "plan-prices"] as const,
   activity: (params: AdminLogParams) => ["admin", "activity", params] as const,
   audit: (params: AdminLogParams) => ["admin", "audit", params] as const
 };
@@ -65,12 +67,12 @@ export function useAdminAudit(params: AdminLogParams) {
   return useQuery({ queryKey: adminKeys.audit(params), queryFn: () => api.audit(params), placeholderData: keepPreviousData });
 }
 
-/** Plan / status change: refreshes the lists, the detail, the stats, the audit trail and the activity. */
+/** Status change: refreshes the lists, the detail, the stats, the audit trail and the activity. */
 export function useUpdateOrganization() {
   const api = useAdminApi();
   const client = useQueryClient();
   return useMutation({
-    mutationFn: ({ id, patch }: { id: string; patch: { plan?: OrganizationPlan; status?: OrganizationStatus } }) => api.updateOrganization(id, patch),
+    mutationFn: ({ id, patch }: { id: string; patch: { status: OrganizationStatus } }) => api.updateOrganization(id, patch),
     onSuccess: (organization) => {
       client.setQueryData(adminKeys.organization(organization.id), organization);
       void client.invalidateQueries({ queryKey: adminKeys.organizations });
@@ -93,5 +95,48 @@ export function useCreateOrganization() {
       void client.invalidateQueries({ queryKey: ["admin", "audit"] });
       void client.invalidateQueries({ queryKey: ["admin", "activity"] });
     }
+  });
+}
+
+/* ------------------------------------------------------------ subscriptions (Commercial V1.1) */
+
+export function useAdminPlanPrices() {
+  const api = useAdminApi();
+  return useQuery({ queryKey: adminKeys.planPrices, queryFn: () => api.planPrices(), staleTime: 5 * 60_000 });
+}
+
+export function useAdminSubscription(id: string) {
+  const api = useAdminApi();
+  return useQuery({ queryKey: adminKeys.subscription(id), queryFn: () => api.subscription(id) });
+}
+
+/** After any subscription change: the subscription, the organization (plan cache), the lists, the audit and the activity. */
+function useSubscriptionRefresh() {
+  const client = useQueryClient();
+  return (organization: AdminOrganizationDetail) => {
+    client.setQueryData(adminKeys.organization(organization.id), organization);
+    void client.invalidateQueries({ queryKey: adminKeys.subscription(organization.id) });
+    void client.invalidateQueries({ queryKey: adminKeys.organizations });
+    void client.invalidateQueries({ queryKey: ["admin", "audit"] });
+    void client.invalidateQueries({ queryKey: ["admin", "activity"] });
+  };
+}
+
+export function useActivateSubscription() {
+  const api = useAdminApi();
+  const refresh = useSubscriptionRefresh();
+  return useMutation({
+    mutationFn: ({ id, input }: { id: string; input: AdminSubscriptionActivation }) => api.activateSubscription(id, input),
+    onSuccess: (result) => refresh(result.organization)
+  });
+}
+
+export function useSubscriptionAction() {
+  const api = useAdminApi();
+  const refresh = useSubscriptionRefresh();
+  return useMutation({
+    mutationFn: ({ subscriptionId, action, reason }: { subscriptionId: string; action: SubscriptionAction; reason?: string }) =>
+      api.subscriptionAction(subscriptionId, action, reason),
+    onSuccess: (result) => refresh(result.organization)
   });
 }

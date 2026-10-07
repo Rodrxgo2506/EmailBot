@@ -14,6 +14,7 @@ import { RATE_LIMITS } from "../../lib/rate-limits.js";
 import { parseWith } from "../../lib/validation.js";
 import { getAuth } from "../../plugins/auth.js";
 import { getOrganization, requirePermission } from "../../plugins/organization.js";
+import { requestEntitlements } from "../plans/entitlements.js";
 
 /*
  * Customer Access ID administration (EmailBot V2 phase 4), permission
@@ -56,6 +57,9 @@ export function customerAccessRoutes(deps: AppDeps) {
       const { id } = parseWith(idParamsSchema, request.params, "params");
       const input = parseWith(customerAccessIssueSchema, request.body);
       await requireCustomer(request, id);
+      // Commercial V1: issuing portal Access IDs needs the PORTAL feature (PRO, BUSINESS).
+      // Already issued Access IDs and open portal sessions are not revoked by a plan change.
+      await requestEntitlements(request).assertFeatureEnabled("PORTAL");
 
       for (let attempt = 1; ; attempt++) {
         const secret = generateAccessSecret();

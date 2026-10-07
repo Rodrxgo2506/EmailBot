@@ -24,6 +24,7 @@ import { memberRoutes } from "./modules/members/routes.js";
 import { organizationRoutes } from "./modules/organizations/routes.js";
 import { portalDataRoutes } from "./modules/portal/data-routes.js";
 import { portalRoutes } from "./modules/portal/routes.js";
+import { planRoutes } from "./modules/plans/routes.js";
 import { portalSyncRoutes, type SyncLimiter } from "./modules/portal/sync-routes.js";
 import { registerPortalSession } from "./modules/portal/session.js";
 import { ruleRoutes } from "./modules/rules/routes.js";
@@ -153,6 +154,7 @@ export async function buildApp(deps: AppDeps, options: BuildAppOptions = {}) {
     async (api) => {
       await api.register(meRoutes(deps));
       await api.register(organizationRoutes);
+      await api.register(planRoutes);
       await api.register(memberRoutes(deps));
       await api.register(emailAccountRoutes(deps));
       await api.register(categoryRoutes);

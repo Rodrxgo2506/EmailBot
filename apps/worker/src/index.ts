@@ -2,6 +2,8 @@ import { resolve } from "node:path";
 import { config as loadDotenv } from "dotenv";
 import {
   encryptionKeyFingerprint,
+  EXPIRE_SUBSCRIPTIONS_INTERVAL_MS,
+  EXPIRE_SUBSCRIPTIONS_SCHEDULER_ID,
   fetchWithTimeout,
   LOG_REDACT_PATHS,
   POLL_SCHEDULER_ID,
@@ -29,7 +31,8 @@ import {
   createAuditRecorder,
   createEmailStore,
   createRealtimePublisher,
-  createRoutingStore
+  createRoutingStore,
+  createSubscriptionMaintenance
 } from "./infrastructure/supabase-stores.js";
 import { handleAccountFailure, NonRetryableError } from "./pipeline/failures.js";
 import { handleEmailEvent, SyncBusyError, type HandleEventDeps } from "./pipeline/handle-email-event.js";
@@ -122,7 +125,8 @@ const eventDeps: Omit<HandleEventDeps, "logger"> = {
   audit: auditRecorder,
   watchTopic: config.gmailPubSubTopic,
   microsoftPush: config.microsoftPush,
-  microsoftSubscriptions: createMicrosoftSubscriptionClient(providerFetch)
+  microsoftSubscriptions: createMicrosoftSubscriptionClient(providerFetch),
+  subscriptions: createSubscriptionMaintenance(supabase)
 };
 
 /**
@@ -198,7 +202,7 @@ const notificationsWorker = new Worker<NotificationJob>(
   QUEUE_NAMES.notifications,
   async (job: Job<NotificationJob>) => {
     const jobLogger = logger.child({ queue: QUEUE_NAMES.notifications, jobId: job.id, organizationId: job.data.organizationId });
-    return deliverNotification(job.data, { emails, realtime, logger: jobLogger });
+    return deliverNotification(job.data, { emails, realtime, accounts, logger: jobLogger });
   },
   { connection, concurrency: 5 }
 );
@@ -259,6 +263,13 @@ try {
   } else {
     await queues.emailEvents.removeJobScheduler("renew-gmail-watches");
   }
+
+  // Commercial V1.2: subscriptions whose period ended become EXPIRED (idempotent; access already stops at the end).
+  await queues.emailEvents.upsertJobScheduler(
+    EXPIRE_SUBSCRIPTIONS_SCHEDULER_ID,
+    { every: EXPIRE_SUBSCRIPTIONS_INTERVAL_MS },
+    { name: "EXPIRE_SUBSCRIPTIONS", data: { type: "EXPIRE_SUBSCRIPTIONS" }, opts: { removeOnComplete: true, removeOnFail: 100 } }
+  );
 
   // Resumes emails left RECEIVED / PROCESSING by jobs that exhausted their retries (migration 9).
   await queues.emailEvents.upsertJobScheduler(

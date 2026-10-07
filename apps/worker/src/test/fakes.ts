@@ -4,6 +4,7 @@ import type { CustomerIdentifierType, CustomerStatus, NormalizedEmail, RealtimeE
 import { vi } from "vitest";
 import type {
   AccountStore,
+  CommercialAccess,
   AttachmentInsertRow,
   DeliveryInsertRow,
   EmailInsertRow,
@@ -346,8 +347,19 @@ export function makeAudit() {
   };
 }
 
-export function makeAccountStore(accounts: WorkerAccount[]): AccountStore & Record<string, ReturnType<typeof vi.fn>> {
+/** Commercial V1.2: an organization with an ACTIVE subscription inside its period (the default in tests). */
+export const SUBSCRIBED: CommercialAccess = { allowed: true, access: "SUBSCRIPTION", subscriptionStatus: "ACTIVE" };
+
+/**
+ * In-memory accounts. `access` overrides the commercial access per organization
+ * (default: SUBSCRIBED); tests change it to simulate an expiry between enqueue and run.
+ */
+export function makeAccountStore(
+  accounts: WorkerAccount[],
+  access: Map<string, CommercialAccess> = new Map()
+): AccountStore & Record<string, ReturnType<typeof vi.fn>> {
   return {
+    commercialAccess: vi.fn(async (ids: string[]) => new Map(ids.map((id) => [id, access.get(id) ?? SUBSCRIBED]))),
     getAccount: vi.fn(async (id: string) => accounts.find((account) => account.id === id) ?? null),
     findActiveAccountsByAddress: vi.fn(async (provider: string, address: string) =>
       accounts.filter((a) => a.provider === provider && a.emailAddress === address && a.status === "ACTIVE")

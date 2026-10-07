@@ -6,6 +6,7 @@ import { RATE_LIMITS } from "../../lib/rate-limits.js";
 import { parseWith } from "../../lib/validation.js";
 import { getAuth } from "../../plugins/auth.js";
 import { getOrganization, requirePermission } from "../../plugins/organization.js";
+import { requestEntitlements } from "../plans/entitlements.js";
 
 /*
  * Membership rules (enforced here AND by RLS / triggers in the database):
@@ -39,6 +40,7 @@ export function memberRoutes(deps: AppDeps) {
       const auth = getAuth(request);
       const organization = getOrganization(request);
       const input = parseWith(memberAddSchema, request.body);
+      await requestEntitlements(request).assertWithinLimit("MEMBERS");
 
       const userId = await deps.privileged.findProfileIdByEmail(input.email);
       if (!userId) {

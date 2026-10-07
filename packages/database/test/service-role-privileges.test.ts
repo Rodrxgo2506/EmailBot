@@ -30,9 +30,14 @@ const TABLES = [
   "organization_members",
   "organization_settings",
   "organizations",
+  "payment_events",
+  "plan_catalog",
+  "plan_entitlements",
+  "plan_prices",
   "platform_admins",
   "platform_audit_logs",
-  "profiles"
+  "profiles",
+  "subscriptions"
 ] as const;
 
 const PRIVILEGES = ["SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER", "MAINTAIN"] as const;
@@ -61,15 +66,25 @@ const SERVICE_ROLE_EXPECTED: Record<(typeof TABLES)[number], Privilege[]> = {
   legal_acceptances: ["SELECT"],
   organization_members: ["SELECT"],
   organization_settings: ["SELECT"],
+  // Commercial V1: column SELECT (id, status, plan), checked in plan-catalog.test.ts.
   organizations: [],
+  // Commercial V1: OAuth callback plan checks (public.organization_entitlements as the service role).
+  // Commercial V1.1: payments only through the private / admin.* subscription functions.
+  payment_events: [],
+  plan_catalog: ["SELECT"],
+  plan_entitlements: ["SELECT"],
+  // Commercial V1.1: organization_entitlements joins subscription -> price -> plan.
+  plan_prices: ["SELECT"],
   // V2 phase 6: no table privilege; admin.* SECURITY DEFINER functions only.
   platform_admins: [],
   platform_audit_logs: [],
-  profiles: ["SELECT"]
+  profiles: ["SELECT"],
+  // Commercial V1.1: read only (entitlements in the OAuth callback); written only by the subscription functions.
+  subscriptions: ["SELECT"]
 };
 
 /** Tables that existed before migration 7 (V2 tables are created later). */
-const V2_TABLES: readonly string[] = ["bots", "customers", "customer_identifiers", "bot_customer_assignments", "email_deliveries", "customer_access_credentials", "customer_sessions", "platform_admins", "platform_audit_logs", "legal_acceptances"];
+const V2_TABLES: readonly string[] = ["bots", "customers", "customer_identifiers", "bot_customer_assignments", "email_deliveries", "customer_access_credentials", "customer_sessions", "platform_admins", "platform_audit_logs", "legal_acceptances", "plan_catalog", "plan_entitlements", "plan_prices", "subscriptions", "payment_events"];
 const V1_TABLES = TABLES.filter((table) => !V2_TABLES.includes(table));
 
 async function privilegeMatrix(tx: Tx, role: string, tables: readonly string[] = TABLES): Promise<Record<string, Privilege[]>> {
@@ -151,15 +166,19 @@ describe.each<DefaultPrivilegesProfile>(["production", "local"])("AFTER migratio
     expect(await t.asAdmin((tx) => privilegeMatrix(tx, "service_role"))).toEqual(SERVICE_ROLE_EXPECTED);
   });
 
-  it("service_role cannot execute EmailBot SECURITY DEFINER functions", async () => {
-    const executable = await t.asAdmin((tx) =>
-      count(
-        tx,
-        `select 1 from pg_proc p join pg_namespace n on n.oid = p.pronamespace
-         where n.nspname in ('public', 'private') and p.prosecdef and has_function_privilege('service_role', p.oid, 'EXECUTE')`
-      )
+  it("service_role cannot execute EmailBot SECURITY DEFINER functions (one explicit, parameterless exception)", async () => {
+    const executable = await t.asAdmin(async (tx) =>
+      (
+        await tx.query<{ f: string }>(
+          `select n.nspname || '.' || p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')' as f
+           from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+           where n.nspname in ('public', 'private') and p.prosecdef and has_function_privilege('service_role', p.oid, 'EXECUTE')`
+        )
+      ).rows.map((row) => row.f)
     );
-    expect(executable).toBe(0);
+    // Commercial V1.2: the worker's expiration job. No parameters, now() of the database: it can only expire
+    // subscriptions whose period already ended (covered by subscriptions.test.ts).
+    expect(executable).toEqual(["public.expire_due_subscriptions()"]);
   });
 
   it("every backend operation works with these grants", async () => {

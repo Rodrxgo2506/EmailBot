@@ -12,11 +12,12 @@ import {
   BOT_STATUS_LABELS,
   CUSTOMER_STATUS_LABELS,
   ORGANIZATION_STATUS_LABELS,
+  planLabel,
   PROVIDER_LABELS,
   ROLE_LABELS
 } from "@/lib/labels";
 import { formatDate, formatShortDate } from "@/lib/utils";
-import { ADMIN_LOG_PAGE_SIZE, ADMIN_PAGE_SIZE, activityLabel, cancelChange, formatCount, PLAN_LABELS, platformActionLabel, platformAuditDetail, STATUS_BADGE, statusChange, type StatusTarget } from "./admin-model";
+import { ADMIN_LOG_PAGE_SIZE, ADMIN_PAGE_SIZE, activityLabel, cancelChange, formatCount, platformActionLabel, platformAuditDetail, STATUS_BADGE, statusChange, type StatusTarget } from "./admin-model";
 import {
   useAdminActivity,
   useAdminAudit,
@@ -26,7 +27,8 @@ import {
   useAdminMembers,
   useAdminOrganization
 } from "./admin-queries";
-import { OrganizationPlanDialog, OrganizationStatusDialog, type OrganizationRef } from "./organization-dialogs";
+import { OrganizationStatusDialog, type OrganizationRef } from "./organization-dialogs";
+import { SubscriptionSection } from "./subscription-section";
 
 function Section({ title, description, children }: { title: string; description?: string; children: ReactNode }) {
   return (
@@ -69,7 +71,6 @@ export function AdminOrganizationDetailPage() {
   const activity = useAdminActivity({ organizationId, page: activityPage, pageSize: ADMIN_LOG_PAGE_SIZE });
   const audit = useAdminAudit({ organizationId, page: 1, pageSize: ADMIN_LOG_PAGE_SIZE });
   const [statusTarget, setStatusTarget] = useState<StatusTarget<OrganizationRef> | null>(null);
-  const [planTarget, setPlanTarget] = useState<OrganizationRef | null>(null);
 
   const back = (
     <Button variant="ghost" size="sm" asChild>
@@ -107,9 +108,6 @@ export function AdminOrganizationDetailPage() {
         description={`/${data.slug} · creada el ${formatDate(data.createdAt)}`}
         actions={
           <>
-            <Button variant="outline" onClick={() => setPlanTarget(ref)}>
-              Editar plan
-            </Button>
             {cancel ? (
               <Button variant="outline" className="text-destructive" onClick={() => setStatusTarget({ organization: ref, change: cancel })}>
                 {cancel.action}
@@ -132,7 +130,7 @@ export function AdminOrganizationDetailPage() {
           </div>
           <div>
             <p className="text-xs text-muted-foreground">Plan</p>
-            <p className="mt-1 font-medium">{PLAN_LABELS[data.plan]}</p>
+            <p className="mt-1 font-medium">{planLabel(data.plan)}</p>
           </div>
           <div className="min-w-0">
             <p className="text-xs text-muted-foreground">Owner</p>
@@ -154,6 +152,8 @@ export function AdminOrganizationDetailPage() {
         <Metric label="Correos procesados" value={data.processedEmailsCount} />
         <Metric label="Entregas" value={data.deliveriesCount} />
       </div>
+
+      <SubscriptionSection organizationId={data.id} organizationName={data.name} />
 
       <div className="grid gap-4 xl:grid-cols-2">
         <Section title="Miembros">
@@ -291,7 +291,6 @@ export function AdminOrganizationDetailPage() {
       </div>
 
       <OrganizationStatusDialog target={statusTarget} onOpenChange={(open) => (open ? undefined : setStatusTarget(null))} />
-      <OrganizationPlanDialog organization={planTarget} onOpenChange={(open) => (open ? undefined : setPlanTarget(null))} />
     </div>
   );
 }
