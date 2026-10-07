@@ -20,7 +20,7 @@ const GB = 1024 ** 3;
 
 export const V1_LIMITS: Record<CommercialPlan, Record<PlanLimitKey, number>> = {
   BASIC: {
-    EMAIL_ACCOUNTS: 2,
+    EMAIL_ACCOUNTS: 25,
     RULES: 10,
     BOTS: 2,
     MONTHLY_EMAILS: 2_000,
@@ -30,7 +30,7 @@ export const V1_LIMITS: Record<CommercialPlan, Record<PlanLimitKey, number>> = {
     RETENTION_DAYS: 30
   },
   PRO: {
-    EMAIL_ACCOUNTS: 5,
+    EMAIL_ACCOUNTS: 125,
     RULES: 30,
     BOTS: 10,
     MONTHLY_EMAILS: 15_000,
@@ -40,7 +40,7 @@ export const V1_LIMITS: Record<CommercialPlan, Record<PlanLimitKey, number>> = {
     RETENTION_DAYS: 90
   },
   BUSINESS: {
-    EMAIL_ACCOUNTS: 20,
+    EMAIL_ACCOUNTS: 250,
     RULES: 100,
     BOTS: 50,
     MONTHLY_EMAILS: 75_000,

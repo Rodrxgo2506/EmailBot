@@ -22,7 +22,7 @@ describe("plans model (catalog from GET /api/plans)", () => {
     const rows = groups.flatMap((group) => group.rows);
     expect(rows.find((row) => row.key === "MICROSOFT")?.values).toEqual([false, true, true]);
     expect(rows.find((row) => row.key === "PORTAL")?.values).toEqual([false, true, true]);
-    expect(rows.find((row) => row.key === "EMAIL_ACCOUNTS")?.values).toEqual(["2", "5", "20"]);
+    expect(rows.find((row) => row.key === "EMAIL_ACCOUNTS")?.values).toEqual(["25", "125", "250"]);
     expect(rows.map((row) => row.key)).not.toEqual(expect.arrayContaining(["RETENTION_DAYS"]));
     expect(rows.some((row) => ["RETENTION_DAYS", "ADVANCED_STATS", "API", "PRIORITY_SUPPORT"].includes(row.key))).toBe(false);
   });
@@ -45,7 +45,7 @@ describe("plans model (catalog from GET /api/plans)", () => {
 
   it("upgrade benefits: higher limits and new features only", () => {
     expect(upgradeBenefits(catalogEntry("BASIC"), catalogEntry("PRO"))).toEqual([
-      "5 cuentas de correo",
+      "125 cuentas de correo",
       "15,000 correos procesados al mes",
       "30 reglas",
       "10 bots activos",

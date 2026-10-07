@@ -100,7 +100,9 @@ describe("/planes without a session", () => {
     expect(within(card("Pro")).getByText(/IGV incluido · o S\/ 399.00 al año/)).toBeInTheDocument();
 
     const pro = within(card("Pro")).getByRole("list", { name: "Qué incluye Pro" });
-    expect(pro).toHaveTextContent("5 cuentas de correo");
+    expect(pro).toHaveTextContent("125 cuentas de correo");
+    expect(within(card("Básico")).getByRole("list", { name: "Qué incluye Básico" })).toHaveTextContent("25 cuentas de correo");
+    expect(within(card("Business")).getByRole("list", { name: "Qué incluye Business" })).toHaveTextContent("250 cuentas de correo");
     expect(pro).toHaveTextContent("15,000 correos procesados al mes");
     expect(pro).toHaveTextContent("5 GB de almacenamiento de adjuntos");
     expect(within(card("Básico")).getByRole("list", { name: "Qué incluye Básico" })).toHaveTextContent("Microsoft (Outlook / 365) (no incluido)");
@@ -114,7 +116,7 @@ describe("/planes without a session", () => {
       "Equipo",
       "Almacenamiento"
     ]);
-    expect(within(table).getByRole("rowheader", { name: "Cuentas de correo" }).parentElement).toHaveTextContent("Cuentas de correo2520");
+    expect(within(table).getByRole("rowheader", { name: "Cuentas de correo" }).parentElement).toHaveTextContent("Cuentas de correo25125250");
     expect(screen.queryByText(/\$|USD|Gratis/)).not.toBeInTheDocument();
   });
 

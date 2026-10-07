@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createTestDatabase, listMigrationFiles, MIGRATIONS_DIR, type TestDatabase, type Tx } from "../src/harness.js";
-import { count, one, seedTwoTenants, type Fixtures } from "./fixtures.js";
+import { activateSubscription, count, one, seedTwoTenants, type Fixtures } from "./fixtures.js";
 
 /*
  * Commercial V1, phase 1: plan catalog, prices and entitlements
@@ -13,10 +13,11 @@ import { count, one, seedTwoTenants, type Fixtures } from "./fixtures.js";
 const COMMERCIAL_V1 = "20261006120000";
 const GB = 1024 ** 3;
 
+// EMAIL_ACCOUNTS raised to 25 / 125 / 250 by 20261007120000_email_account_plan_limits.sql.
 const LIMITS = {
-  BASIC: { EMAIL_ACCOUNTS: 2, RULES: 10, BOTS: 2, MONTHLY_EMAILS: 2_000, MEMBERS: 2, CUSTOMERS: 500, STORAGE_BYTES: 1 * GB, RETENTION_DAYS: 30 },
-  PRO: { EMAIL_ACCOUNTS: 5, RULES: 30, BOTS: 10, MONTHLY_EMAILS: 15_000, MEMBERS: 5, CUSTOMERS: 2_500, STORAGE_BYTES: 5 * GB, RETENTION_DAYS: 90 },
-  BUSINESS: { EMAIL_ACCOUNTS: 20, RULES: 100, BOTS: 50, MONTHLY_EMAILS: 75_000, MEMBERS: 20, CUSTOMERS: 10_000, STORAGE_BYTES: 25 * GB, RETENTION_DAYS: 365 }
+  BASIC: { EMAIL_ACCOUNTS: 25, RULES: 10, BOTS: 2, MONTHLY_EMAILS: 2_000, MEMBERS: 2, CUSTOMERS: 500, STORAGE_BYTES: 1 * GB, RETENTION_DAYS: 30 },
+  PRO: { EMAIL_ACCOUNTS: 125, RULES: 30, BOTS: 10, MONTHLY_EMAILS: 15_000, MEMBERS: 5, CUSTOMERS: 2_500, STORAGE_BYTES: 5 * GB, RETENTION_DAYS: 90 },
+  BUSINESS: { EMAIL_ACCOUNTS: 250, RULES: 100, BOTS: 50, MONTHLY_EMAILS: 75_000, MEMBERS: 20, CUSTOMERS: 10_000, STORAGE_BYTES: 25 * GB, RETENTION_DAYS: 365 }
 } as const;
 
 const FEATURES = {
@@ -392,5 +393,73 @@ describe("legacy FREE organizations (created before Commercial V1)", () => {
     expect((await legacy.asUser(owner, (tx) => entitlementsOf(tx, orgId))).access).toBe("SUBSCRIPTION");
     // Once no FREE row is left the foreign key can be validated.
     await legacy.asAdmin((tx) => tx.query("alter table public.organizations validate constraint organizations_plan_in_catalog"));
+  });
+});
+
+describe("email account limits 25 / 125 / 250 (20261007120000) over existing data", () => {
+  const EMAIL_LIMITS = "20261007120000";
+  let before: TestDatabase;
+  let tenants: Fixtures;
+  let basicOrg: string;
+
+  /** Everything the migration must leave as it was (JSON so differences are exact). */
+  const untouched = (db: TestDatabase) =>
+    db.asAdmin(async (tx) => ({
+      prices: (await tx.query("select id, plan_id, billing_period, currency, amount::text, active from public.plan_prices order by id")).rows,
+      entitlements: (
+        await tx.query("select plan_id, key, kind, limit_value::text, enabled from public.plan_entitlements where key <> 'EMAIL_ACCOUNTS' order by plan_id, key")
+      ).rows,
+      catalog: (await tx.query("select id, code, name, badge, sort_order, active from public.plan_catalog order by id")).rows,
+      organizations: (await tx.query("select id, plan::text, status from public.organizations order by id")).rows,
+      accounts: (await tx.query("select id, organization_id, status, email_address from public.email_accounts order by id")).rows,
+      subscriptions: (await tx.query("select id, organization_id, status, plan_price_id from public.subscriptions order by id")).rows
+    }));
+
+  beforeAll(async () => {
+    before = await createTestDatabase({ stopBefore: EMAIL_LIMITS });
+    tenants = await seedTwoTenants(before);
+    const owner = await before.createUser("basico@h.test");
+    basicOrg = (await before.asUser(owner, (tx) => one<{ id: string }>(tx, "select public.create_organization('Básica', 'basica') as id"))).id;
+    await activateSubscription(before, basicOrg, "BASIC");
+    // Already at the old BASIC limit (2) and beyond it: nothing may be disconnected or removed.
+    await before.asAdmin(async (tx) => {
+      for (const n of [1, 2, 3]) {
+        await tx.query(
+          `insert into public.email_accounts (organization_id, provider, email_address, access_token_encrypted, refresh_token_encrypted)
+           values ($1, 'GMAIL', $2, 'v1.iv.tag.access', 'v1.iv.tag.refresh')`,
+          [basicOrg, `buzon${n}@h.test`]
+        );
+      }
+    });
+  });
+  afterAll(async () => before?.close());
+
+  it("changes only the three EMAIL_ACCOUNTS limits; prices, other limits, features, organizations, mailboxes and subscriptions are untouched", async () => {
+    const owner = await before.asAdmin((tx) => one<{ user_id: string }>(tx, "select user_id from public.organization_members where organization_id = $1", [basicOrg]));
+    expect((await before.asUser(owner.user_id, (tx) => entitlementsOf(tx, basicOrg))).limits.EMAIL_ACCOUNTS).toBe(2);
+    expect((await before.asUser(tenants.a.viewerId, (tx) => entitlementsOf(tx, tenants.a.orgId))).limits.EMAIL_ACCOUNTS).toBe(5);
+    const snapshot = await untouched(before);
+
+    await before.db.exec(readFileSync(join(MIGRATIONS_DIR, listMigrationFiles().find((name) => name.startsWith(EMAIL_LIMITS)) as string), "utf8"));
+
+    expect(await untouched(before)).toEqual(snapshot);
+    const limits = await before.asAdmin(
+      async (tx) =>
+        (
+          await tx.query<{ code: string; limit_value: string }>(
+            `select c.code, e.limit_value from public.plan_entitlements e join public.plan_catalog c on c.id = e.plan_id
+             where e.key = 'EMAIL_ACCOUNTS' and e.kind = 'LIMIT' order by c.sort_order`
+          )
+        ).rows
+    );
+    expect(limits.map((row) => [row.code, Number(row.limit_value)])).toEqual([
+      ["BASIC", 25],
+      ["PRO", 125],
+      ["BUSINESS", 250]
+    ]);
+    // Live through organization_entitlements (what the API enforces); the 3 existing mailboxes stay counted.
+    expect((await before.asUser(owner.user_id, (tx) => entitlementsOf(tx, basicOrg))).limits).toEqual(LIMITS.BASIC);
+    expect(await before.asUser(owner.user_id, (tx) => usageOf(tx, basicOrg, ["EMAIL_ACCOUNTS"]))).toEqual({ EMAIL_ACCOUNTS: 3 });
+    expect((await before.asUser(tenants.a.viewerId, (tx) => entitlementsOf(tx, tenants.a.orgId))).limits).toEqual(LIMITS.PRO);
   });
 });

@@ -67,7 +67,7 @@ const basicOverview = (overrides: Partial<OrganizationPlanOverview["usage"]> = {
     effectivePlan: "BASIC",
     access: plan === "FREE" ? "LEGACY" : "SUBSCRIPTION",
     subscriptionStatus: plan === "FREE" ? null : "ACTIVE",
-    limits: { EMAIL_ACCOUNTS: 2, RULES: 10, BOTS: 2, MONTHLY_EMAILS: 2000, MEMBERS: 2, CUSTOMERS: 500, STORAGE_BYTES: GB, RETENTION_DAYS: 30 },
+    limits: { EMAIL_ACCOUNTS: 25, RULES: 10, BOTS: 2, MONTHLY_EMAILS: 2000, MEMBERS: 2, CUSTOMERS: 500, STORAGE_BYTES: GB, RETENTION_DAYS: 30 },
     features: { GMAIL: true, MICROSOFT: false, ADVANCED_STATS: false, PORTAL: false, API: false, PRIORITY_SUPPORT: false }
   },
   usage: { EMAIL_ACCOUNTS: 1, RULES: 3, BOTS: 0, MONTHLY_EMAILS: 120, MEMBERS: 1, CUSTOMERS: 0, STORAGE_BYTES: 5 * 1024 ** 2, ...overrides }
@@ -155,7 +155,7 @@ describe("organization plan (Commercial V1)", () => {
     renderSettings();
     expect(await screen.findByText("Plan Básico · Activa")).toBeInTheDocument();
     expect(await screen.findByRole("heading", { name: "Plan Básico" })).toBeInTheDocument();
-    expect(screen.getByText("Cuentas de correo").nextSibling).toHaveTextContent("1 / 2");
+    expect(screen.getByText("Cuentas de correo").nextSibling).toHaveTextContent("1 / 25");
     expect(screen.getByText("Almacenamiento de adjuntos").nextSibling).toHaveTextContent("5 MB / 1 GB");
     const features = screen.getByRole("list", { name: "Funcionalidades del plan" });
     expect(features).toHaveTextContent("Gmail (incluido)");
@@ -176,7 +176,7 @@ describe("organization plan (Commercial V1)", () => {
 
   it("warns when a limit is reached (nothing is deleted)", async () => {
     currentOrganization = { ...organization, plan: "BASIC" };
-    planOverview = basicOverview({ EMAIL_ACCOUNTS: 2, MONTHLY_EMAILS: 2000 });
+    planOverview = basicOverview({ EMAIL_ACCOUNTS: 25, MONTHLY_EMAILS: 2000 });
     renderSettings();
     const status = await screen.findByRole("status");
     expect(status).toHaveTextContent("Alcanzaste el límite de tu plan en: cuentas de correo, correos este mes");
@@ -203,7 +203,11 @@ describe("organization plan (Commercial V1)", () => {
 describe("Mi plan: plans above the current one (catalog GET /api/plans; nothing is charged)", () => {
   const overviewFor = (plan: "PRO" | "BUSINESS"): OrganizationPlanOverview => {
     const base = basicOverview({}, "BASIC");
-    return { ...base, entitlements: { ...base.entitlements, plan, effectivePlan: plan, access: "SUBSCRIPTION" } };
+    const entry = PLAN_CATALOG.find((item) => item.code === plan);
+    return {
+      ...base,
+      entitlements: { ...base.entitlements, plan, effectivePlan: plan, access: "SUBSCRIPTION", limits: entry!.limits, features: entry!.features }
+    };
   };
   const upgrades = () =>
     screen
@@ -219,7 +223,7 @@ describe("Mi plan: plans above the current one (catalog GET /api/plans; nothing 
     expect(await screen.findByRole("heading", { name: "Mejorar plan" })).toBeInTheDocument();
     expect(upgrades()).toEqual(["Plan Pro", "Plan Business"]);
     const pro = screen.getByRole("list", { name: "Qué obtienes con Pro" });
-    expect(pro).toHaveTextContent("5 cuentas de correo");
+    expect(pro).toHaveTextContent("125 cuentas de correo");
     expect(pro).toHaveTextContent("Microsoft (Outlook / 365)");
     expect(pro).toHaveTextContent("Portal de clientes");
     expect(screen.getByText("S/ 39.90")).toBeInTheDocument();
@@ -231,10 +235,11 @@ describe("Mi plan: plans above the current one (catalog GET /api/plans; nothing 
     planOverview = overviewFor("PRO");
     renderSettings();
     expect(await screen.findByRole("heading", { name: "Plan Pro" })).toBeInTheDocument();
+    expect(screen.getByText("Cuentas de correo").nextSibling).toHaveTextContent("1 / 125");
     await screen.findByRole("heading", { name: "Mejorar plan" });
     expect(upgrades()).toEqual(["Plan Business"]);
     const business = screen.getByRole("list", { name: "Qué obtienes con Business" });
-    expect(business).toHaveTextContent("20 cuentas de correo");
+    expect(business).toHaveTextContent("250 cuentas de correo");
     expect(business).not.toHaveTextContent(/Microsoft|Portal/); // Pro already has them
   });
 
@@ -243,6 +248,7 @@ describe("Mi plan: plans above the current one (catalog GET /api/plans; nothing 
     planOverview = overviewFor("BUSINESS");
     renderSettings();
     expect(await screen.findByRole("heading", { name: "Plan Business" })).toBeInTheDocument();
+    expect(screen.getByText("Cuentas de correo").nextSibling).toHaveTextContent("1 / 250");
     expect(await screen.findByText("Actualmente tienes el plan más completo.")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Mejorar a/ })).not.toBeInTheDocument();
   });
