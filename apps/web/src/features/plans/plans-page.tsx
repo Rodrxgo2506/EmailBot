@@ -1,7 +1,8 @@
 import type { PlanCatalogEntry } from "@emailbot/types";
-import { Mail } from "lucide-react";
+import { Info, Mail, Send } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
+import { ThemeToggle } from "@/components/layout/theme-toggle";
 import { Button } from "@/components/ui/button";
 import { ErrorMessage } from "@/components/ui/display";
 import { SkeletonRows } from "@/components/ui/feedback";
@@ -35,6 +36,23 @@ function useViewer(): Viewer | undefined {
   return { authenticated: true, currentPlan: entitlements && entitlements.access !== "NONE" ? entitlements.effectivePlan : null };
 }
 
+/**
+ * Decorative only (aria-hidden, no pointer events): a faint primary halo, two soft blurs and two
+ * mail glyphs behind the hero and the cards. Starts below the navbar; fades into the page.
+ */
+function PlansBackdrop() {
+  return (
+    <div aria-hidden className="pointer-events-none absolute inset-x-0 top-14 -z-10 h-[46rem] overflow-hidden">
+      <div className="absolute inset-0 bg-[radial-gradient(60rem_26rem_at_50%_-4rem,color-mix(in_oklab,var(--primary)_11%,transparent),transparent_70%)] dark:bg-[radial-gradient(60rem_26rem_at_50%_-4rem,color-mix(in_oklab,var(--primary)_17%,transparent),transparent_70%)]" />
+      <div className="absolute -left-40 top-24 size-[26rem] rounded-full bg-primary/[0.06] blur-3xl dark:bg-primary/[0.08]" />
+      <div className="absolute -right-40 top-52 size-[26rem] rounded-full bg-sky-400/[0.07] blur-3xl dark:bg-sky-400/[0.05]" />
+      <Mail className="absolute left-[7%] top-16 hidden size-24 -rotate-12 text-primary/[0.07] lg:block dark:text-primary/[0.12]" strokeWidth={1.25} />
+      <Send className="absolute right-[8%] top-32 hidden size-20 rotate-12 text-primary/[0.07] lg:block dark:text-primary/[0.12]" strokeWidth={1.25} />
+      <div className="absolute inset-x-0 bottom-0 h-48 bg-gradient-to-b from-transparent to-background" />
+    </div>
+  );
+}
+
 /** Public pricing page (/planes): works with or without a session; never charges anything. */
 export function PlansPage() {
   const catalog = usePlanCatalog();
@@ -50,7 +68,8 @@ export function PlansPage() {
   }, []);
 
   return (
-    <div className="flex min-h-screen flex-col bg-background">
+    // isolate: the decorative backdrop (-z-10) paints above this background and below the content.
+    <div className="relative isolate flex min-h-screen flex-col bg-background">
       <header className="border-b">
         <div className="mx-auto flex h-14 w-full max-w-6xl items-center justify-between gap-4 px-4 sm:px-6">
           <Link to="/" className="flex items-center gap-2 rounded-md focus-visible:outline-2 focus-visible:outline-ring">
@@ -59,7 +78,8 @@ export function PlansPage() {
             </span>
             <span className="font-semibold tracking-tight">EmailBot</span>
           </Link>
-          <nav aria-label="Cuenta" className="flex items-center gap-2">
+          <nav aria-label="Cuenta" className="flex items-center gap-1 sm:gap-2">
+            <ThemeToggle />
             {viewer?.authenticated ? (
               <Button asChild size="sm">
                 <Link to="/">Ir al panel</Link>
@@ -78,24 +98,26 @@ export function PlansPage() {
         </div>
       </header>
 
-      <main className="mx-auto w-full max-w-6xl flex-1 px-4 py-12 sm:px-6 sm:py-16">
-        <section aria-labelledby="plans-title" className="mx-auto max-w-2xl text-center">
-          <h1 id="plans-title" className="text-3xl font-semibold tracking-tight sm:text-4xl">
+      <PlansBackdrop />
+
+      <main className="mx-auto w-full max-w-6xl flex-1 px-4 pt-14 pb-12 sm:px-6 sm:pt-20 sm:pb-16">
+        <section aria-labelledby="plans-title" className="mx-auto max-w-4xl text-center">
+          <h1 id="plans-title" className="text-4xl leading-[1.1] font-semibold tracking-tight text-foreground sm:text-5xl">
             Elige el plan que mejor se adapte a tu operación
           </h1>
-          <p className="mt-4 text-base text-muted-foreground">
+          <p className="mx-auto mt-5 max-w-3xl text-base text-muted-foreground sm:text-lg">
             Automatiza tus correos, organiza a tus clientes y entrega cada mensaje en el lugar correcto.
           </p>
-          <p className="mt-2 text-sm text-muted-foreground">Precios en soles (PEN), IGV incluido.</p>
+          <p className="mt-3 text-sm text-muted-foreground">Precios en soles (PEN), IGV incluido.</p>
         </section>
 
-        <section aria-label="Planes" className="mt-12">
+        <section aria-label="Planes" className="mt-14 sm:mt-16">
           {catalog.isPending || viewer === undefined ? (
             <SkeletonRows rows={6} />
           ) : catalog.error ? (
             <ErrorMessage error={new Error(getErrorMessage(catalog.error))} />
           ) : (
-            <div className="mx-auto grid max-w-md gap-6 lg:max-w-none lg:grid-cols-3">
+            <div className="mx-auto grid max-w-md items-stretch gap-6 lg:max-w-none lg:grid-cols-3 lg:gap-7">
               {catalog.data.map((plan) => (
                 <PlanOfferCard key={plan.code} plan={plan} cta={planCta(plan, viewer, catalog.data)} onChoose={setChoosing} />
               ))}
@@ -104,13 +126,16 @@ export function PlansPage() {
         </section>
 
         {catalog.data && catalog.data.length > 0 ? (
-          <section aria-labelledby="comparison-title" className="mt-16">
-            <h2 id="comparison-title" className="mb-6 text-xl font-semibold tracking-tight">
+          <section aria-labelledby="comparison-title" className="mx-auto mt-20 max-w-5xl sm:mt-24">
+            <h2 id="comparison-title" className="mb-8 text-center text-2xl font-semibold tracking-tight text-foreground sm:mb-10 sm:text-3xl">
               Compara los planes
             </h2>
             <PlanComparison plans={catalog.data} />
-            <p className="mt-4 text-sm text-muted-foreground">
-              La contratación en línea estará disponible próximamente. Mientras tanto, el equipo de EmailBot activa y cambia los planes.
+            <p className="mx-auto mt-6 flex max-w-4xl items-start justify-center gap-2 text-sm text-muted-foreground">
+              <Info className="mt-0.5 size-4 shrink-0 text-muted-foreground/70" aria-hidden />
+              <span>
+                La contratación en línea estará disponible próximamente. Mientras tanto, el equipo de EmailBot activa y cambia los planes.
+              </span>
             </p>
           </section>
         ) : null}

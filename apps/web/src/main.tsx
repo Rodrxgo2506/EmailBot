@@ -2,6 +2,7 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { App } from "./app";
 import { envError } from "./lib/env";
+import { ensureThemeApplied } from "./lib/theme";
 import "./index.css";
 
 function ConfigurationError({ message }: { message: string }) {
@@ -17,6 +18,9 @@ function ConfigurationError({ message }: { message: string }) {
     </main>
   );
 }
+
+// Normally already set by public/theme-init.js before the first paint.
+ensureThemeApplied();
 
 const root = document.getElementById("root");
 if (root) {

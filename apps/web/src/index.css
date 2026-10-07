@@ -1,5 +1,12 @@
 @import "tailwindcss";
 
+/*
+ * Theme: <html data-theme="light|dark">, set before the first paint by public/theme-init.js
+ * (the user's choice from the navbar, otherwise the operating system's preference) and
+ * changed by src/lib/theme.ts. The same tokens below; `dark:` utilities follow the attribute.
+ */
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+
 /* shadcn/ui-style design tokens (neutral palette, light + dark). */
 @theme inline {
   --color-background: var(--background);
@@ -25,6 +32,7 @@
 }
 
 :root {
+  color-scheme: light;
   --background: oklch(0.99 0 0);
   --foreground: oklch(0.18 0.01 260);
   --card: oklch(1 0 0);
@@ -44,26 +52,25 @@
   --ring: oklch(0.55 0.17 265);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: oklch(0.16 0.01 260);
-    --foreground: oklch(0.96 0 0);
-    --card: oklch(0.2 0.01 260);
-    --card-foreground: oklch(0.96 0 0);
-    --muted: oklch(0.25 0.01 260);
-    --muted-foreground: oklch(0.7 0.01 260);
-    --primary: oklch(0.68 0.15 265);
-    --primary-foreground: oklch(0.16 0.01 260);
-    --secondary: oklch(0.26 0.01 260);
-    --secondary-foreground: oklch(0.96 0 0);
-    --accent: oklch(0.28 0.04 265);
-    --accent-foreground: oklch(0.96 0 0);
-    --destructive: oklch(0.62 0.2 27);
-    --destructive-foreground: oklch(0.98 0 0);
-    --border: oklch(0.3 0.01 260);
-    --input: oklch(0.3 0.01 260);
-    --ring: oklch(0.68 0.15 265);
-  }
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --background: oklch(0.16 0.01 260);
+  --foreground: oklch(0.96 0 0);
+  --card: oklch(0.2 0.01 260);
+  --card-foreground: oklch(0.96 0 0);
+  --muted: oklch(0.25 0.01 260);
+  --muted-foreground: oklch(0.7 0.01 260);
+  --primary: oklch(0.68 0.15 265);
+  --primary-foreground: oklch(0.16 0.01 260);
+  --secondary: oklch(0.26 0.01 260);
+  --secondary-foreground: oklch(0.96 0 0);
+  --accent: oklch(0.28 0.04 265);
+  --accent-foreground: oklch(0.96 0 0);
+  --destructive: oklch(0.62 0.2 27);
+  --destructive-foreground: oklch(0.98 0 0);
+  --border: oklch(0.3 0.01 260);
+  --input: oklch(0.3 0.01 260);
+  --ring: oklch(0.68 0.15 265);
 }
 
 @layer base {
