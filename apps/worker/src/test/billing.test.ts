@@ -165,7 +165,7 @@ describe("CULQI_EVENT", () => {
   it("Culqi unavailable: event FAILED with the error code and the job is retried (thrown)", async () => {
     const store = makeStore([row()], received());
     const culqi = makeCulqi();
-    culqi.getEvent.mockRejectedValueOnce(new CulqiApiError(503, "api_error", null, null, "getEvent"));
+    vi.mocked(culqi.getEvent).mockRejectedValueOnce(new CulqiApiError(503, "api_error", null, null, "getEvent"));
     await expect(handleCulqiEvent(EVT, deps(store, culqi))).rejects.toBeInstanceOf(CulqiApiError);
     expect(store.updates.at(-1)?.patch).toMatchObject({ status: "FAILED", lastError: "getEvent: HTTP 503 api_error" });
   });
@@ -213,7 +213,7 @@ describe("CULQI_RECONCILE (confirmation without webhooks)", () => {
     const store = makeStore([row({ status: "ACTIVE" })]);
     store.cancellations.push({ id: "bill-old", externalSubscriptionId: "sxn_test_OLD" });
     const culqi = makeCulqi();
-    culqi.cancelSubscription.mockRejectedValueOnce(new CulqiApiError(500, "api_error", null, null, "cancelSubscription"));
+    vi.mocked(culqi.cancelSubscription).mockRejectedValueOnce(new CulqiApiError(500, "api_error", null, null, "cancelSubscription"));
     await expect(reconcileCulqiSubscription("bill-1", deps(store, culqi))).rejects.toBeInstanceOf(CulqiApiError);
     expect(store.markProviderCanceled).not.toHaveBeenCalled();
   });
