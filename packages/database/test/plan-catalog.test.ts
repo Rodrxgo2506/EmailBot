@@ -311,6 +311,25 @@ describe("catalog privileges", () => {
     await expect(t.asService((tx) => tx.query("update public.plan_prices set amount = 1"))).rejects.toThrow(/permission denied/);
     await expect(t.asService((tx) => tx.query("update public.plan_entitlements set enabled = true"))).rejects.toThrow(/permission denied/);
   });
+
+  it("service role (public catalog GET /api/plans): reads the active plans, prices and entitlements the API selects", async () => {
+    await t.asService(async (tx) => {
+      const plans = (await tx.query<{ code: string; badge: string | null }>("select code, name, description, badge, sort_order from public.plan_catalog where active order by sort_order")).rows;
+      expect(plans.map((plan) => plan.code)).toEqual(["BASIC", "PRO", "BUSINESS"]);
+      expect(plans.find((plan) => plan.code === "PRO")?.badge).toBe("Más elegido");
+      const prices = (
+        await tx.query<{ code: string; billing_period: string; amount: string; amount_cents: number }>(
+          "select c.code, p.billing_period, p.currency, p.amount, p.amount_cents, p.active from public.plan_prices p join public.plan_catalog c on c.id = p.plan_id where p.active order by c.sort_order, p.billing_period"
+        )
+      ).rows;
+      expect(prices.filter((price) => price.billing_period === "MONTHLY").map((price) => [price.code, price.amount, price.amount_cents])).toEqual([
+        ["BASIC", "19.90", 1990],
+        ["PRO", "39.90", 3990],
+        ["BUSINESS", "89.90", 8990]
+      ]);
+      expect(await count(tx, "select key, kind, limit_value, enabled from public.plan_entitlements")).toBe(42);
+    });
+  });
 });
 
 describe("legacy FREE organizations (created before Commercial V1)", () => {

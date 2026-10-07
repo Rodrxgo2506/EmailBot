@@ -177,8 +177,35 @@ suscripción.
   2. paga por Yape, efectivo o transferencia;
   3. el Super Admin registra el pago y activa la suscripción.
 
+**Página de planes y «Mi plan» (implementado, sin cobro):**
+- `GET /api/plans` (público, sin sesión, solo lectura, `Cache-Control: public, max-age=300`): planes, precios y
+  entitlements **activos** del catálogo de la base. Es la única fuente de la web: no hay precios ni límites escritos
+  en el frontend. Lo lee el service role, que ya tenía `SELECT` sobre las tres tablas del catálogo; no hubo
+  migración.
+- `/planes` (pública):
+  - tarjetas de BÁSICO, PRO («Más elegido») y BUSINESS, con el precio mensual y el anual, IGV incluido;
+  - tabla comparativa.
+- Solo se muestra lo que existe: cuentas, correos/mes, reglas, bots, clientes, miembros, almacenamiento, Gmail,
+  Microsoft y Portal. `RETENTION_DAYS`, `ADVANCED_STATS`, `API` y `PRIORITY_SUPPORT` no se ofrecen (ver
+  «Pendiente»).
+- Botones de `/planes` según quién visita:
+  - anónimo → «Crear cuenta» (`/register` existente);
+  - con sesión → el plan efectivo aparece como «Plan actual» (deshabilitado; una organización FREE heredada se
+    reconoce como BÁSICO);
+  - los planes inferiores al actual → «Incluido en tu plan»;
+  - los superiores → «Mejorar a …»;
+  - sin suscripción → «Elegir …».
+- Configuración → sección «Mi plan»:
+  - la tarjeta de plan existente (uso real medido por `organization_usage` y funcionalidades);
+  - «Mejorar plan», con los planes superiores y lo que cada uno añade;
+  - en BUSINESS: «Actualmente tienes el plan más completo».
+- **Elegir o mejorar un plan solo abre el aviso «Contratación en línea próximamente»**, con el contacto. No hay cobro,
+  activación, suscripción ni registro de pago. El Super Admin sigue activando los planes como hasta ahora.
+- Fase 2: la única acción a sustituir es la del botón «Elegir / Mejorar» (`PlanCta` `CHOOSE` en
+  `apps/web/src/features/plans/plans-model.ts`), que pasará del aviso al checkout.
+
 **Flujo objetivo con Culqi (fase 2):**
-1. `/pricing` → `/checkout?plan=PRO&period=MONTHLY`.
+1. `/planes` → `/checkout?plan=PRO&period=MONTHLY`.
 2. Pago confirmado por webhook.
 3. `/register?purchase=…` → crear la cuenta y la organización.
 4. `private.activate_subscription(..., origin CULQI, external_event_id = id del evento de Culqi)`.

@@ -55,6 +55,7 @@ rate limiting. No usarlo como health check de Render (igual que `/health/ready`)
 | POST | `/api/organizations/current/members` | `members:manage` (`{ email, role }`) |
 | PATCH / DELETE | `/api/organizations/current/members/:id` | `members:manage` |
 | GET | `/api/organizations/current/plan` | miembro — entitlements (`access`: `SUBSCRIPTION` / `LEGACY` / `NONE`), uso y suscripción actual (también con la organización suspendida o sin suscripción) |
+| GET | `/api/plans` | **público** (sin sesión) — catálogo activo `{ items: PlanCatalogEntry[] }`: planes, precios (`amount` decimal en texto + `amountCents`) y entitlements; cacheable 5 min, 60 req/min por IP |
 
 **Planes y suscripción (Comercial V1 / V1.1, [detalle](commercial-plans.md))**: EmailBot es de pago. Sin una suscripción
 activa (ni acceso de legado) toda acción comercial responde `403 SUBSCRIPTION_REQUIRED` (`details: { subscriptionStatus }`).

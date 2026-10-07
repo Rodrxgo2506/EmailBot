@@ -39,6 +39,7 @@ import type {
   Organization,
   OrganizationMember,
   OrganizationEntitlements,
+  PlanCatalogEntry,
   OrganizationMembership,
   OrganizationPlan,
   OrganizationRole,
@@ -486,6 +487,8 @@ export interface PrivilegedOperations {
    */
   getOrganizationEntitlements(organizationId: string): Promise<OrganizationEntitlements | null>;
   getOrganizationUsage(organizationId: string, keys: readonly PlanUsageKey[]): Promise<Partial<PlanUsage>>;
+  /** Commercial V1: the public plan catalog (GET /api/plans, no session); active plans, prices and entitlements only. */
+  listPlanCatalog(): Promise<PlanCatalogEntry[]>;
   /** Status of the mailbox the OAuth upsert would update (same organization, provider and address), or null. */
   findOAuthEmailAccountStatus(
     organizationId: string,

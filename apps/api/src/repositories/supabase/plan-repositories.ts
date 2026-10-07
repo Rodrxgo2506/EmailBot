@@ -1,13 +1,17 @@
 import {
+  BILLING_PERIODS,
   PLAN_ACCESS,
   PLAN_FEATURE_KEYS,
   PLAN_LIMIT_KEYS,
   PLAN_USAGE_KEYS,
   isCommercialPlan,
+  type BillingPeriod,
+  type CommercialPlan,
   type OrganizationEntitlements,
   type OrganizationPlan,
   type OrganizationSubscriptionSummary,
   type PlanAccess,
+  type PlanCatalogEntry,
   type PlanFeatureKey,
   type PlanLimitKey,
   type PlanUsage,
@@ -93,6 +97,52 @@ export function toSubscriptionSummary(row: Row): OrganizationSubscriptionSummary
 }
 
 const OPEN_STATUSES: readonly SubscriptionStatus[] = ["ACTIVE", "PAST_DUE", "SUSPENDED"];
+
+export const PLAN_CATALOG_COLUMNS =
+  "code,name,description,badge,sort_order," +
+  "prices:plan_prices(billing_period,currency,amount,amount_cents,active)," +
+  "entitlements:plan_entitlements(key,kind,limit_value,enabled)";
+
+/**
+ * Rows of the active plan_catalog (with prices and entitlements) -> public
+ * catalog, sorted by sort_order. Non-commercial codes and inactive prices are
+ * dropped; limits / features fail closed as in toEntitlements.
+ */
+export function toPlanCatalog(rows: Row[]): PlanCatalogEntry[] {
+  return rows
+    .filter((row) => isCommercialPlan(String(row.code)))
+    .map((row): PlanCatalogEntry => {
+      const limits = Object.fromEntries(PLAN_LIMIT_KEYS.map((key) => [key, 0])) as Record<PlanLimitKey, number | null>;
+      const features = Object.fromEntries(PLAN_FEATURE_KEYS.map((key) => [key, false])) as Record<PlanFeatureKey, boolean>;
+      for (const entitlement of (row.entitlements ?? []) as Row[]) {
+        if (entitlement.kind === "LIMIT" && (PLAN_LIMIT_KEYS as readonly string[]).includes(entitlement.key)) {
+          limits[entitlement.key as PlanLimitKey] = entitlement.limit_value === null ? null : Number(entitlement.limit_value);
+        } else if (entitlement.kind === "FEATURE" && (PLAN_FEATURE_KEYS as readonly string[]).includes(entitlement.key)) {
+          features[entitlement.key as PlanFeatureKey] = entitlement.enabled === true;
+        }
+      }
+      const prices = ((row.prices ?? []) as Row[])
+        .filter((price) => price.active === true && (BILLING_PERIODS as readonly string[]).includes(price.billing_period))
+        .map((price) => ({
+          billingPeriod: price.billing_period as BillingPeriod,
+          currency: String(price.currency),
+          amount: toDecimalString(price.amount),
+          amountCents: Number(price.amount_cents)
+        }))
+        .sort((a, b) => BILLING_PERIODS.indexOf(a.billingPeriod) - BILLING_PERIODS.indexOf(b.billingPeriod));
+      return {
+        code: row.code as CommercialPlan,
+        name: String(row.name),
+        description: row.description ?? null,
+        badge: row.badge ?? null,
+        sortOrder: Number(row.sort_order),
+        prices,
+        limits,
+        features
+      };
+    })
+    .sort((a, b) => a.sortOrder - b.sortOrder);
+}
 
 export function planRepository(db: SupabaseClient): PlanRepository {
   return {
