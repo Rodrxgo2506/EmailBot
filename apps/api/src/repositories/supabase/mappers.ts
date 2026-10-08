@@ -15,7 +15,7 @@ import type {
   Profile
 } from "@emailbot/types";
 import { ruleActionsDocumentSchema, ruleConditionsDocumentSchema } from "@emailbot/validation";
-import type { EmailRule } from "../types.js";
+import type { ComplaintCopy, ComplaintEmailOutcome, EmailRule } from "../types.js";
 
 /* snake_case rows (as returned by PostgREST) -> camelCase DTOs. */
 
@@ -291,3 +291,40 @@ export function toAuditEntry(row: Row): AuditLogEntry {
     createdAt: row.created_at
   };
 }
+
+/** Rows of the complaint copy claim functions (public.* / admin.claim_complaint_confirmation_email). */
+export function toComplaintCopy(row: Row): ComplaintCopy {
+  return {
+    id: row.id,
+    number: Number(row.number),
+    code: row.code,
+    kind: row.kind,
+    consumer: {
+      firstNames: row.consumer_first_names,
+      lastNames: row.consumer_last_names,
+      documentType: row.document_type,
+      documentNumber: row.document_number,
+      email: row.email,
+      phone: row.phone,
+      address: row.address,
+      isMinor: row.is_minor === true,
+      guardianName: row.guardian_name ?? null
+    },
+    good: {
+      type: row.good_type,
+      description: row.good_description,
+      claimedAmountCents: row.claimed_amount_cents === null || row.claimed_amount_cents === undefined ? null : Number(row.claimed_amount_cents)
+    },
+    detail: row.detail,
+    consumerRequest: row.consumer_request,
+    createdAt: row.created_at,
+    idempotencyKey: row.idempotency_key
+  };
+}
+
+/** Arguments of the record_complaint_* functions. */
+export const complaintEmailOutcomeArgs = (outcome: ComplaintEmailOutcome) => ({
+  p_outcome: outcome.outcome,
+  p_provider_message_id: outcome.outcome === "SENT" ? outcome.providerMessageId : null,
+  p_error_code: outcome.outcome === "SENT" ? null : outcome.errorCode
+});

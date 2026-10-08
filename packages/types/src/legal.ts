@@ -9,8 +9,8 @@ export const LEGAL_DOCUMENTS = ["terms", "privacy"] as const;
 export type LegalDocument = (typeof LEGAL_DOCUMENTS)[number];
 
 export const CURRENT_LEGAL_VERSIONS: Readonly<Record<LegalDocument, string>> = Object.freeze({
-  terms: "2.0",
-  privacy: "2.0"
+  terms: "3.0",
+  privacy: "3.0"
 });
 
 /** A recorded acceptance (public.legal_acceptances). */

@@ -5,6 +5,7 @@ import type {
   AdminOrganizationDetail,
   AdminOrganizationSummary,
   AdminStats,
+  ComplaintBookEntry,
   OffsetPage,
   Paginated
 } from "@emailbot/types";
@@ -90,6 +91,31 @@ const auditEntry: AdminAuditEntry = {
   createdAt: "2026-10-05T09:30:00.000Z"
 };
 
+const complaint: ComplaintBookEntry = {
+  id: "cb-1",
+  number: 7,
+  code: "LR-2026-000007",
+  kind: "RECLAMO",
+  status: "PENDING",
+  consumer: {
+    firstNames: "María",
+    lastNames: "Pérez Soto",
+    documentType: "DNI",
+    documentNumber: "12345678",
+    email: "maria@example.com",
+    phone: "987654321",
+    address: "Av. Siempre Viva 123, Lima",
+    isMinor: false,
+    guardianName: null
+  },
+  good: { type: "SERVICIO", description: "Plan Pro mensual", claimedAmountCents: 3990 },
+  detail: "<script>alert(1)</script> Se me cobró dos veces.",
+  consumerRequest: "Devolución del cobro duplicado.",
+  confirmationEmail: { status: "SENT", sentAt: "2026-10-07T21:30:02.000Z", errorCode: null, decisionRequired: false },
+  response: { text: null, emailStatus: null, errorCode: null, respondedAt: null, respondedByEmail: null, decisionRequired: false },
+  createdAt: "2026-10-07T21:30:00.000Z"
+};
+
 const SUB = "77777777-7777-4777-8777-777777777777";
 const PRICES = [
   { id: "p1", plan: "BASIC", planName: "Básico", billingPeriod: "MONTHLY", currency: "PEN", amount: "19.90", amountCents: 1990 },
@@ -146,6 +172,11 @@ function fakeApi(overrides: Partial<Record<keyof AdminApi, unknown>> = {}) {
     ]),
     activity: vi.fn(async () => logPage([activityItem])),
     audit: vi.fn(async () => logPage([auditEntry])),
+    complaints: vi.fn(async () => logPage([complaint])),
+    respondToComplaint: vi.fn(async () => ({ status: "RESPONDED", respondedAt: "2026-10-08T15:00:00.000Z" })),
+    resendComplaintCopy: vi.fn(async () => ({ confirmationEmail: "SENT" })),
+    confirmComplaintResponse: vi.fn(async () => ({ status: "RESPONDED", respondedAt: "2026-10-08T15:00:00.000Z" })),
+    confirmComplaintCopy: vi.fn(async () => ({ confirmationEmail: "SENT" })),
     planPrices: vi.fn(async () => PRICES),
     subscription: vi.fn(async (): Promise<{ subscriptions: unknown[]; paymentEvents: unknown[] }> => ({ subscriptions: [], paymentEvents: [] })),
     activateSubscription: vi.fn(async () => ({ subscriptionId: SUB, outcome: "ACTIVATED", organization: detail() })),
@@ -257,7 +288,7 @@ describe("dashboard", () => {
     expect(screen.getByRole("link", { name: /Ver organizaciones/ })).toHaveAttribute("href", "/admin/organizations");
     const main = screen.getByRole("main");
     expect(within(main).getByRole("link", { name: /Auditoría/ })).toHaveAttribute("href", "/admin/audit");
-    expect(within(screen.getByRole("navigation", { name: "Administración" })).getAllByRole("link")).toHaveLength(3);
+    expect(within(screen.getByRole("navigation", { name: "Administración" })).getAllByRole("link")).toHaveLength(4);
   });
 
   it("shows the API error when the stats cannot be loaded", async () => {
@@ -586,5 +617,227 @@ describe("platform audit page", () => {
   it("empty state", async () => {
     renderAdmin("/admin/audit", fakeApi({ audit: vi.fn(async () => logPage([])) }));
     expect(await screen.findByText("Sin registros")).toBeInTheDocument();
+  });
+});
+
+describe("Libro de reclamaciones (admin)", () => {
+  it("lists the sheets with number, date, kind, consumer and status, and shows the detail and the request", async () => {
+    const api = fakeApi({ complaints: vi.fn(async () => logPage([complaint], true)) });
+    renderAdmin("/admin/complaints-book", api);
+    expect(await screen.findByText("LR-2026-000007")).toBeInTheDocument();
+    const main = screen.getByRole("main");
+    expect(within(main).getByText("Reclamo")).toBeInTheDocument();
+    expect(within(main).getByText("María Pérez Soto")).toBeInTheDocument();
+    expect(within(main).getByText("Pendiente")).toBeInTheDocument();
+    expect(within(main).getByText(/Constancia enviada/)).toBeInTheDocument();
+    expect(within(main).queryByRole("button", { name: "Reenviar constancia" })).not.toBeInTheDocument();
+    expect(within(main).getByText("Devolución del cobro duplicado.")).toBeInTheDocument();
+    expect(within(main).getByText("S/ 39.90")).toBeInTheDocument();
+    expect(within(main).getByText("<script>alert(1)</script> Se me cobró dos veces.")).toBeInTheDocument();
+    expect(main.querySelector("script")).toBeNull();
+    expect(api.complaints).toHaveBeenCalledWith({ page: 1, pageSize: 25 });
+    fireEvent.click(screen.getByRole("button", { name: "Siguiente" }));
+    await waitFor(() => expect(api.complaints).toHaveBeenLastCalledWith({ page: 2, pageSize: 25 }));
+    expect(within(screen.getByRole("navigation", { name: "Administración" })).getByRole("link", { name: /Libro de reclamaciones/ })).toHaveAttribute(
+      "href",
+      "/admin/complaints-book"
+    );
+  });
+
+  it("empty state", async () => {
+    renderAdmin("/admin/complaints-book", fakeApi({ complaints: vi.fn(async () => logPage([])) }));
+    expect(await screen.findByText("Sin hojas de reclamación")).toBeInTheDocument();
+  });
+
+  it("shows the API error (for example, 403 for non administrators)", async () => {
+    renderAdmin("/admin/complaints-book", fakeApi({ complaints: vi.fn(async () => Promise.reject(new ApiError(403, "FORBIDDEN", "No tienes permisos para esta acción."))) }));
+    expect(await screen.findByText(/No tienes permisos/)).toBeInTheDocument();
+  });
+});
+
+describe("Libro de reclamaciones: answers and copies (admin)", () => {
+  const ANSWER = "Revisamos tu caso y devolveremos el cobro duplicado.";
+
+  it("an administrator writes an answer, reviews it and confirms; the list refreshes", async () => {
+    const api = fakeApi();
+    renderAdmin("/admin/complaints-book", api);
+    fireEvent.click(await screen.findByRole("button", { name: "Responder" }));
+    const field = screen.getByLabelText("Respuesta al consumidor");
+
+    fireEvent.change(field, { target: { value: "corta" } });
+    fireEvent.click(screen.getByRole("button", { name: "Revisar y enviar" }));
+    expect(screen.getByRole("alert")).toHaveTextContent(/al menos 10 caracteres/);
+    expect(api.respondToComplaint).not.toHaveBeenCalled();
+
+    fireEvent.change(field, { target: { value: ANSWER } });
+    fireEvent.click(screen.getByRole("button", { name: "Revisar y enviar" }));
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).toHaveTextContent("¿Enviar la respuesta a LR-2026-000007?");
+    expect(dialog).toHaveTextContent("maria@example.com");
+    expect(dialog).toHaveTextContent(/solo si el proveedor de correo acepta el envío/);
+    expect(api.respondToComplaint).not.toHaveBeenCalled();
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "Enviar respuesta" }));
+    await waitFor(() => expect(api.respondToComplaint).toHaveBeenCalledWith("cb-1", ANSWER, { forceResend: false }));
+    await waitFor(() => expect(api.complaints).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+  });
+
+  it("a rejected e-mail is reported in the dialog and nothing is marked as answered", async () => {
+    const api = fakeApi({
+      respondToComplaint: vi.fn(async () => Promise.reject(new ApiError(502, "EMAIL_NOT_SENT", "The e-mail provider did not accept the answer")))
+    });
+    renderAdmin("/admin/complaints-book", api);
+    fireEvent.click(await screen.findByRole("button", { name: "Responder" }));
+    fireEvent.change(screen.getByLabelText("Respuesta al consumidor"), { target: { value: ANSWER } });
+    fireEvent.click(screen.getByRole("button", { name: "Revisar y enviar" }));
+    fireEvent.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Enviar respuesta" }));
+    expect(await within(screen.getByRole("dialog")).findByRole("alert")).toHaveTextContent(/no aceptó el envío.*sigue pendiente/);
+    expect(screen.queryByText("Respondido")).not.toBeInTheDocument();
+  });
+
+  it("an answered sheet shows the answer (as text), when and who; it cannot be answered again", async () => {
+    const answered: ComplaintBookEntry = {
+      ...complaint,
+      status: "RESPONDED",
+      response: { text: "<b>Hecho</b> devolvimos el cobro.", emailStatus: "SENT", errorCode: null, respondedAt: "2026-10-08T15:00:00.000Z", respondedByEmail: "root@platform.test", decisionRequired: false }
+    };
+    renderAdmin("/admin/complaints-book", fakeApi({ complaints: vi.fn(async () => logPage([answered])) }));
+    const main = await screen.findByRole("main");
+    expect(await within(main).findByText("Respondido")).toBeInTheDocument();
+    expect(within(main).getByText("<b>Hecho</b> devolvimos el cobro.")).toBeInTheDocument();
+    expect(main.querySelector("b")).toBeNull();
+    expect(within(main).getByText(/Respuesta enviada el .* por root@platform\.test/)).toBeInTheDocument();
+    expect(within(main).queryByRole("button", { name: "Responder" })).not.toBeInTheDocument();
+  });
+
+  it("a failed answer is visible and the last text is offered again", async () => {
+    const failed: ComplaintBookEntry = {
+      ...complaint,
+      response: { text: ANSWER, emailStatus: "FAILED", errorCode: "PROVIDER_REJECTED", respondedAt: null, respondedByEmail: null, decisionRequired: false }
+    };
+    renderAdmin("/admin/complaints-book", fakeApi({ complaints: vi.fn(async () => logPage([failed])) }));
+    expect(await screen.findByText(/El último intento de respuesta no se envió \(PROVIDER_REJECTED\)/)).toBeInTheDocument();
+    expect(screen.getByText("Pendiente")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Responder" }));
+    expect(screen.getByLabelText("Respuesta al consumidor")).toHaveValue(ANSWER);
+  });
+
+  it("an answer with an uncertain outcome is explained, nothing says Respondido, and the stored text is offered as is", async () => {
+    const pending: ComplaintBookEntry = {
+      ...complaint,
+      response: { text: ANSWER, emailStatus: "SENDING", errorCode: "PROVIDER_TIMEOUT", respondedAt: null, respondedByEmail: null, decisionRequired: false }
+    };
+    renderAdmin("/admin/complaints-book", fakeApi({ complaints: vi.fn(async () => logPage([pending])) }));
+    expect(await screen.findByText(/no confirmó el último envío \(PROVIDER_TIMEOUT\): pudo haberse enviado/)).toBeInTheDocument();
+    expect(screen.getByText("Pendiente")).toBeInTheDocument();
+    expect(screen.queryByText("Respondido")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Responder" }));
+    expect(screen.getByLabelText("Respuesta al consumidor")).toHaveValue(ANSWER);
+  });
+
+  it("an uncertain answer reported by the API is shown as such (not as sent, not as failed)", async () => {
+    const api = fakeApi({
+      respondToComplaint: vi.fn(async () => Promise.reject(new ApiError(502, "EMAIL_OUTCOME_UNKNOWN", "The e-mail provider did not confirm the answer")))
+    });
+    renderAdmin("/admin/complaints-book", api);
+    fireEvent.click(await screen.findByRole("button", { name: "Responder" }));
+    fireEvent.change(screen.getByLabelText("Respuesta al consumidor"), { target: { value: ANSWER } });
+    fireEvent.click(screen.getByRole("button", { name: "Revisar y enviar" }));
+    fireEvent.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Enviar respuesta" }));
+    expect(await within(screen.getByRole("dialog")).findByRole("alert")).toHaveTextContent(/pudo haberse enviado.*no se enviará dos veces/);
+  });
+
+  it("a copy with an uncertain outcome is labelled and can be sent again (same key, server side)", async () => {
+    const uncertainCopy: ComplaintBookEntry = { ...complaint, confirmationEmail: { status: "SENDING", sentAt: null, errorCode: "PROVIDER_UNAVAILABLE", decisionRequired: false } };
+    renderAdmin("/admin/complaints-book", fakeApi({ complaints: vi.fn(async () => logPage([uncertainCopy])) }));
+    expect((await screen.findAllByText(/Constancia con resultado incierto/)).length).toBeGreaterThan(0);
+    expect(screen.getByRole("button", { name: "Reenviar constancia" })).toBeInTheDocument();
+  });
+
+  it("a copy that was not sent can be sent again after confirming", async () => {
+    const notSent: ComplaintBookEntry = { ...complaint, confirmationEmail: { status: "FAILED", sentAt: null, errorCode: "PROVIDER_UNAVAILABLE", decisionRequired: false } };
+    const api = fakeApi({ complaints: vi.fn(async () => logPage([notSent])) });
+    renderAdmin("/admin/complaints-book", api);
+    expect((await screen.findAllByText(/Constancia no enviada/)).length).toBeGreaterThan(0);
+    fireEvent.click(screen.getByRole("button", { name: "Reenviar constancia" }));
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).toHaveTextContent("maria@example.com");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Reenviar constancia" }));
+    await waitFor(() => expect(api.resendComplaintCopy).toHaveBeenCalledWith("cb-1", { forceResend: false }));
+  });
+});
+
+describe("Libro de reclamaciones: unknown outcome past the provider's idempotency window (admin)", () => {
+  const ANSWER = "Revisamos tu caso y devolveremos el cobro duplicado.";
+  const PROVIDER_ID = "0b2c7a1e-5d3f-4c6a-9e8b-1f2a3b4c5d6e";
+  const undecided: ComplaintBookEntry = {
+    ...complaint,
+    response: { text: ANSWER, emailStatus: "SENDING", errorCode: "PROVIDER_TIMEOUT", respondedAt: null, respondedByEmail: null, decisionRequired: true }
+  };
+
+  it("explains that nothing is resent automatically and offers the two explicit decisions (no plain Responder)", async () => {
+    renderAdmin("/admin/complaints-book", fakeApi({ complaints: vi.fn(async () => logPage([undecided])) }));
+    expect(await screen.findByText(/no la reenviará\s+automáticamente/)).toBeInTheDocument();
+    expect(screen.getByText(/más de\s+23\s+horas/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Registrar respuesta como enviada" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Reenviar de todos modos" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Responder" })).not.toBeInTheDocument();
+    expect(screen.queryByText("Respondido")).not.toBeInTheDocument();
+  });
+
+  it("records it as sent with the Resend id (validated); no e-mail is sent", async () => {
+    const api = fakeApi({ complaints: vi.fn(async () => logPage([undecided])) });
+    renderAdmin("/admin/complaints-book", api);
+    fireEvent.click(await screen.findByRole("button", { name: "Registrar respuesta como enviada" }));
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).toHaveTextContent("maria@example.com");
+    expect(dialog).toHaveTextContent("no se enviará ningún correo");
+    const field = within(dialog).getByLabelText("ID del correo en Resend");
+    fireEvent.change(field, { target: { value: "<b>x</b>" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Registrar como enviada" }));
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent(/ID del correo en Resend/);
+    expect(api.confirmComplaintResponse).not.toHaveBeenCalled();
+    fireEvent.change(field, { target: { value: PROVIDER_ID } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Registrar como enviada" }));
+    await waitFor(() => expect(api.confirmComplaintResponse).toHaveBeenCalledWith("cb-1", PROVIDER_ID));
+    expect(api.respondToComplaint).not.toHaveBeenCalled();
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+  });
+
+  it("resending anyway warns about a duplicate and sends forceResend", async () => {
+    const api = fakeApi({ complaints: vi.fn(async () => logPage([undecided])) });
+    renderAdmin("/admin/complaints-book", api);
+    fireEvent.click(await screen.findByRole("button", { name: "Reenviar de todos modos" }));
+    expect(screen.getByLabelText("Respuesta al consumidor")).toHaveValue(ANSWER);
+    fireEvent.click(screen.getByRole("button", { name: "Revisar y enviar" }));
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).toHaveTextContent(/recibirá dos respuestas/);
+    fireEvent.click(within(dialog).getByRole("button", { name: "Reenviar de todos modos" }));
+    await waitFor(() => expect(api.respondToComplaint).toHaveBeenCalledWith("cb-1", ANSWER, { forceResend: true }));
+  });
+
+  it("the copy: confirm with the Resend id, or resend anyway (forceResend) after a warning", async () => {
+    const undecidedCopy: ComplaintBookEntry = {
+      ...complaint,
+      confirmationEmail: { status: "SENDING", sentAt: null, errorCode: "PROVIDER_NETWORK", decisionRequired: true }
+    };
+    const api = fakeApi({ complaints: vi.fn(async () => logPage([undecidedCopy])) });
+    renderAdmin("/admin/complaints-book", api);
+    expect(await screen.findByText(/no\s+la reenviará automáticamente/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Reenviar constancia" })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Registrar constancia como enviada" }));
+    const confirmDialog = await screen.findByRole("dialog");
+    fireEvent.change(within(confirmDialog).getByLabelText("ID del correo en Resend"), { target: { value: PROVIDER_ID } });
+    fireEvent.click(within(confirmDialog).getByRole("button", { name: "Registrar como enviada" }));
+    await waitFor(() => expect(api.confirmComplaintCopy).toHaveBeenCalledWith("cb-1", PROVIDER_ID));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("button", { name: "Reenviar constancia de todos modos" }));
+    const resendDialog = await screen.findByRole("dialog");
+    expect(resendDialog).toHaveTextContent(/recibirá la copia dos veces/);
+    fireEvent.click(within(resendDialog).getByRole("button", { name: "Reenviar constancia de todos modos" }));
+    await waitFor(() => expect(api.resendComplaintCopy).toHaveBeenCalledWith("cb-1", { forceResend: true }));
   });
 });

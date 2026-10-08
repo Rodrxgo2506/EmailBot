@@ -37,6 +37,34 @@ export interface NonceStore {
   consume(nonce: string, ttlSeconds: number): Promise<boolean>;
 }
 
+/** One transactional e-mail (Libro de Reclamaciones). */
+export interface OutgoingEmail {
+  to: string;
+  subject: string;
+  html: string;
+  text: string;
+  /** Same key = the provider returns the first result instead of sending again. */
+  idempotencyKey: string;
+  /** Provider tag (letters, digits, _ and - only). */
+  category: string;
+}
+
+/**
+ * Outcome of one e-mail request:
+ * - SENT: the provider accepted it (accepted, not necessarily delivered);
+ * - REJECTED: the provider confirmed it did NOT accept it (safe to retry with a new idempotency key);
+ * - UNKNOWN: it may have been accepted (timeout, network error, 5xx, 409): retry with the SAME key and content.
+ */
+export type MailOutcome =
+  | { outcome: "SENT"; providerMessageId: string | null }
+  | { outcome: "REJECTED"; errorCode: "PROVIDER_REJECTED" | "PROVIDER_AUTH" | "PROVIDER_RATE_LIMITED" }
+  | { outcome: "UNKNOWN"; errorCode: "PROVIDER_TIMEOUT" | "PROVIDER_NETWORK" | "PROVIDER_UNAVAILABLE" | "PROVIDER_CONFLICT" | "PROVIDER_ERROR" };
+
+/** Transactional e-mail provider. Never throws; never logs addresses or content. */
+export interface TransactionalMailer {
+  send(email: OutgoingEmail): Promise<MailOutcome>;
+}
+
 export interface ReadinessCheck {
   name: string;
   check(): Promise<void>;
@@ -64,6 +92,8 @@ export interface AppDeps {
   rateLimitRedis?: RateLimitRedis;
   /** Pub/Sub push OIDC verification (default: Google's JWKS through deps.fetch). */
   pubsubVerifier?: GoogleOidcVerifier;
+  /** Transactional e-mail (RESEND_API_KEY + TRANSACTIONAL_EMAIL_FROM); absent = the complaints book e-mails stay pending. */
+  mailer?: TransactionalMailer;
   /** Publishes realtime events to every API instance through Redis (portal signals of manual deliveries). */
   realtimePublisher?: { publish(event: RealtimeEvent): Promise<void> };
 }

@@ -19,7 +19,8 @@ export const adminKeys = {
   subscription: (id: string) => ["admin", "organizations", "detail", id, "subscription"] as const,
   planPrices: ["admin", "plan-prices"] as const,
   activity: (params: AdminLogParams) => ["admin", "activity", params] as const,
-  audit: (params: AdminLogParams) => ["admin", "audit", params] as const
+  audit: (params: AdminLogParams) => ["admin", "audit", params] as const,
+  complaints: (page: number) => ["admin", "complaints-book", page] as const
 };
 
 export function useAdminStats() {
@@ -60,6 +61,43 @@ export function useAdminEmailAccounts(id: string) {
 export function useAdminActivity(params: AdminLogParams) {
   const api = useAdminApi();
   return useQuery({ queryKey: adminKeys.activity(params), queryFn: () => api.activity(params), placeholderData: keepPreviousData });
+}
+
+export function useAdminComplaints(page: number, pageSize: number) {
+  const api = useAdminApi();
+  return useQuery({ queryKey: adminKeys.complaints(page), queryFn: () => api.complaints({ page, pageSize }), placeholderData: keepPreviousData });
+}
+
+/** Complaint e-mails (answer, copy sent again): refresh the book and the audit trail, whatever the outcome. */
+function useComplaintMutation<TVariables, TResult>(mutationFn: (variables: TVariables) => Promise<TResult>) {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn,
+    onSettled: () => {
+      void client.invalidateQueries({ queryKey: ["admin", "complaints-book"] });
+      void client.invalidateQueries({ queryKey: ["admin", "audit"] });
+    }
+  });
+}
+
+export function useRespondToComplaint() {
+  const api = useAdminApi();
+  return useComplaintMutation(({ id, response, forceResend = false }: { id: string; response: string; forceResend?: boolean }) =>
+    api.respondToComplaint(id, response, { forceResend })
+  );
+}
+
+export function useResendComplaintCopy() {
+  const api = useAdminApi();
+  return useComplaintMutation(({ id, forceResend = false }: { id: string; forceResend?: boolean }) => api.resendComplaintCopy(id, { forceResend }));
+}
+
+/** An e-mail with an unknown outcome recorded as sent with the Resend id the administrator found. */
+export function useConfirmComplaintEmail() {
+  const api = useAdminApi();
+  return useComplaintMutation(({ id, kind, providerMessageId }: { id: string; kind: "response" | "copy"; providerMessageId: string }): Promise<unknown> =>
+    kind === "response" ? api.confirmComplaintResponse(id, providerMessageId) : api.confirmComplaintCopy(id, providerMessageId)
+  );
 }
 
 export function useAdminAudit(params: AdminLogParams) {

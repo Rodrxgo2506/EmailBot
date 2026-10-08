@@ -6,6 +6,7 @@ import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { OrganizationContext, type OrganizationContextValue } from "@/providers/organization-provider";
 import { PLAN_CATALOG } from "@/test/plan-catalog-fixture";
+import { WHATSAPP_SALES_MESSAGE, WHATSAPP_SALES_NUMBER, WHATSAPP_SALES_URL } from "./sales-contact";
 
 /*
  * Commercial V1: public pricing page /planes. The catalog comes from
@@ -181,5 +182,74 @@ describe("/planes with a session", () => {
     await screen.findByRole("group", { name: "Pro" });
     expect(screen.queryByText("Plan actual")).not.toBeInTheDocument();
     for (const name of ["Básico", "Pro", "Business"]) expect(within(card(name)).getByRole("button", { name: `Elegir ${name}` })).toBeEnabled();
+  });
+});
+
+describe("/planes: WhatsApp sales contact", () => {
+  const whatsapp = () => screen.getByRole("link", { name: "Contratar por WhatsApp" });
+
+  it("links to wa.me with the Peruvian number and the prefilled message, in a new tab without opener", async () => {
+    renderPage();
+    await screen.findByRole("group", { name: "Pro" });
+    const link = whatsapp();
+    expect(link).toHaveAttribute("href", "https://wa.me/51971458658?text=Hola%2C%20quiero%20informaci%C3%B3n%20para%20contratar%20un%20plan%20de%20EmailBot.");
+    expect(link.getAttribute("href")).toBe(WHATSAPP_SALES_URL);
+    const url = new URL(link.getAttribute("href")!);
+    expect(url.pathname).toBe(`/${WHATSAPP_SALES_NUMBER}`);
+    expect(WHATSAPP_SALES_NUMBER).toBe("51971458658");
+    expect(url.searchParams.get("text")).toBe("Hola, quiero información para contratar un plan de EmailBot.");
+    expect(url.searchParams.get("text")).toBe(WHATSAPP_SALES_MESSAGE);
+    expect(link).toHaveAttribute("target", "_blank");
+    expect(link).toHaveAttribute("rel", "noopener noreferrer");
+    expect(link.tagName).toBe("A");
+    expect(screen.getByRole("heading", { level: 2, name: "¿Prefieres hablar con nosotros?" })).toBeInTheDocument();
+    // Below the comparison, inside the page content.
+    const comparison = screen.getByRole("heading", { level: 2, name: "Compara los planes" });
+    expect(comparison.compareDocumentPosition(link) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(within(screen.getByRole("main")).getByRole("link", { name: "Contratar por WhatsApp" })).toBe(link);
+  });
+
+  it("is an alternative: the plan CTAs and the prices from GET /api/plans stay as they were", async () => {
+    renderPage();
+    await screen.findByRole("group", { name: "Pro" });
+    for (const name of ["Básico", "Pro", "Business"]) {
+      expect(within(card(name)).getByRole("link", { name: "Crear cuenta" })).toHaveAttribute("href", "/register");
+      expect(within(card(name)).queryByRole("link", { name: /WhatsApp/ })).not.toBeInTheDocument();
+    }
+    expect(within(card("Básico")).getByText("S/ 19.90")).toBeInTheDocument();
+    expect(within(card("Business")).getByText("S/ 89.90")).toBeInTheDocument();
+    expect(get).toHaveBeenCalledWith("/api/plans");
+    expect(screen.getAllByRole("link", { name: /WhatsApp/ })).toHaveLength(1);
+    expect(post).not.toHaveBeenCalled();
+  });
+
+  it("with a session the plan buttons keep their behavior and the WhatsApp contact is still offered", async () => {
+    auth.session = { user: { id: "u1" } };
+    renderPage();
+    await screen.findByRole("group", { name: "Business" });
+    expect(within(card("Pro")).getByRole("button", { name: "Tu plan actual" })).toBeDisabled();
+    expect(whatsapp()).toHaveAttribute("href", WHATSAPP_SALES_URL);
+  });
+
+  it("stays available when the catalog cannot be loaded", async () => {
+    get.mockImplementation(async () => {
+      throw new Error("offline");
+    });
+    renderPage();
+    expect(await screen.findByRole("link", { name: "Contratar por WhatsApp" })).toHaveAttribute("href", WHATSAPP_SALES_URL);
+  });
+
+  it("full width on phones, natural width from sm; focus ring of the shared button; works in light and dark", async () => {
+    document.documentElement.dataset.theme = "light";
+    renderPage();
+    await screen.findByRole("group", { name: "Pro" });
+    expect(whatsapp().className).toMatch(/(^|\s)w-full(\s|$)/);
+    expect(whatsapp().className).toMatch(/sm:w-auto/);
+    expect(whatsapp().className).toMatch(/focus-visible:/);
+    fireEvent.click(screen.getByRole("button", { name: "Cambiar a modo nocturno" }));
+    expect(document.documentElement.dataset.theme).toBe("dark");
+    expect(whatsapp()).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Cambiar a modo claro" }));
+    expect(document.documentElement.dataset.theme).toBe("light");
   });
 });

@@ -1,4 +1,5 @@
 import type {
+  ComplaintBookEntry,
   AdminActivityItem,
   AdminAuditEntry,
   AdminBot,
@@ -14,9 +15,9 @@ import type {
 } from "@emailbot/types";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { unwrap } from "../../lib/errors.js";
-import type { AdminOperations } from "../types.js";
+import type { AdminOperations, ComplaintEmailRecordStatus } from "../types.js";
 import { toDecimalString } from "./plan-repositories.js";
-import type { Row } from "./mappers.js";
+import { complaintEmailOutcomeArgs, toComplaintCopy, type Row } from "./mappers.js";
 
 /*
  * Platform administration (EmailBot V2 phase 6). SERVICE ROLE, but ONLY the
@@ -302,6 +303,137 @@ export function adminOperations(service: SupabaseClient): AdminOperations {
           createdAt: row.created_at
         })
       );
+    },
+
+    async listComplaintBookEntries(actorId, query) {
+      const rows = unwrap(
+        await admin().rpc("list_complaint_book_entries", { p_actor_id: actorId, p_limit: query.limit, p_offset: query.offset })
+      ) as Row[];
+      return rows.map(
+        (row): ComplaintBookEntry => ({
+          id: row.id,
+          number: Number(row.number),
+          code: row.code,
+          kind: row.kind,
+          status: row.status,
+          consumer: {
+            firstNames: row.consumer_first_names,
+            lastNames: row.consumer_last_names,
+            documentType: row.document_type,
+            documentNumber: row.document_number,
+            email: row.email,
+            phone: row.phone,
+            address: row.address,
+            isMinor: row.is_minor === true,
+            guardianName: row.guardian_name ?? null
+          },
+          good: {
+            type: row.good_type,
+            description: row.good_description,
+            claimedAmountCents: row.claimed_amount_cents === null || row.claimed_amount_cents === undefined ? null : Number(row.claimed_amount_cents)
+          },
+          detail: row.detail,
+          consumerRequest: row.consumer_request,
+          confirmationEmail: {
+            status: row.confirmation_email_status,
+            sentAt: row.confirmation_email_sent_at ?? null,
+            errorCode: row.confirmation_email_error ?? null,
+            decisionRequired: row.confirmation_decision_required === true
+          },
+          response: {
+            text: row.provider_response ?? null,
+            emailStatus: row.response_email_status ?? null,
+            errorCode: row.response_email_error ?? null,
+            respondedAt: row.responded_at ?? null,
+            respondedByEmail: row.responded_by_email ?? null,
+            decisionRequired: row.response_decision_required === true
+          },
+          createdAt: row.created_at
+        })
+      );
+    },
+
+    async claimComplaintConfirmationEmail(actorId, entryId, force) {
+      const rows = unwrap(
+        await admin().rpc("claim_complaint_confirmation_email", { p_actor_id: actorId, p_entry_id: entryId, p_force: force })
+      ) as Row[] | null;
+      const row = rows?.[0];
+      return row ? toComplaintCopy(row) : null;
+    },
+
+    async recordComplaintConfirmationEmail(actorId, entryId, outcome, requestId) {
+      const status = unwrap(
+        await admin().rpc("record_complaint_confirmation_email", {
+          p_actor_id: actorId,
+          p_entry_id: entryId,
+          ...complaintEmailOutcomeArgs(outcome),
+          p_request_id: requestId
+        })
+      ) as ComplaintEmailRecordStatus | null;
+      return status ?? null;
+    },
+
+    async confirmComplaintConfirmationEmail(actorId, entryId, providerMessageId, requestId) {
+      const outcome = unwrap(
+        await admin().rpc("confirm_complaint_confirmation_email", {
+          p_actor_id: actorId,
+          p_entry_id: entryId,
+          p_provider_message_id: providerMessageId,
+          p_request_id: requestId
+        })
+      ) as string;
+      return outcome === "CONFIRMED" ? "CONFIRMED" : "NOT_UNCERTAIN";
+    },
+
+    async confirmComplaintResponse(actorId, entryId, providerMessageId, requestId) {
+      const rows = unwrap(
+        await admin().rpc("confirm_complaint_response", {
+          p_actor_id: actorId,
+          p_entry_id: entryId,
+          p_provider_message_id: providerMessageId,
+          p_request_id: requestId
+        })
+      ) as Row[] | null;
+      const row = rows?.[0];
+      if (!row || row.outcome !== "CONFIRMED") return { outcome: "NOT_UNCERTAIN" };
+      return { outcome: "CONFIRMED", status: row.status, respondedAt: row.responded_at ?? null };
+    },
+
+    async beginComplaintResponse(actorId, entryId, response, force) {
+      const rows = unwrap(
+        await admin().rpc("begin_complaint_response", { p_actor_id: actorId, p_entry_id: entryId, p_response: response, p_force: force })
+      ) as Row[] | null;
+      const row = rows?.[0];
+      if (!row) throw new Error("admin.begin_complaint_response returned no row");
+      if (row.outcome !== "READY") return { outcome: row.outcome };
+      return {
+        outcome: "READY",
+        target: {
+          id: row.id,
+          code: row.code,
+          kind: row.kind,
+          firstNames: row.consumer_first_names,
+          lastNames: row.consumer_last_names,
+          email: row.email,
+          createdAt: row.created_at,
+          response: row.response,
+          preparedAt: row.prepared_at,
+          idempotencyKey: row.idempotency_key
+        }
+      };
+    },
+
+    async recordComplaintResponse(actorId, entryId, outcome, requestId) {
+      const rows = unwrap(
+        await admin().rpc("record_complaint_response", {
+          p_actor_id: actorId,
+          p_entry_id: entryId,
+          ...complaintEmailOutcomeArgs(outcome),
+          p_request_id: requestId
+        })
+      ) as Row[] | null;
+      const row = rows?.[0];
+      return row ? { status: row.status, respondedAt: row.responded_at ?? null } : null;
     },
 
     async listAudit(actorId, query) {

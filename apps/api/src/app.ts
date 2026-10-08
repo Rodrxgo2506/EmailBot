@@ -9,6 +9,7 @@ import type { AppDeps } from "./deps.js";
 import { createLoginThrottle } from "./infrastructure/login-throttle.js";
 import { createResilientRateLimitStore } from "./infrastructure/rate-limit-store.js";
 import { adminRoutes } from "./modules/admin/routes.js";
+import { complaintsBookRoutes } from "./modules/complaints/routes.js";
 import { auditRoutes } from "./modules/audit/routes.js";
 import { registerAuditRecorder } from "./modules/audit/recorder.js";
 import { botRoutes } from "./modules/bots/routes.js";
@@ -169,6 +170,7 @@ export async function buildApp(deps: AppDeps, options: BuildAppOptions = {}) {
       await api.register(emailRoutes(deps));
       await api.register(auditRoutes);
       await api.register(adminRoutes(deps));
+      await api.register(complaintsBookRoutes(deps));
     },
     { prefix: "/api" }
   );

@@ -27,12 +27,17 @@ const hex = (label: string) => createHash("sha256").update(`${label}-${++sequenc
 
 const ADMIN_FUNCTIONS = [
   "admin.activate_subscription",
+  "admin.begin_complaint_response",
+  "admin.claim_complaint_confirmation_email",
+  "admin.confirm_complaint_confirmation_email",
+  "admin.confirm_complaint_response",
   "admin.create_organization",
   "admin.get_organization",
   "admin.is_platform_admin",
   "admin.list_activity",
   "admin.list_audit",
   "admin.list_bots",
+  "admin.list_complaint_book_entries",
   "admin.list_customers",
   "admin.list_email_accounts",
   "admin.list_members",
@@ -41,6 +46,8 @@ const ADMIN_FUNCTIONS = [
   "admin.list_plan_prices",
   "admin.list_subscriptions",
   "admin.platform_stats",
+  "admin.record_complaint_confirmation_email",
+  "admin.record_complaint_response",
   "admin.update_organization",
   "admin.update_subscription_status"
 ];
@@ -68,7 +75,20 @@ const guardedCalls = (orgId: string): Array<[string, (actor: string) => [string,
   ["list_customers", (actor) => ["select * from admin.list_customers($1, $2, 25, 0)", [actor, orgId]]],
   ["list_email_accounts", (actor) => ["select * from admin.list_email_accounts($1, $2)", [actor, orgId]]],
   ["list_activity", (actor) => ["select * from admin.list_activity($1, null, 25, 0)", [actor]]],
-  ["list_audit", (actor) => ["select * from admin.list_audit($1, null, 25, 0)", [actor]]]
+  ["list_audit", (actor) => ["select * from admin.list_audit($1, null, 25, 0)", [actor]]],
+  ["list_complaint_book_entries", (actor) => ["select * from admin.list_complaint_book_entries($1, 25, 0)", [actor]]],
+  ["claim_complaint_confirmation_email", (actor) => ["select * from admin.claim_complaint_confirmation_email($1, gen_random_uuid())", [actor]]],
+  [
+    "record_complaint_confirmation_email",
+    (actor) => ["select admin.record_complaint_confirmation_email($1, gen_random_uuid(), 'SENT', null, null, null)", [actor]]
+  ],
+  ["begin_complaint_response", (actor) => ["select * from admin.begin_complaint_response($1, gen_random_uuid(), 'Respuesta de prueba')", [actor]]],
+  ["record_complaint_response", (actor) => ["select * from admin.record_complaint_response($1, gen_random_uuid(), 'SENT', null, null, null)", [actor]]],
+  [
+    "confirm_complaint_confirmation_email",
+    (actor) => ["select admin.confirm_complaint_confirmation_email($1, gen_random_uuid(), 'abcdefgh-1234', null)", [actor]]
+  ],
+  ["confirm_complaint_response", (actor) => ["select * from admin.confirm_complaint_response($1, gen_random_uuid(), 'abcdefgh-1234', null)", [actor]]]
 ];
 
 const asService = <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) =>

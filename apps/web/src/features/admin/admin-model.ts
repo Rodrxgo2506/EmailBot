@@ -113,7 +113,14 @@ const PLATFORM_ACTIONS: Record<string, string> = {
   "subscription.past_due": "Suscripción con pago pendiente",
   "subscription.canceled": "Suscripción cancelada",
   "subscription.expired": "Suscripción vencida",
-  "payment.recorded": "Pago registrado"
+  "payment.recorded": "Pago registrado",
+  // Libro de Reclamaciones
+  "complaint_book.response_sent": "Reclamo respondido",
+  "complaint_book.response_failed": "Respuesta a reclamo no enviada",
+  "complaint_book.response_uncertain": "Respuesta a reclamo con resultado incierto",
+  "complaint_book.confirmation_resent": "Constancia de reclamo reenviada",
+  "complaint_book.confirmation_failed": "Constancia de reclamo no enviada",
+  "complaint_book.confirmation_uncertain": "Constancia de reclamo con resultado incierto"
 };
 
 export function platformActionLabel(action: string): string {
@@ -122,7 +129,8 @@ export function platformActionLabel(action: string): string {
 
 /** "from → to" for status / plan changes, the plan for creations and activations, method and amount for payments; nothing else. */
 export function platformAuditDetail(entry: AdminAuditEntry): string | null {
-  const { from, to, plan, fromPlan, billingPeriod, paymentMethod, amount } = entry.metadata as Record<string, unknown>;
+  const { from, to, plan, fromPlan, billingPeriod, paymentMethod, amount, code, errorCode } = entry.metadata as Record<string, unknown>;
+  if (entry.targetType === "complaint_book_entry" && typeof code === "string") return typeof errorCode === "string" ? `${code} · ${errorCode}` : code;
   if (typeof fromPlan === "string" && typeof plan === "string") return `${fromPlan} → ${plan}`;
   if (typeof from === "string" && typeof to === "string") return `${from} → ${to}`;
   if (typeof paymentMethod === "string" && (typeof amount === "number" || typeof amount === "string")) {

@@ -159,11 +159,11 @@ describe("re-acceptance after login (service role, API)", () => {
 
   it("a newer version is a new row; the older acceptance stays as it was", async () => {
     const user = await signUp(ACCEPTED);
-    await t.asService((tx) => tx.query(insertAs, [user, "terms", "2.1"]));
+    await t.asService((tx) => tx.query(insertAs, [user, "terms", "3.1"]));
     expect((await acceptances(user)).map((row) => `${row.document}@${row.version}/${row.source}`).sort()).toEqual([
-      "privacy@2.0/signup",
-      "terms@2.0/signup",
-      "terms@2.1/reacceptance"
+      "privacy@3.0/signup",
+      "terms@3.0/signup",
+      "terms@3.1/reacceptance"
     ]);
   });
 

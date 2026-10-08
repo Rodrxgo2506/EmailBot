@@ -78,6 +78,17 @@ describe("audit and activity labels", () => {
     // Commercial V1.1 subscriptions and payments
     expect(platformActionLabel("subscription.activated")).toBe("Suscripción activada");
     expect(platformActionLabel("payment.recorded")).toBe("Pago registrado");
+    // Libro de Reclamaciones: the code (and the error code), never the answer or the consumer's data
+    expect(platformActionLabel("complaint_book.response_sent")).toBe("Reclamo respondido");
+    expect(platformActionLabel("complaint_book.response_failed")).toBe("Respuesta a reclamo no enviada");
+    expect(platformActionLabel("complaint_book.confirmation_resent")).toBe("Constancia de reclamo reenviada");
+    const complaintEntry = (action: string, metadata: Record<string, unknown>) => ({ ...entry(action, metadata), targetType: "complaint_book_entry" });
+    expect(platformAuditDetail(complaintEntry("complaint_book.response_sent", { code: "LR-2026-000007", result: "SENT", providerMessageId: "re_1" }))).toBe(
+      "LR-2026-000007"
+    );
+    expect(platformAuditDetail(complaintEntry("complaint_book.response_failed", { code: "LR-2026-000007", result: "FAILED", errorCode: "PROVIDER_REJECTED" }))).toBe(
+      "LR-2026-000007 · PROVIDER_REJECTED"
+    );
     expect(platformAuditDetail(entry("subscription.activated", { plan: "PRO", billingPeriod: "MONTHLY", paymentMethod: "YAPE" }))).toBe("Plan PRO · MONTHLY");
     expect(platformAuditDetail(entry("subscription.plan_changed", { fromPlan: "PRO", plan: "BUSINESS" }))).toBe("PRO → BUSINESS");
     expect(platformAuditDetail(entry("payment.recorded", { paymentMethod: "CASH", amount: 39.9 }))).toBe("CASH · S/ 39.90");

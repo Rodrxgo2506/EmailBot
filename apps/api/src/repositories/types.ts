@@ -1,4 +1,12 @@
 import type {
+  ComplaintBookEntry,
+  ComplaintDocumentType,
+  ComplaintEmailStatus,
+  ComplaintGoodType,
+  ComplaintKind,
+  ComplaintStatus
+} from "@emailbot/types";
+import type {
   AdminActivityItem,
   AdminAuditEntry,
   AdminBot,
@@ -366,6 +374,87 @@ export type OAuthAccountConnection =
   | { outcome: "PLAN_LIMIT_REACHED"; used: number; limit: number }
   | { outcome: "MISSING_REFRESH_TOKEN" };
 
+/** Libro de Reclamaciones: one sheet of the public form, already validated by the route (and again in the database). */
+export interface ComplaintBookRecord {
+  /** Once per form: a retried submission returns the recorded sheet. */
+  submissionId: string;
+  kind: ComplaintKind;
+  firstNames: string;
+  lastNames: string;
+  documentType: ComplaintDocumentType;
+  documentNumber: string;
+  email: string;
+  phone: string;
+  address: string;
+  isMinor: boolean;
+  guardianName: string | null;
+  goodType: ComplaintGoodType;
+  goodDescription: string;
+  claimedAmountCents: number | null;
+  detail: string;
+  consumerRequest: string;
+  requestId: string;
+}
+
+/** public.submit_complaint_book_entry: the recorded sheet (new, or the same one for a retried submission). */
+export interface ComplaintBookSubmissionResult {
+  id: string;
+  code: string;
+  number: number;
+  kind: ComplaintKind;
+  createdAt: string;
+  confirmationEmailStatus: ComplaintEmailStatus;
+  replayed: boolean;
+}
+
+/** The whole recorded sheet, claimed by one sender for the consumer's copy e-mail. */
+export interface ComplaintCopy {
+  id: string;
+  number: number;
+  code: string;
+  kind: ComplaintKind;
+  consumer: ComplaintBookEntry["consumer"];
+  good: ComplaintBookEntry["good"];
+  detail: string;
+  consumerRequest: string;
+  createdAt: string;
+  /** Handed to the e-mail provider: changes only after a recorded failure. */
+  idempotencyKey: string;
+}
+
+/**
+ * Outcome of an e-mail, as recorded in the database (the error is a short code, never provider text).
+ * UNKNOWN keeps the e-mail SENDING (claim kept until it expires, same idempotency key and content).
+ */
+export type ComplaintEmailOutcome = { outcome: "SENT"; providerMessageId: string | null } | { outcome: "REJECTED" | "UNKNOWN"; errorCode: string };
+
+/** Who and what to answer (admin.begin_complaint_response, outcome READY). */
+export interface ComplaintResponseTarget {
+  id: string;
+  code: string;
+  kind: ComplaintKind;
+  firstNames: string;
+  lastNames: string;
+  email: string;
+  createdAt: string;
+  /** The operation's stored text, date and key: identical on every retry of the operation. */
+  response: string;
+  preparedAt: string;
+  idempotencyKey: string;
+}
+
+/** What record_complaint_confirmation_email returns: the new state, or UNKNOWN (still SENDING). */
+export type ComplaintEmailRecordStatus = "SENT" | "FAILED" | "UNKNOWN";
+
+export type ComplaintResponseClaim =
+  | { outcome: "NOT_FOUND" | "ALREADY_RESPONDED" | "IN_PROGRESS" | "TEXT_LOCKED" | "NEEDS_DECISION" }
+  | { outcome: "READY"; target: ComplaintResponseTarget };
+
+/** Manual confirmation of an e-mail with an unknown outcome (the administrator found it in the provider). */
+export type ComplaintResponseConfirmation =
+  | { outcome: "NOT_UNCERTAIN" }
+  | { outcome: "CONFIRMED"; status: ComplaintStatus; respondedAt: string | null };
+
 export interface ImapAccountInsert {
   organizationId: string;
   emailAddress: string;
@@ -501,6 +590,12 @@ export interface PrivilegedOperations {
   getOrganizationEntitlements(organizationId: string): Promise<OrganizationEntitlements | null>;
   /** Commercial V1: the public plan catalog (GET /api/plans, no session); active plans, prices and entitlements only. */
   listPlanCatalog(): Promise<PlanCatalogEntry[]>;
+  /** Libro de Reclamaciones: registers a sheet (public form) and returns its correlative code. */
+  submitComplaintBookEntry(input: ComplaintBookRecord): Promise<ComplaintBookSubmissionResult>;
+  /** Claims the consumer's copy e-mail (one sender at a time); null = already sent or being sent. */
+  claimComplaintConfirmationEmail(entryId: string): Promise<ComplaintCopy | null>;
+  /** Records the provider outcome of a claimed copy e-mail; null = it was not claimed (nothing changed). */
+  recordComplaintConfirmationEmail(entryId: string, outcome: ComplaintEmailOutcome): Promise<ComplaintEmailRecordStatus | null>;
 }
 
 /* ------------------------------------------------------------------ platform administration (V2 phase 6) */
@@ -560,4 +655,25 @@ export interface AdminOperations {
   /** `limit` rows at most, newest first. */
   listActivity(actorId: string, query: { organizationId?: string | undefined; limit: number; offset: number }): Promise<AdminActivityItem[]>;
   listAudit(actorId: string, query: { organizationId?: string | undefined; limit: number; offset: number }): Promise<AdminAuditEntry[]>;
+  /** Libro de Reclamaciones, newest first (`limit` rows at most). */
+  listComplaintBookEntries(actorId: string, query: { limit: number; offset: number }): Promise<ComplaintBookEntry[]>;
+  /**
+   * Sending the consumer's copy again: claim (null = already sent, being sent, or an unknown outcome past the
+   * provider's idempotency window without force) and audited outcome. force: resend past that window (audited).
+   */
+  claimComplaintConfirmationEmail(actorId: string, entryId: string, force: boolean): Promise<ComplaintCopy | null>;
+  /** Records a copy with an unknown outcome as sent, with the provider id found by the administrator (audited). */
+  confirmComplaintConfirmationEmail(actorId: string, entryId: string, providerMessageId: string, requestId: string): Promise<"CONFIRMED" | "NOT_UNCERTAIN">;
+  recordComplaintConfirmationEmail(actorId: string, entryId: string, outcome: ComplaintEmailOutcome, requestId: string): Promise<ComplaintEmailRecordStatus | null>;
+  /** Answering a sheet: starts or repeats an answer operation (outcome READY), or says why not. */
+  beginComplaintResponse(actorId: string, entryId: string, response: string, force: boolean): Promise<ComplaintResponseClaim>;
+  /** Records an answer with an unknown outcome as sent, with the provider id found by the administrator (audited). */
+  confirmComplaintResponse(actorId: string, entryId: string, providerMessageId: string, requestId: string): Promise<ComplaintResponseConfirmation>;
+  /** Records the provider outcome of the answer (RESPONDED only when sent) and audits it; null = not claimed. */
+  recordComplaintResponse(
+    actorId: string,
+    entryId: string,
+    outcome: ComplaintEmailOutcome,
+    requestId: string
+  ): Promise<{ status: ComplaintStatus; respondedAt: string | null } | null>;
 }

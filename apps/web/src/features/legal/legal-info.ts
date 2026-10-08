@@ -23,8 +23,15 @@ export const SERVICE_OPERATOR_RUC: string | null = "10733272231";
  */
 export const SERVICE_FISCAL_ADDRESS: string | null = null;
 
-/** Public address for support, privacy and legal requests. */
-export const LEGAL_CONTACT_EMAIL: string | null = "reateguirodrigo30@gmail.com";
+/** Public address for support, privacy, legal requests and the complaints book. */
+export const LEGAL_CONTACT_EMAIL: string | null = "soporte@emailbot.app";
+
+/**
+ * Public address of the business (contact page, footer, legal pages, complaints book). Defined by the owner;
+ * it is not presented as the SUNAT fiscal address (SERVICE_FISCAL_ADDRESS stays null until SUNAT shows one).
+ */
+export const SERVICE_PUBLIC_ADDRESS = { street: "Jr Manco Cápac 653", locality: "Pucallpa, Ucayali, Perú" } as const;
+export const SERVICE_PUBLIC_ADDRESS_LINE = `${SERVICE_PUBLIC_ADDRESS.street}, ${SERVICE_PUBLIC_ADDRESS.locality}`;
 
 /** Public contact phone. */
 export const LEGAL_CONTACT_PHONE: string | null = "971458658";
@@ -42,7 +49,7 @@ export const TERMS_VERSION = CURRENT_LEGAL_VERSIONS.terms;
 export const PRIVACY_VERSION = CURRENT_LEGAL_VERSIONS.privacy;
 
 /** Date of the last change of both documents (update it, with the versions, if the text changes before publication). */
-export const LEGAL_LAST_UPDATED = "5 de octubre de 2026";
+export const LEGAL_LAST_UPDATED = "7 de octubre de 2026";
 
 /** Public domains of the service (web app and API). */
 export const SERVICE_DOMAIN = "emailbot.app";

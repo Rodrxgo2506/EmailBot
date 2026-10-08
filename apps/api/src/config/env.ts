@@ -1,4 +1,5 @@
 import { csvEnv, encryptionKeyEnv, optionalEnv, parseEnv } from "@emailbot/shared";
+import { COMPLAINTS_BOOK_PROVIDER } from "@emailbot/types";
 import { normalizeOrigin, productionUrlProblem, PUBLIC_URL, REDIS_URL } from "@emailbot/validation";
 import { z } from "zod";
 
@@ -88,6 +89,23 @@ const envSchema = z
      */
     SYNC_HEALTH_STALE_MINUTES: z.coerce.number().int().min(5).max(1440).default(20),
 
+    /**
+     * Transactional e-mail (Libro de Reclamaciones copies and answers) through Resend's HTTP API, the
+     * provider already used for the authentication e-mails. Set together; without them those e-mails stay
+     * PENDING (the sheets are recorded anyway) and administrators cannot send answers.
+     */
+    RESEND_API_KEY: optionalEnv(z.string().min(10).max(500)),
+    /** Sender on a domain verified in Resend: "EmailBot <no-reply@emailbot.app>" or a bare address. */
+    TRANSACTIONAL_EMAIL_FROM: optionalEnv(
+      z
+        .string()
+        .max(200)
+        .regex(
+          /^(?:[^<>\r\n"]{1,100} <[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+>|[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+)$/,
+          "must be an e-mail address or 'Name <address>'"
+        )
+    ),
+
     SENTRY_DSN: optionalEnv(z.url())
   })
   .superRefine((env, ctx) => {
@@ -109,7 +127,16 @@ const envSchema = z
       issue("MICROSOFT_GRAPH_PUSH_ENABLED", "requires MICROSOFT_CLIENT_ID, MICROSOFT_CLIENT_SECRET and MICROSOFT_REDIRECT_URI");
     }
 
+    // Every environment: a half-configured mailer would silently leave every e-mail pending.
+    if ((env.RESEND_API_KEY === undefined) !== (env.TRANSACTIONAL_EMAIL_FROM === undefined)) {
+      issue("RESEND_API_KEY", "RESEND_API_KEY and TRANSACTIONAL_EMAIL_FROM must be set together");
+    }
+
     if (env.NODE_ENV !== "production") return;
+
+    if (env.TRANSACTIONAL_EMAIL_FROM && /@resend\.dev>?$/i.test(env.TRANSACTIONAL_EMAIL_FROM)) {
+      issue("TRANSACTIONAL_EMAIL_FROM", "must use a domain verified in Resend (not the resend.dev test sender) in production");
+    }
 
     if (env.CORS_ORIGINS.length === 0) issue("CORS_ORIGINS", "must list the allowed origins in production");
     for (const origin of env.CORS_ORIGINS) {
@@ -192,6 +219,8 @@ export interface ApiConfig {
    * changes together with a working adapter, in code.
    */
   imapAccountsEnabled: boolean;
+  /** Transactional e-mail through Resend; null = not configured. Replies go to the support mailbox. */
+  transactionalEmail: { resendApiKey: string; from: string; replyTo: string } | null;
   /** GET /health/sync stale threshold (SYNC_HEALTH_STALE_MINUTES). */
   syncHealthStaleMinutes: number;
   sentryDsn: string | null;
@@ -272,6 +301,10 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): ApiConfig {
         : null,
     microsoftGraphPushEnabled: env.MICROSOFT_GRAPH_PUSH_ENABLED,
     imapAccountsEnabled: false,
+    transactionalEmail:
+      env.RESEND_API_KEY && env.TRANSACTIONAL_EMAIL_FROM
+        ? { resendApiKey: env.RESEND_API_KEY, from: env.TRANSACTIONAL_EMAIL_FROM, replyTo: COMPLAINTS_BOOK_PROVIDER.supportEmail }
+        : null,
     syncHealthStaleMinutes: env.SYNC_HEALTH_STALE_MINUTES,
     sentryDsn: env.SENTRY_DSN ?? null
   };

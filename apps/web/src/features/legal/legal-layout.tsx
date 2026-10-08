@@ -1,6 +1,6 @@
-import { Mail } from "lucide-react";
 import { useEffect, type ReactNode } from "react";
-import { Link, NavLink } from "react-router-dom";
+import { NavLink } from "react-router-dom";
+import { PublicFooter, PublicHeader } from "@/features/public/public-layout";
 import { cn } from "@/lib/utils";
 import {
   LEGAL_CONTACT_EMAIL,
@@ -10,7 +10,8 @@ import {
   SERVICE_NAME,
   SERVICE_OPERATOR,
   SERVICE_OPERATOR_RUC,
-  SERVICE_OPERATOR_TYPE
+  SERVICE_OPERATOR_TYPE,
+  SERVICE_PUBLIC_ADDRESS_LINE
 } from "./legal-info";
 
 /*
@@ -21,7 +22,9 @@ import {
 
 const LEGAL_LINKS = [
   { to: "/privacy", label: "Privacidad" },
-  { to: "/terms", label: "Términos" }
+  { to: "/terms", label: "Términos" },
+  { to: "/cambios-devoluciones", label: "Devoluciones" },
+  { to: "/libro-de-reclamaciones", label: "Libro de Reclamaciones" }
 ] as const;
 
 /** Sets document.title while the page is mounted. */
@@ -35,21 +38,10 @@ function useDocumentTitle(title: string) {
   }, [title]);
 }
 
-function Logo() {
-  return (
-    <Link to="/" className="flex items-center gap-2 rounded-md focus-visible:outline-2 focus-visible:outline-ring">
-      <span className="flex size-8 items-center justify-center rounded-lg bg-primary text-primary-foreground">
-        <Mail className="size-4" />
-      </span>
-      <span className="font-semibold tracking-tight">EmailBot</span>
-    </Link>
-  );
-}
-
 /** "Privacidad · Términos" links, reused by the public auth pages. */
 export function LegalLinks({ className }: { className?: string }) {
   return (
-    <nav aria-label="Información legal" className={cn("flex items-center gap-4 text-sm", className)}>
+    <nav aria-label="Información legal" className={cn("flex flex-wrap items-center gap-x-4 gap-y-1 text-sm", className)}>
       {LEGAL_LINKS.map((link) => (
         <NavLink
           key={link.to}
@@ -83,12 +75,7 @@ export function LegalLayout({
 
   return (
     <div className="flex min-h-screen flex-col bg-background">
-      <header className="border-b">
-        <div className="mx-auto flex h-14 w-full max-w-3xl items-center justify-between gap-4 px-4 sm:px-6">
-          <Logo />
-          <LegalLinks />
-        </div>
-      </header>
+      <PublicHeader />
 
       <main className="mx-auto w-full max-w-3xl flex-1 px-4 py-10 sm:px-6 sm:py-14">
         <article>
@@ -103,17 +90,7 @@ export function LegalLayout({
         </article>
       </main>
 
-      <footer className="border-t">
-        <div className="mx-auto flex w-full max-w-3xl flex-wrap items-center justify-between gap-4 px-4 py-6 text-sm text-muted-foreground sm:px-6">
-          <span>EmailBot</span>
-          <div className="flex items-center gap-4">
-            <LegalLinks />
-            <Link to="/login" className="transition-colors hover:text-foreground">
-              Iniciar sesión
-            </Link>
-          </div>
-        </div>
-      </footer>
+      <PublicFooter />
     </div>
   );
 }
@@ -164,6 +141,7 @@ export function ContactDetails() {
       </li>
       <li>RUC: {SERVICE_OPERATOR_RUC ?? <Pending>RUC</Pending>}</li>
       {SERVICE_FISCAL_ADDRESS ? <li>Domicilio fiscal: {SERVICE_FISCAL_ADDRESS}</li> : null}
+      <li>Dirección: {SERVICE_PUBLIC_ADDRESS_LINE}</li>
       <li>
         Correo de contacto:{" "}
         {LEGAL_CONTACT_EMAIL ? <a href={`mailto:${LEGAL_CONTACT_EMAIL}`}>{LEGAL_CONTACT_EMAIL}</a> : <Pending>correo de contacto</Pending>}
