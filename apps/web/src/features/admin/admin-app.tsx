@@ -1,4 +1,4 @@
-import { ArrowLeft, Building2, History, LayoutDashboard, LogOut, ShieldCheck } from "lucide-react";
+import { ArrowLeft, BookOpenText, Building2, History, LayoutDashboard, LogOut, ShieldCheck } from "lucide-react";
 import { Suspense } from "react";
 import { Link, Navigate, NavLink, Route, Routes } from "react-router-dom";
 import { Button } from "@/components/ui/button";
@@ -6,6 +6,7 @@ import { SkeletonRows } from "@/components/ui/feedback";
 import { cn } from "@/lib/utils";
 import { AdminApiContext, type AdminApi } from "./admin-api";
 import { AdminAuditPage } from "./admin-audit-page";
+import { AdminComplaintsPage } from "./admin-complaints-page";
 import { AdminDashboardPage } from "./admin-dashboard-page";
 import { AdminOrganizationDetailPage } from "./admin-organization-detail-page";
 import { AdminOrganizationsPage } from "./admin-organizations-page";
@@ -13,7 +14,8 @@ import { AdminOrganizationsPage } from "./admin-organizations-page";
 const NAV = [
   { to: "/admin", label: "Resumen", icon: LayoutDashboard, end: true },
   { to: "/admin/organizations", label: "Organizaciones", icon: Building2, end: false },
-  { to: "/admin/audit", label: "Auditoría", icon: History, end: false }
+  { to: "/admin/audit", label: "Auditoría", icon: History, end: false },
+  { to: "/admin/complaints-book", label: "Libro de reclamaciones", icon: BookOpenText, end: false }
 ];
 
 /**
@@ -86,6 +88,7 @@ export function AdminApp({
               <Route path="organizations" element={<AdminOrganizationsPage />} />
               <Route path="organizations/:organizationId" element={<AdminOrganizationDetailPage />} />
               <Route path="audit" element={<AdminAuditPage />} />
+              <Route path="complaints-book" element={<AdminComplaintsPage />} />
               <Route path="*" element={<Navigate to="/admin" replace />} />
             </Routes>
           </Suspense>

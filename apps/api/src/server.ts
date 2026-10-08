@@ -8,6 +8,7 @@ import type { AppDeps } from "./deps.js";
 import { createRedisNonceStore } from "./infrastructure/nonces.js";
 import { createBullJobQueue, createRedisConnection } from "./infrastructure/queue.js";
 import { attachRealtime } from "./infrastructure/realtime.js";
+import { createResendMailer } from "./infrastructure/resend-mailer.js";
 import { flushSentry, initSentry } from "./lib/sentry.js";
 import { adminOperations, createSupabaseClients, createSupabaseRepositories, privilegedOperations } from "./repositories/supabase/index.js";
 
@@ -44,6 +45,17 @@ const deps: AppDeps = {
   // OAuth token exchange and mailbox identity (Google / Microsoft).
   fetch: fetchWithTimeout(globalThis.fetch, config.providerHttpTimeoutMs),
   oauthNonces: createRedisNonceStore(producerConnection),
+  // Libro de Reclamaciones e-mails (Resend); absent = they stay pending.
+  ...(config.transactionalEmail
+    ? {
+        mailer: createResendMailer({
+          apiKey: config.transactionalEmail.resendApiKey,
+          from: config.transactionalEmail.from,
+          replyTo: config.transactionalEmail.replyTo,
+          fetch: fetchWithTimeout(globalThis.fetch, config.providerHttpTimeoutMs)
+        })
+      }
+    : {}),
   rateLimitRedis: producerConnection,
   realtimePublisher: {
     async publish(event) {

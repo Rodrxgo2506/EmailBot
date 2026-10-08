@@ -1,5 +1,6 @@
 import { redactSensitive } from "@emailbot/shared";
-import type { EmailAccountStatus, OrganizationRole } from "@emailbot/types";
+import type { ComplaintEmailStatus, ComplaintKind, EmailAccountStatus, OrganizationRole } from "@emailbot/types";
+import type { ComplaintEmailRecordStatus } from "../types.js";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { AppError, unwrap } from "../../lib/errors.js";
 import type { PrivilegedOperations } from "../types.js";
@@ -9,7 +10,7 @@ import { legalAcceptanceOperations } from "./legal-repositories.js";
 import { microsoftSubscriptionOperations } from "./microsoft-subscription-repositories.js";
 import { PLAN_CATALOG_COLUMNS, planRepository, toPlanCatalog } from "./plan-repositories.js";
 import { syncHealthOperations } from "./sync-health-repositories.js";
-import { EMAIL_ACCOUNT_COLUMNS, toEmailAccount, type Row } from "./mappers.js";
+import { complaintEmailOutcomeArgs, EMAIL_ACCOUNT_COLUMNS, toComplaintCopy, toEmailAccount, type Row } from "./mappers.js";
 
 /**
  * Adds the `download` parameter (Content-Disposition file name) to a signed
@@ -56,6 +57,55 @@ export function privilegedOperations(service: SupabaseClient): PrivilegedOperati
         await service.from("plan_catalog").select(PLAN_CATALOG_COLUMNS).eq("active", true).order("sort_order", { ascending: true })
       ) as Row[];
       return toPlanCatalog(rows);
+    },
+
+    async submitComplaintBookEntry(input) {
+      // public.submit_complaint_book_entry: validates again and takes the correlative number atomically.
+      const rows = unwrap(
+        await service.rpc("submit_complaint_book_entry", {
+          p_submission_id: input.submissionId,
+          p_kind: input.kind,
+          p_first_names: input.firstNames,
+          p_last_names: input.lastNames,
+          p_document_type: input.documentType,
+          p_document_number: input.documentNumber,
+          p_email: input.email,
+          p_phone: input.phone,
+          p_address: input.address,
+          p_is_minor: input.isMinor,
+          p_guardian_name: input.guardianName,
+          p_good_type: input.goodType,
+          p_good_description: input.goodDescription,
+          p_claimed_amount_cents: input.claimedAmountCents,
+          p_detail: input.detail,
+          p_consumer_request: input.consumerRequest,
+          p_request_id: input.requestId
+        })
+      ) as Row[] | null;
+      const row = rows?.[0];
+      if (!row) throw new AppError(500, "COMPLAINT_NOT_RECORDED", "The complaint could not be recorded");
+      return {
+        id: row.id as string,
+        code: row.code as string,
+        number: Number(row.number),
+        kind: row.kind as ComplaintKind,
+        createdAt: row.created_at as string,
+        confirmationEmailStatus: row.confirmation_email_status as ComplaintEmailStatus,
+        replayed: row.replayed === true
+      };
+    },
+
+    async claimComplaintConfirmationEmail(entryId) {
+      const rows = unwrap(await service.rpc("claim_complaint_confirmation_email", { p_entry_id: entryId })) as Row[] | null;
+      const row = rows?.[0];
+      return row ? toComplaintCopy(row) : null;
+    },
+
+    async recordComplaintConfirmationEmail(entryId, outcome) {
+      const status = unwrap(
+        await service.rpc("record_complaint_confirmation_email", { p_entry_id: entryId, ...complaintEmailOutcomeArgs(outcome) })
+      ) as ComplaintEmailRecordStatus | null;
+      return status ?? null;
     },
 
     async getMemberRole(organizationId, userId) {

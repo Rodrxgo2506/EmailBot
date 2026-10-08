@@ -151,6 +151,34 @@ export function PrivacyPage() {
             solicitud en los registros del servidor y en el control de frecuencia de solicitudes.
           </li>
         </LegalList>
+
+        <LegalSubheading>Contratación y pagos</LegalSubheading>
+        <LegalList>
+          <li>
+            Cuando una organización contrata un plan guardamos el plan, la periodicidad, el estado de la suscripción y los datos del pago
+            necesarios para activarlo y gestionarlo, como el importe, la fecha, el medio de pago y la referencia de la operación.
+          </li>
+          <li>
+            Cuando el pago en línea con tarjeta esté habilitado, lo procesará Culqi. Los datos de la tarjeta se ingresan en el formulario de
+            Culqi: EmailBot no recibe ni almacena el número completo de la tarjeta ni su código de seguridad. Solo guardamos las referencias
+            que Culqi nos devuelve (por ejemplo, los identificadores del cliente, de la suscripción y del cargo) y los datos de contacto de
+            facturación que se le envían para crear el cobro.
+          </li>
+        </LegalList>
+
+        <LegalSubheading>Libro de Reclamaciones</LegalSubheading>
+        <LegalList>
+          <li>
+            Si registras una queja o un reclamo, guardamos los datos de la hoja de reclamación: nombres y apellidos, documento de identidad,
+            correo, teléfono, domicilio, los datos del padre, madre o apoderado si eres menor de edad, el bien contratado, el detalle, tu
+            pedido y la fecha. Los usamos solo para atender la reclamación y cumplir la normativa de protección al consumidor.
+          </li>
+          <li>
+            Al registrarla te enviamos una copia de la hoja al correo que indicaste, y la respuesta de EmailBot llega a ese mismo correo.
+            Guardamos el texto de la respuesta, la fecha de envío, el administrador que la envió y el estado de cada envío (enviado o no
+            enviado), sin conservar el contenido de los correos en los registros técnicos.
+          </li>
+        </LegalList>
       </LegalSection>
 
       <LegalSection id="gmail" number={3} title="Acceso a cuentas de correo">
@@ -292,6 +320,8 @@ export function PrivacyPage() {
           <li>Entregar los correos a los clientes finales que la organización ha configurado y mostrárselos en el portal.</li>
           <li>Mostrar los resultados a los miembros de la organización, según su rol.</li>
           <li>Administrar la plataforma (alta de organizaciones, planes y suspensiones) con metadatos y estadísticas.</li>
+          <li>Gestionar la contratación de los planes, los pagos y los comprobantes.</li>
+          <li>Atender las quejas y reclamos registrados en el Libro de Reclamaciones y las consultas de soporte.</li>
           <li>Mantener la seguridad del servicio, registrar la actividad en el historial de auditoría, prevenir abusos y resolver errores.</li>
         </LegalList>
         <p>No usamos la información para publicidad ni la vendemos.</p>
@@ -360,6 +390,14 @@ export function PrivacyPage() {
             los mensajes y recibir los avisos de mensajes nuevos (Google Cloud Pub/Sub).
           </li>
           <li><strong>Microsoft</strong>: cuando una organización conecta una cuenta de Microsoft / Outlook, para autorizar el acceso y leer los mensajes.</li>
+          <li>
+            <strong>Resend</strong>: envío de los correos de la cuenta (por ejemplo, la confirmación del registro y la recuperación de la
+            contraseña) y de los correos del Libro de Reclamaciones (la copia de la hoja y nuestra respuesta).
+          </li>
+          <li>
+            <strong>Culqi</strong>: cuando se habilite el pago en línea con tarjeta, para procesar los pagos de las suscripciones (recibe los
+            datos de la tarjeta directamente y los datos de contacto de facturación).
+          </li>
           <li>Otros proveedores técnicos estrictamente necesarios para la infraestructura, como servicios de monitorización de errores si se habilitan.</li>
         </LegalList>
         <p>También podremos revelar información cuando la ley lo exija. No vendemos información personal.</p>
@@ -400,6 +438,10 @@ export function PrivacyPage() {
           <li>
             Los registros técnicos del servidor (por ejemplo, la dirección IP de cada solicitud) se conservan durante el
             tiempo que aplique el proveedor de alojamiento.
+          </li>
+          <li>
+            Las hojas del Libro de Reclamaciones, nuestras respuestas y el registro de su envío, así como los registros de pagos y
+            comprobantes, se conservan durante los plazos que exigen las normas aplicables, aunque se elimine la cuenta o la organización.
           </li>
         </LegalList>
         <p>

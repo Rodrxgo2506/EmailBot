@@ -6,7 +6,7 @@ import { buildApp } from "../app.js";
 import type { ApiConfig, OAuthProviderConfig } from "../config/env.js";
 import { createMemoryNonceStore } from "../infrastructure/nonces.js";
 import type { RateLimitRedis } from "../infrastructure/rate-limit-store.js";
-import type { AppDeps, AuthenticatedUser } from "../deps.js";
+import type { AppDeps, AuthenticatedUser, TransactionalMailer } from "../deps.js";
 import type { AdminOperations, PrivilegedOperations, Repositories } from "../repositories/types.js";
 import { entitlementsFor } from "./plan-fixtures.js";
 
@@ -45,6 +45,7 @@ export function testConfig(overrides: Partial<ApiConfig> = {}): ApiConfig {
     gmailPubSubOidc: null,
     microsoftGraphPushEnabled: false,
     imapAccountsEnabled: false,
+    transactionalEmail: null,
     syncHealthStaleMinutes: 20,
     sentryDsn: null,
     ...overrides
@@ -124,7 +125,10 @@ export function createFakePrivileged(): { [K in keyof PrivilegedOperations]: Ret
     clearMicrosoftSubscription: unexpected("privileged.clearMicrosoftSubscription"),
     // Commercial V1 (OAuth callback): BUSINESS (the limit itself is decided by connectOAuthEmailAccount).
     getOrganizationEntitlements: vi.fn(async () => entitlementsFor("BUSINESS")),
-    listPlanCatalog: unexpected("privileged.listPlanCatalog")
+    listPlanCatalog: unexpected("privileged.listPlanCatalog"),
+    submitComplaintBookEntry: unexpected("privileged.submitComplaintBookEntry"),
+    claimComplaintConfirmationEmail: unexpected("privileged.claimComplaintConfirmationEmail"),
+    recordComplaintConfirmationEmail: unexpected("privileged.recordComplaintConfirmationEmail")
   };
 }
 
@@ -143,6 +147,13 @@ export function createFakeAdmin(platformAdmins: string[] = []): { [K in keyof Ad
     listEmailAccounts: unexpected("admin.listEmailAccounts"),
     listActivity: unexpected("admin.listActivity"),
     listAudit: unexpected("admin.listAudit"),
+    listComplaintBookEntries: unexpected("admin.listComplaintBookEntries"),
+    claimComplaintConfirmationEmail: unexpected("admin.claimComplaintConfirmationEmail"),
+    confirmComplaintConfirmationEmail: unexpected("admin.confirmComplaintConfirmationEmail"),
+    confirmComplaintResponse: unexpected("admin.confirmComplaintResponse"),
+    recordComplaintConfirmationEmail: unexpected("admin.recordComplaintConfirmationEmail"),
+    beginComplaintResponse: unexpected("admin.beginComplaintResponse"),
+    recordComplaintResponse: unexpected("admin.recordComplaintResponse"),
     listPlanPrices: unexpected("admin.listPlanPrices"),
     listSubscriptions: unexpected("admin.listSubscriptions"),
     listPaymentEvents: unexpected("admin.listPaymentEvents"),
@@ -176,6 +187,8 @@ export async function createTestApp(
     organizationStatuses?: Record<string, OrganizationStatus>;
     /** User ids present in platform_admins. */
     platformAdmins?: string[];
+    /** Transactional e-mail provider (none by default: complaint e-mails stay pending). */
+    mailer?: TransactionalMailer;
   } = {}
 ) {
   const users = options.users ?? [];
@@ -233,7 +246,8 @@ export async function createTestApp(
     fetch: options.fetch ?? (vi.fn(async () => new Response("{}", { status: 500 })) as unknown as typeof fetch),
     readinessChecks: [],
     oauthNonces: createMemoryNonceStore(),
-    ...(options.rateLimitRedis ? { rateLimitRedis: options.rateLimitRedis } : {})
+    ...(options.rateLimitRedis ? { rateLimitRedis: options.rateLimitRedis } : {}),
+    ...(options.mailer ? { mailer: options.mailer } : {})
   };
 
   const app = await buildApp(deps, { logger: false });

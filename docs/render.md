@@ -149,6 +149,8 @@ Leyenda: **SECRET** = nunca en logs, repositorio ni bundle; se introduce con `sy
 | `GMAIL_PUBSUB_OIDC_AUDIENCE` | PUBLIC · API ONLY | push de Gmail (V2): `https://api.emailbot.app/webhooks/gmail`, idéntica a la audiencia de la suscripción |
 | `GMAIL_PUBSUB_SERVICE_ACCOUNT` | PUBLIC · API ONLY | push de Gmail (V2): cuenta de servicio OIDC de la suscripción; junto con la anterior |
 | `GMAIL_PUBSUB_VERIFICATION_TOKEN` | SECRET · API ONLY | heredada, no recomendada: si existe, todo push sin `?token=` recibe 401 |
+| `RESEND_API_KEY` | SECRET · API ONLY | correos del Libro de Reclamaciones (copia de la hoja al consumidor y respuestas) por la API HTTP de Resend. Clave con acceso de envío (*sending access*), idealmente limitada al dominio `emailbot.app`; se crea en Resend → API Keys. Junto con la siguiente; sin ellas las hojas se registran igual y sus correos quedan pendientes |
+| `TRANSACTIONAL_EMAIL_FROM` | PUBLIC · API ONLY | remitente en un dominio verificado en Resend, p. ej. `EmailBot <no-reply@emailbot.app>` (no `@resend.dev` en producción). Las respuestas del consumidor van a `soporte@emailbot.app` (*reply-to*) |
 | `MICROSOFT_GRAPH_PUSH_ENABLED` | PUBLIC · API ONLY | push de Microsoft (F9): `true` activa `POST /webhooks/microsoft` (+ `/lifecycle`) y la vigilancia de suscripciones en `/health/sync`. Requiere `MICROSOFT_CLIENT_*`. Por defecto `false` (rutas en 404). Sin secreto compartido: cada suscripción tiene su propio `clientState` |
 
 ### Solo worker

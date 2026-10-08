@@ -45,6 +45,10 @@ const LegalAcceptancePage = page(() => import("@/features/legal/legal-acceptance
 const PrivacyPage = page(() => import("@/features/legal/privacy-page"), "PrivacyPage");
 const TermsPage = page(() => import("@/features/legal/terms-page"), "TermsPage");
 const PlansPage = page(() => import("@/features/plans/plans-page"), "PlansPage");
+const HomePage = page(() => import("@/features/public/home-page"), "HomePage");
+const ContactPage = page(() => import("@/features/public/contact-page"), "ContactPage");
+const ComplaintsBookPage = page(() => import("@/features/public/complaints-book-page"), "ComplaintsBookPage");
+const RefundPolicyPage = page(() => import("@/features/legal/refund-policy-page"), "RefundPolicyPage");
 const PortalApp = page(() => import("@/features/portal/portal-app"), "PortalApp");
 const AdminRoute = page(() => import("@/features/admin/admin-route"), "AdminRoute");
 
@@ -72,6 +76,10 @@ export function App() {
           {/* Public legal pages (linked from the Google OAuth consent screen). */}
           <Route path="/privacy" element={publicPage(<PrivacyPage />)} />
           <Route path="/terms" element={publicPage(<TermsPage />)} />
+          <Route path="/cambios-devoluciones" element={publicPage(<RefundPolicyPage />)} />
+          {/* Public commercial pages (contact, complaints book): no session or organization needed. */}
+          <Route path="/contacto" element={publicPage(<ContactPage />)} />
+          <Route path="/libro-de-reclamaciones" element={publicPage(<ComplaintsBookPage />)} />
           {/* Customer portal: Access ID + httpOnly session cookie, no Supabase session, no organization. */}
           <Route path="/portal/*" element={publicPage(<PortalApp />)} />
           <Route path="*" element={<SessionRoutes />} />
@@ -100,7 +108,18 @@ function SessionRoutes() {
             {/* Public pricing page; inside the session providers only to recognize the current plan. */}
             <Route path="/planes" element={<PlansPage />} />
 
-            <Route element={<RequireAuth />}>
+            {/* "/" is the public home for visitors; with a session it stays the panel. */}
+            <Route
+              element={
+                <RequireAuth
+                  anonymousHome={
+                    <Suspense fallback={<FullScreenLoader />}>
+                      <HomePage />
+                    </Suspense>
+                  }
+                />
+              }
+            >
               {/* Acceptance of the current Terms / Privacy versions; everything else waits for it. */}
               <Route path="/legal/accept" element={<LegalAcceptancePage />} />
               <Route element={<RequireLegalAcceptance />}>

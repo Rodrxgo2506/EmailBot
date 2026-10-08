@@ -82,6 +82,11 @@ services:
         sync: false
       - key: GMAIL_PUBSUB_SERVICE_ACCOUNT
         sync: false
+      # Libro de Reclamaciones e-mails (Resend): set together; without them they stay pending.
+      - key: RESEND_API_KEY
+        sync: false
+      - key: TRANSACTIONAL_EMAIL_FROM
+        sync: false
       - key: SENTRY_DSN
         sync: false
 

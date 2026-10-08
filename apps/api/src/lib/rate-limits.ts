@@ -33,6 +33,10 @@ export const RATE_LIMITS = {
   adminWrite: { max: 60, timeWindow: "1 minute" },
   /** Public plan catalog (pricing page, no session); cached by browsers for 5 minutes. */
   planCatalog: { max: 60, timeWindow: "1 minute" },
+  // Libro de Reclamaciones (public form): a person files a few sheets, never dozens.
+  complaintSubmit: { max: 5, timeWindow: "10 minutes" },
+  /** Complaints book e-mails sent by administrators (answers, copies sent again). */
+  complaintEmail: { max: 20, timeWindow: "10 minutes" },
   /** Provider push traffic can burst. */
   webhook: { max: 1200, timeWindow: "1 minute" }
 } as const;

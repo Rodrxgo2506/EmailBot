@@ -6,8 +6,8 @@ import { ThemeToggle } from "@/components/layout/theme-toggle";
 import { Button } from "@/components/ui/button";
 import { ErrorMessage } from "@/components/ui/display";
 import { SkeletonRows } from "@/components/ui/feedback";
-import { LegalLinks } from "@/features/legal/legal-layout";
 import { usePlanOverview } from "@/features/organization/api";
+import { PublicFooter } from "@/features/public/public-layout";
 import { getErrorMessage } from "@/lib/errors";
 import { useAuth } from "@/providers/auth-provider";
 import { useOrganization } from "@/providers/organization-provider";
@@ -16,6 +16,7 @@ import { ComingSoonDialog } from "./coming-soon-dialog";
 import { PlanComparison } from "./plan-comparison";
 import { PlanOfferCard } from "./plan-offer-card";
 import { planCta, type Viewer } from "./plans-model";
+import { SalesContact } from "./sales-contact";
 
 /**
  * Who is looking: anonymous, or a member of the active organization with its
@@ -139,14 +140,11 @@ export function PlansPage() {
             </p>
           </section>
         ) : null}
+
+        <SalesContact />
       </main>
 
-      <footer className="border-t">
-        <div className="mx-auto flex w-full max-w-6xl flex-wrap items-center justify-between gap-4 px-4 py-6 text-sm text-muted-foreground sm:px-6">
-          <span>EmailBot</span>
-          <LegalLinks />
-        </div>
-      </footer>
+      <PublicFooter showLogin={!viewer?.authenticated} />
 
       <ComingSoonDialog plan={choosing} onOpenChange={(open) => !open && setChoosing(null)} />
     </div>

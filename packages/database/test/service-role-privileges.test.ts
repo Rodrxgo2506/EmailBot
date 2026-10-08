@@ -17,6 +17,7 @@ const TABLES = [
   "bot_customer_assignments",
   "bots",
   "categories",
+  "complaint_book_entries",
   "customer_access_credentials",
   "customer_identifiers",
   "customer_sessions",
@@ -51,6 +52,8 @@ const SERVICE_ROLE_EXPECTED: Record<(typeof TABLES)[number], Privilege[]> = {
   // V2 phase 1: column SELECT (id, organization_id, status); phase 3 adds customer_resolution.
   bots: [],
   categories: [],
+  // Libro de Reclamaciones: no table privilege; the complaint functions (public.*, admin.*) only.
+  complaint_book_entries: [],
   // V2 phase 4: no table privilege; portal.* SECURITY DEFINER functions only (no hash is ever readable).
   customer_access_credentials: [],
   customer_identifiers: [],
@@ -84,7 +87,7 @@ const SERVICE_ROLE_EXPECTED: Record<(typeof TABLES)[number], Privilege[]> = {
 };
 
 /** Tables that existed before migration 7 (V2 tables are created later). */
-const V2_TABLES: readonly string[] = ["bots", "customers", "customer_identifiers", "bot_customer_assignments", "email_deliveries", "customer_access_credentials", "customer_sessions", "platform_admins", "platform_audit_logs", "legal_acceptances", "plan_catalog", "plan_entitlements", "plan_prices", "subscriptions", "payment_events"];
+const V2_TABLES: readonly string[] = ["bots", "customers", "customer_identifiers", "bot_customer_assignments", "email_deliveries", "customer_access_credentials", "customer_sessions", "platform_admins", "platform_audit_logs", "legal_acceptances", "plan_catalog", "plan_entitlements", "plan_prices", "subscriptions", "payment_events", "complaint_book_entries"];
 const V1_TABLES = TABLES.filter((table) => !V2_TABLES.includes(table));
 
 async function privilegeMatrix(tx: Tx, role: string, tables: readonly string[] = TABLES): Promise<Record<string, Privilege[]>> {
@@ -180,10 +183,15 @@ describe.each<DefaultPrivilegesProfile>(["production", "local"])("AFTER migratio
     // subscriptions whose period already ended (covered by subscriptions.test.ts).
     // OAuth mailbox connection: plan limit + insert/update under the organization lock, called by the API's
     // OAuth callback after it re-checked the role and the plan (covered by email-account-connect.test.ts).
+    // Libro de Reclamaciones: the public form through the API (every input validated again) and the state of the
+    // consumer's copy e-mail (claim / record, one sender at a time) (complaints-book.test.ts).
     expect(executable.sort()).toEqual(
       [
         "public.connect_oauth_email_account(p_organization_id uuid, p_provider email_provider, p_email_address text, p_display_name text, p_provider_account_id text, p_access_token_encrypted text, p_refresh_token_encrypted text, p_token_expires_at timestamp with time zone, p_sync_cursor text)",
-        "public.expire_due_subscriptions()"
+        "public.claim_complaint_confirmation_email(p_entry_id uuid)",
+        "public.expire_due_subscriptions()",
+        "public.record_complaint_confirmation_email(p_entry_id uuid, p_outcome text, p_provider_message_id text, p_error_code text)",
+        "public.submit_complaint_book_entry(p_submission_id uuid, p_kind text, p_first_names text, p_last_names text, p_document_type text, p_document_number text, p_email text, p_phone text, p_address text, p_is_minor boolean, p_guardian_name text, p_good_type text, p_good_description text, p_claimed_amount_cents bigint, p_detail text, p_consumer_request text, p_request_id text)"
       ].sort()
     );
   });

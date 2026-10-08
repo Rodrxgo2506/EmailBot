@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { CURRENT_LEGAL_VERSIONS } from "@emailbot/types";
+import { COMPLAINTS_BOOK_PROVIDER, CURRENT_LEGAL_VERSIONS } from "@emailbot/types";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -23,6 +23,7 @@ import {
   SERVICE_FISCAL_ADDRESS,
   SERVICE_OPERATOR,
   SERVICE_OPERATOR_RUC,
+  SERVICE_PUBLIC_ADDRESS_LINE,
   TERMS_VERSION
 } from "./legal-info";
 import { PrivacyPage } from "./privacy-page";
@@ -92,8 +93,9 @@ describe("terms of service (V2)", () => {
 
   it("cross references point to the right sections", () => {
     text(<TermsPage />);
-    expect(screen.getByRole("heading", { name: /Modificaciones del servicio/ }).textContent).toMatch(/^13/);
-    expect(screen.getByRole("heading", { name: /Suspensión y terminación/ }).textContent).toMatch(/^14/);
+    expect(screen.getByRole("heading", { name: /Modificaciones del servicio/ }).textContent).toMatch(/^18/);
+    expect(screen.getByRole("heading", { name: /Suspensión y terminación/ }).textContent).toMatch(/^19/);
+    expect(screen.getByRole("heading", { name: /Organizaciones, planes y miembros/ }).textContent).toMatch(/^5/);
   });
 });
 
@@ -181,6 +183,23 @@ describe("acceptance of the legal documents is described as implemented", () => 
   });
 });
 
+describe("Libro de Reclamaciones e-mails", () => {
+  it("the provider data printed on the e-mails is the same as on the legal pages", () => {
+    expect(COMPLAINTS_BOOK_PROVIDER.holder).toBe(SERVICE_OPERATOR);
+    expect(COMPLAINTS_BOOK_PROVIDER.ruc).toBe(SERVICE_OPERATOR_RUC);
+    expect(COMPLAINTS_BOOK_PROVIDER.supportEmail).toBe(LEGAL_CONTACT_EMAIL);
+    expect(COMPLAINTS_BOOK_PROVIDER.address).toBe(SERVICE_PUBLIC_ADDRESS_LINE);
+  });
+
+  it("the privacy policy explains the copy, the answer, the e-mail provider and their retention", () => {
+    const content = text(<PrivacyPage />);
+    expect(content).toMatch(/te enviamos una copia de la hoja al correo que indicaste/);
+    expect(content).toMatch(/la respuesta de EmailBot llega a ese mismo correo/);
+    expect(content).toMatch(/Resend: envío de los correos de la cuenta .* Libro de Reclamaciones/);
+    expect(content).toMatch(/nuestras respuestas y el registro de su envío/);
+  });
+});
+
 describe("terms of service: precise statements", () => {
   it("explicit, recorded acceptance at sign-up; Peruvian law without an invented court; no absolute real-time promise", () => {
     const content = text(<TermsPage />);
@@ -195,8 +214,28 @@ describe("terms of service: precise statements", () => {
     expect(content).toContain(`RUC ${SERVICE_OPERATOR_RUC}`);
   });
 
-  it("does not introduce monetization content yet", () => {
+  it("covers plans, renewal, cancellation and refunds without claiming online checkout is live", () => {
     const content = text(<TermsPage />);
-    expect(content).not.toMatch(/precio|reembolso|devoluci|Culqi|Libro de Reclamaciones|suscripci/i);
+    for (const heading of [
+      /Planes, precios y periodicidad/,
+      /Inicio, duración y renovación/,
+      /Pagos y comprobantes/,
+      /Cancelación y devoluciones/,
+      /Soporte/,
+      /Libro de Reclamaciones/
+    ]) {
+      expect(screen.getByRole("heading", { name: heading })).toBeInTheDocument();
+    }
+    expect(content).toMatch(/soles \(PEN\) e incluyen el IGV/);
+    expect(content).toMatch(/se renueva automáticamente al final de cada periodo/);
+    expect(content).toMatch(/Conservas el acceso al servicio hasta que termine el periodo que ya pagaste/);
+    expect(content).toMatch(/no genera una devolución prorrateada/);
+    expect(content).toMatch(/Las devoluciones no son automáticas/);
+    expect(content).toMatch(/Mientras la contratación en línea no esté disponible/);
+    expect(content).toMatch(/Cuando habilitemos el pago en línea con tarjeta/);
+    expect(content).toMatch(/quince \(15\) días hábiles/);
+    expect(content).not.toMatch(/sandbox|pk_test|sk_test|pk_live|sk_live/i);
+    expect(content).not.toMatch(/\d+\s?%/);
+    expect(screen.getAllByRole("link", { name: /Libro de Reclamaciones/ })[0]).toHaveAttribute("href", "/libro-de-reclamaciones");
   });
 });

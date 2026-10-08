@@ -181,6 +181,44 @@ ni sesiones.
   `organization.plan_changed` solo en registros anteriores), con el request id. Los registros son inmutables.
 - `GET /api/me` incluye `isPlatformAdmin` (solo para mostrar la consola; la protección es la API).
 
+## Libro de Reclamaciones
+
+- `POST /api/complaints-book` (público, sin sesión, 5 por IP cada 10 min): valida la hoja (Zod) y la registra con
+  `public.submit_complaint_book_entry` (correlativo `LR-AAAA-NNNNNN` por secuencia). `submissionId` (UUID, uno por formulario)
+  hace idempotente el reintento: devuelve la misma hoja (`200`) sin otro número ni otro correo. Después de registrarla envía
+  la copia de la hoja al correo del consumidor (Resend); el resultado del correo **nunca** cambia la respuesta: `201` con
+  `{ code, number, kind, createdAt, confirmationEmail: SENT | PENDING | FAILED }`.
+- `GET /api/admin/complaints-book?page&pageSize` (administradores de plataforma): hojas con el estado de la copia y de la respuesta.
+- `POST /api/admin/complaints-book/:id/response` `{ response }` (10–5000 caracteres, texto plano; 20 envíos por 10 min):
+  envía la respuesta al correo de la hoja. `200 { status: RESPONDED, respondedAt }` solo si el proveedor aceptó el correo;
+  `502 EMAIL_NOT_SENT` si lo rechazó (el caso sigue `PENDING`), `502 EMAIL_OUTCOME_UNKNOWN` si no lo confirmó (timeout,
+  red, 5xx, 409), `409 COMPLAINT_ALREADY_RESPONDED` / `COMPLAINT_RESPONSE_IN_PROGRESS` / `COMPLAINT_RESPONSE_TEXT_LOCKED`,
+  `404`, `503 EMAIL_NOT_CONFIGURED`. Cada respuesta es una operación con texto, fecha e `Idempotency-Key` fijos: los
+  reintentos (tras un resultado desconocido o un fallo de registro, cuando la reserva expira a los 2 min) envían el mismo
+  correo byte a byte y Resend no lo duplica; con resultado desconocido solo se acepta el mismo texto. Solo un rechazo
+  confirmado del proveedor abre una operación nueva.
+- Ventana de idempotencia: Resend guarda cada `Idempotency-Key` 24 h (no documenta qué ocurre después). EmailBot solo
+  repite un envío con resultado desconocido mientras su clave tiene menos de **23 h**. Pasado ese plazo nada se reenvía
+  automáticamente (`409 COMPLAINT_RESPONSE_DECISION_REQUIRED`; la constancia no se reclama): un administrador decide.
+  - `POST /api/admin/complaints-book/:id/response/confirm` / `.../confirmation-email/confirm` `{ providerMessageId }`:
+    registra el correo como enviado con el ID que encontró en el panel de Resend o en los logs de la API (cada correo
+    aceptado registra `providerMessageId`). No envía nada. `409 COMPLAINT_EMAIL_NOT_UNCERTAIN` si no hay un resultado
+    incierto (o alguien lo está enviando).
+  - `forceResend: true` en `.../response` o `.../confirmation-email`: nueva operación (nueva clave y fecha) sabiendo que
+    puede duplicarse.
+  - Auditoría: `complaint_book.response_confirmed_manually`, `complaint_book.response_resend_forced`,
+    `complaint_book.confirmation_confirmed_manually`, `complaint_book.confirmation_resend_forced`.
+  - Con resultado desconocido no puede garantizarse una sola entrega pasado el plazo del proveedor; sí se garantiza que
+    EmailBot no duplica en silencio.
+- `POST /api/admin/complaints-book/:id/confirmation-email`: reenvía la copia de la hoja (`409 COMPLAINT_COPY_NOT_PENDING` si
+  ya se envió, se está enviando o su resultado es desconocido; `502 EMAIL_NOT_SENT` / `EMAIL_OUTCOME_UNKNOWN`). La
+  constancia solo depende de la hoja guardada y su clave solo cambia tras un rechazo confirmado.
+- Auditoría (`platform_audit_logs`, `target_type = complaint_book_entry`): `complaint_book.response_sent`,
+  `complaint_book.response_failed`, `complaint_book.response_uncertain`, `complaint_book.confirmation_resent`,
+  `complaint_book.confirmation_failed`, `complaint_book.confirmation_uncertain`, con el
+  administrador, el código de la hoja, el resultado, el id del mensaje del proveedor o el código de error y el request id.
+  Nunca el texto de la respuesta ni los datos del consumidor (tampoco en los logs).
+
 ## Webhooks
 
 ### `POST /webhooks/gmail` (Gmail push vía Google Cloud Pub/Sub)

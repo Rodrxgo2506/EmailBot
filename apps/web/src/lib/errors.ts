@@ -38,7 +38,23 @@ const MESSAGES: Record<string, string> = {
   PLAN_UNAVAILABLE: "No se pudo leer el plan de tu organización. Inténtalo de nuevo.",
   SUBSCRIPTION_REQUIRED:
     "Tu organización no tiene una suscripción activa. EmailBot es un servicio de pago: contrata o renueva un plan para continuar. Tus datos se conservan.",
-  PAYMENT_ALREADY_RECORDED: "Ese pago (método y referencia) ya fue registrado."
+  PAYMENT_ALREADY_RECORDED: "Ese pago (método y referencia) ya fue registrado.",
+  // Libro de Reclamaciones
+  EMAIL_NOT_CONFIGURED: "El envío de correos no está configurado en el servidor. No se envió nada.",
+  EMAIL_NOT_SENT: "El proveedor de correo no aceptó el envío. No se envió nada y el caso sigue pendiente; puedes intentarlo de nuevo.",
+  EMAIL_OUTCOME_UNKNOWN:
+    "El proveedor de correo no confirmó el envío: pudo haberse enviado. Vuelve a intentarlo en dos minutos con el mismo texto; no se enviará dos veces.",
+  COMPLAINT_ALREADY_RESPONDED: "Este reclamo ya fue respondido.",
+  COMPLAINT_RESPONSE_IN_PROGRESS:
+    "Hay un envío de respuesta en curso o con resultado incierto. Espera dos minutos, actualiza la lista y vuelve a enviar el mismo texto.",
+  COMPLAINT_RESPONSE_TEXT_LOCKED:
+    "La respuesta anterior pudo haberse enviado. Para no mandar dos respuestas distintas, solo puedes reenviar exactamente el mismo texto.",
+  COMPLAINT_RESPONSE_NOT_RECORDED:
+    "La respuesta se envió, pero no se pudo registrar. Vuelve a enviar el mismo texto en dos minutos (no se enviará un segundo correo).",
+  COMPLAINT_RESPONSE_DECISION_REQUIRED:
+    "No se pudo confirmar si la respuesta anterior se envió y ya pasó el plazo en que el proveedor evita duplicados. Regístrala como enviada (si la encuentras en Resend) o reenvíala de todos modos.",
+  COMPLAINT_EMAIL_NOT_UNCERTAIN: "Ese correo no tiene un resultado incierto (o alguien lo está enviando ahora). Actualiza la lista.",
+  COMPLAINT_COPY_NOT_PENDING: "La constancia ya fue enviada, se está enviando o su resultado es incierto. Espera dos minutos y actualiza la lista."
 };
 
 /** Commercial V1: the 403 of a plan limit / feature names what and which plan. */

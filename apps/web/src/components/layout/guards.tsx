@@ -17,11 +17,15 @@ export function FullScreenLoader() {
   );
 }
 
-/** Session required. Unauthenticated users go to /login and come back afterwards. */
-export function RequireAuth() {
+/**
+ * Session required. Unauthenticated users go to /login and come back afterwards, except at "/" when
+ * `anonymousHome` is given: visitors see the public home there and signed-in users keep the panel.
+ */
+export function RequireAuth({ anonymousHome }: { anonymousHome?: ReactNode } = {}) {
   const { session, loading } = useAuth();
   const location = useLocation();
   if (loading) return <FullScreenLoader />;
+  if (!session && anonymousHome && location.pathname === "/") return <>{anonymousHome}</>;
   if (!session) return <Navigate to="/login" replace state={{ from: `${location.pathname}${location.search}` }} />;
   return <Outlet />;
 }

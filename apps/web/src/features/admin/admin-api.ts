@@ -1,6 +1,9 @@
 import type {
   AdminActivityItem,
   AdminAuditEntry,
+  ComplaintBookEntry,
+  ComplaintConfirmationResendResult,
+  ComplaintResponseResult,
   AdminBot,
   AdminCustomer,
   AdminEmailAccount,
@@ -75,6 +78,15 @@ export interface AdminApi {
   emailAccounts(id: string): Promise<AdminEmailAccount[]>;
   activity(params: AdminLogParams): Promise<OffsetPage<AdminActivityItem>>;
   audit(params: AdminLogParams): Promise<OffsetPage<AdminAuditEntry>>;
+  /** Libro de Reclamaciones, newest first. */
+  complaints(params: { page: number; pageSize: number }): Promise<OffsetPage<ComplaintBookEntry>>;
+  /** E-mails the answer to the consumer; RESPONDED only when the provider accepted it. */
+  respondToComplaint(id: string, response: string, options: { forceResend: boolean }): Promise<ComplaintResponseResult>;
+  /** Sends the consumer's copy of the sheet again. */
+  resendComplaintCopy(id: string, options: { forceResend: boolean }): Promise<ComplaintConfirmationResendResult>;
+  /** Records an e-mail with an unknown outcome as sent, with the Resend id the administrator found. */
+  confirmComplaintResponse(id: string, providerMessageId: string): Promise<ComplaintResponseResult>;
+  confirmComplaintCopy(id: string, providerMessageId: string): Promise<ComplaintConfirmationResendResult>;
 }
 
 export function createAdminApi(client: Pick<ApiClient, "get" | "post" | "patch">): AdminApi {
@@ -111,7 +123,23 @@ export function createAdminApi(client: Pick<ApiClient, "get" | "post" | "patch">
     customers: (id, page, pageSize) => client.get<Paginated<AdminCustomer>>(`${organization(id)}/customers${buildQuery({ page, pageSize })}`),
     emailAccounts: async (id) => (await client.get<{ items: AdminEmailAccount[] }>(`${organization(id)}/email-accounts`)).items,
     activity: (params) => client.get<OffsetPage<AdminActivityItem>>(`/api/admin/activity${buildQuery({ ...params })}`),
-    audit: (params) => client.get<OffsetPage<AdminAuditEntry>>(`/api/admin/audit${buildQuery({ ...params })}`)
+    audit: (params) => client.get<OffsetPage<AdminAuditEntry>>(`/api/admin/audit${buildQuery({ ...params })}`),
+    complaints: (params) => client.get<OffsetPage<ComplaintBookEntry>>(`/api/admin/complaints-book${buildQuery({ ...params })}`),
+    // forceResend is only sent when the administrator chose it (past the provider's idempotency window).
+    respondToComplaint: (id, response, options) =>
+      client.post<ComplaintResponseResult>(`/api/admin/complaints-book/${encodeURIComponent(id)}/response`, {
+        response,
+        ...(options.forceResend ? { forceResend: true } : {})
+      }),
+    resendComplaintCopy: (id, options) =>
+      client.post<ComplaintConfirmationResendResult>(
+        `/api/admin/complaints-book/${encodeURIComponent(id)}/confirmation-email`,
+        options.forceResend ? { forceResend: true } : {}
+      ),
+    confirmComplaintResponse: (id, providerMessageId) =>
+      client.post<ComplaintResponseResult>(`/api/admin/complaints-book/${encodeURIComponent(id)}/response/confirm`, { providerMessageId }),
+    confirmComplaintCopy: (id, providerMessageId) =>
+      client.post<ComplaintConfirmationResendResult>(`/api/admin/complaints-book/${encodeURIComponent(id)}/confirmation-email/confirm`, { providerMessageId })
   };
 }
 
