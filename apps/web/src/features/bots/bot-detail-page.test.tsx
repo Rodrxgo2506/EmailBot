@@ -152,3 +152,44 @@ describe("bot page: delivery to the customer portal", () => {
     expect(screen.queryByRole("button", { name: "Guardar" })).not.toBeInTheDocument();
   });
 });
+
+describe("bot page: what the customer portal shows (portal_settings)", () => {
+  it("by default the content is not shared; an admin enables it and the configured fields are kept", async () => {
+    const fields = [{ key: "verification_code", label: "Código" }];
+    bot = { ...makeBot(NONE), portalSettings: { showBody: false, showAttachments: false, fields } };
+    patch.mockImplementation(async (_path: string, body: Partial<Bot>) => {
+      bot = { ...bot, ...body };
+      return { bot };
+    });
+    renderPage();
+
+    const showBody = await screen.findByRole("checkbox", { name: /Mostrar el contenido completo del correo/ });
+    expect(showBody).not.toBeChecked();
+    expect(screen.getByText("Solo resumen")).toBeInTheDocument();
+    const save = screen.getByRole("button", { name: "Guardar vista en el portal" });
+    expect(save).toBeDisabled();
+
+    fireEvent.click(showBody);
+    fireEvent.click(save);
+    await waitFor(() =>
+      expect(patch).toHaveBeenCalledWith(`/api/bots/${BOT_ID}`, { portalSettings: { showBody: true, showAttachments: false, fields } })
+    );
+    expect(await screen.findByText("Contenido visible")).toBeInTheDocument();
+    expect(screen.getByRole("checkbox", { name: /Mostrar el contenido completo del correo/ })).toBeChecked();
+  });
+
+  it("attachments are a separate choice", async () => {
+    renderPage();
+    fireEvent.click(await screen.findByRole("checkbox", { name: /Permitir descargar los archivos adjuntos/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Guardar vista en el portal" }));
+    await waitFor(() =>
+      expect(patch).toHaveBeenCalledWith(`/api/bots/${BOT_ID}`, { portalSettings: { showBody: false, showAttachments: true, fields: [] } })
+    );
+  });
+
+  it("without bots:manage the choices are visible but read-only", async () => {
+    renderPage((permission) => permission !== "bots:manage");
+    expect(await screen.findByRole("checkbox", { name: /Mostrar el contenido completo del correo/ })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "Guardar vista en el portal" })).not.toBeInTheDocument();
+  });
+});

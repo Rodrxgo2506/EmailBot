@@ -13,6 +13,7 @@ import { useBot, useBotMutations } from "./api";
 import { BotCustomersCard } from "./bot-customers-card";
 import { BotDialog } from "./bot-dialog";
 import { CustomerResolutionCard } from "./customer-resolution-card";
+import { PortalVisibilityCard } from "./portal-visibility-card";
 
 export function BotDetailPage() {
   const { botId } = useParams();
@@ -126,6 +127,7 @@ export function BotDetailPage() {
       <div className="mt-6 grid gap-6 lg:grid-cols-2">
         <CustomerResolutionCard bot={current} canManage={canManage} />
         <BotCustomersCard botId={current.id} canManage={canManageCustomers} />
+        <PortalVisibilityCard bot={current} canManage={canManage} />
       </div>
 
       <BotDialog open={editing} onOpenChange={setEditing} bot={current} />
