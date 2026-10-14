@@ -16,7 +16,7 @@ import {
 import { ProviderHttpError } from "../providers/http.js";
 import type { MicrosoftSubscriptionClient } from "../providers/microsoft/subscriptions.js";
 import type { ProviderRegistry } from "../providers/registry.js";
-import { ProviderAuthError, ProviderTransientError, type ProviderContext, type WorkerAccount } from "../providers/types.js";
+import { ProviderAuthError, ProviderSecurityError, ProviderTransientError, type ProviderContext, type WorkerAccount } from "../providers/types.js";
 import { hasCommercialAccess, withCommercialAccess } from "./commercial-access.js";
 import type { AccountStore, AuditRecorder, EmailStore, JobProducer, Logger, SubscriptionMaintenance, SyncLock } from "./ports.js";
 import { AttachmentsPendingError, type ProcessEmailOutcome } from "./process-email.js";
@@ -66,6 +66,11 @@ export interface HandleEventDeps {
   microsoftSubscriptions?: MicrosoftSubscriptionClient;
   /** Commercial V1.2: periodic expiration of subscriptions (EXPIRE_SUBSCRIPTIONS). */
   subscriptions?: SubscriptionMaintenance;
+  /**
+   * IMAP synchronization (worker config, fixed false until IMAP is launched).
+   * Absent / false: IMAP accounts are never polled, synchronized or processed.
+   */
+  imapSyncEnabled?: boolean;
   now?: () => number;
   logger: Logger;
 }
@@ -134,7 +139,7 @@ export function recoverySince(lastSyncedAt: string | null | undefined, now: numb
 
 /** Errors that must stop the whole run (credentials); everything else is per message. */
 function isAccountFatal(error: unknown): boolean {
-  return error instanceof ProviderAuthError || error instanceof SecretBoxError;
+  return error instanceof ProviderAuthError || error instanceof ProviderSecurityError || error instanceof SecretBoxError;
 }
 
 /**
@@ -146,8 +151,15 @@ function isAccountFatal(error: unknown): boolean {
  * is not advanced and the run is retried; already-stored messages are
  * deduplicated by the database on the retry.
  */
-async function processMessages(account: WorkerAccount, messageIds: string[], deps: HandleEventDeps): Promise<{ processed: number; skipped: number }> {
+async function processMessages(
+  account: WorkerAccount,
+  messageIds: string[],
+  deps: HandleEventDeps,
+  options: { recovery?: boolean } = {}
+): Promise<{ processed: number; skipped: number }> {
   const processMessage = deps.processMessage;
+  // IMAP only: messages listed by a history-gap recovery may be stored already under their old UIDVALIDITY.
+  const recovery = options.recovery === true && account.provider === "IMAP" ? ({ recovery: true } as const) : {};
   if (!processMessage) throw new Error("processMessage is not configured");
   let processed = 0;
   let skipped = 0;
@@ -163,7 +175,8 @@ async function processMessages(account: WorkerAccount, messageIds: string[], dep
           organizationId: account.organizationId,
           emailAccountId: account.id,
           provider: account.provider,
-          providerMessageId
+          providerMessageId,
+          ...recovery
         });
         if (outcome.status === "skipped") skipped += 1;
         else processed += 1;
@@ -196,6 +209,11 @@ export async function syncAccount(account: WorkerAccount, deps: HandleEventDeps,
   const empty: SyncResult = { found: 0, processed: 0, skipped: 0, historyGap: false, hasMore: false, cursorAdvanced: false };
   // Inactive account / organization: nothing is listed and the cursor does not move, so no mail is lost or processed.
   if (account.status !== "ACTIVE" || account.organizationStatus !== "ACTIVE") return empty;
+  // IMAP synchronization disabled (worker config): no connection is opened, the cursor does not move.
+  if (account.provider === "IMAP" && deps.imapSyncEnabled !== true) {
+    deps.logger.info({ emailAccountId: account.id, provider: account.provider, reason }, "IMAP synchronization is disabled; account skipped");
+    return empty;
+  }
   // Commercial V1.2: same without commercial access (checked now, not when the job was queued);
   // the cursor stays where it is, so the mailbox resumes from it once the organization pays again.
   const allowed = await hasCommercialAccess(deps.accounts, deps.logger, {
@@ -247,7 +265,7 @@ export async function syncAccount(account: WorkerAccount, deps: HandleEventDeps,
       );
     }
 
-    const { processed, skipped } = await processMessages(account, messageIds, deps);
+    const { processed, skipped } = await processMessages(account, messageIds, deps, { recovery: historyGap });
 
     // Only now, with every message durably handled, the cursor moves.
     const cursorAdvanced = await deps.accounts.advanceSyncCursor(account.id, {
@@ -568,8 +586,10 @@ export async function handleEmailEvent(job: EmailEventJob, deps: HandleEventDeps
 
     case "POLL_ACCOUNTS": {
       // Recovery polling: catches missed / lost pushes, expired watches and accounts without push.
-      const active = await deps.accounts.listActiveOAuthAccounts(POLL_BATCH);
-      const accounts = await withCommercialAccess(active, deps.accounts, deps.logger, "poll", job.type);
+      const oauth = await deps.accounts.listActiveOAuthAccounts(POLL_BATCH);
+      // IMAP has no push: polling is its only ingestion, and only while IMAP synchronization is enabled.
+      const imap = deps.imapSyncEnabled === true && deps.accounts.listActiveImapAccounts ? await deps.accounts.listActiveImapAccounts(POLL_BATCH) : [];
+      const accounts = await withCommercialAccess([...oauth, ...imap], deps.accounts, deps.logger, "poll", job.type);
       for (const account of accounts) await deps.enqueueSync(account, "POLL");
       return { accounts: accounts.length, enqueued: accounts.length };
     }

@@ -37,6 +37,8 @@ export interface ProcessEmailDeps {
   /** In-job retries of Storage / attachment-row writes (default 3 attempts, 250 ms apart). */
   storageAttempts?: number;
   storageRetryDelayMs?: number;
+  /** IMAP synchronization (worker config, fixed false until IMAP is launched). Absent / false: IMAP mail is never fetched. */
+  imapSyncEnabled?: boolean;
 }
 
 export type ProcessEmailOutcome =
@@ -49,6 +51,7 @@ export type ProcessEmailOutcome =
         | "organization_inactive"
         | "subscription_inactive"
         | "account_inactive"
+        | "imap_disabled"
         | "auto_processing_disabled"
         | "duplicate"
         | "no_enabled_rules"
@@ -113,6 +116,8 @@ export async function processEmail(
   // SUSPENDED / CANCELLED: data is kept, nothing new is processed or delivered (incomplete emails stay as they are).
   if (account.organizationStatus !== "ACTIVE") return { status: "skipped", reason: "organization_inactive" };
   if (account.status !== "ACTIVE") return { status: "skipped", reason: "account_inactive" };
+  // IMAP synchronization disabled (worker config): nothing is fetched, stored or delivered (also for recovery jobs).
+  if (account.provider === "IMAP" && deps.imapSyncEnabled !== true) return { status: "skipped", reason: "imap_disabled" };
   // Commercial V1.2: checked for every message, at processing time (a job queued while the organization had
   // access is skipped once it lost it: no rules, bots, deliveries or notifications; completed, never retried).
   const allowed = await hasCommercialAccess(deps.accounts, log, {
@@ -135,6 +140,15 @@ export async function processEmail(
 
   const context = deps.createContext(account);
   const email = await deps.providers[account.provider].fetchMessage(context, job.providerMessageId);
+  // IMAP history-gap recovery only (UIDVALIDITY changed): a message already stored comes back under a
+  // new provider id. It is recognized by its Message-ID AND its INTERNALDATE (received_at), so two
+  // different messages that merely share a Message-ID (senders reusing it) are both kept. Every other
+  // path, and Gmail / Microsoft, keep the provider id dedup only.
+  if (job.recovery === true && account.provider === "IMAP" && email.internetMessageId && deps.emails.findEmailIdByInternetMessageId) {
+    if (await deps.emails.findEmailIdByInternetMessageId(account.id, email.internetMessageId, email.receivedAt)) {
+      return { status: "skipped", reason: "duplicate" };
+    }
+  }
   const result = evaluateRules(email, rules);
 
   if (result.regexTimedOut) {

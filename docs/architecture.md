@@ -149,7 +149,7 @@ Despliegue (puertos, health checks, CSP, Docker): [`deployment.md`](deployment.m
 ## Pendientes
 
 - Registro y renovación de suscripciones push: Gmail `users.watch` y Graph `subscriptions`. Mientras tanto se usa polling (`WORKER_POLL_INTERVAL_MINUTES`).
-- Sincronización IMAP (adapter scaffold; las cuentas se crean en pausa).
+- Sincronización IMAP: adaptador del worker implementado pero DESACTIVADO (`imapSyncEnabled: false` fijo en código); alta / prueba de conexión (E3) y formulario (E4) pendientes. Ver `docs/imap.md`.
 - Notificaciones por email: no implementadas; el canal `email` se retiró del contrato de reglas en V2 F7 (solo in-app).
 - Invitaciones por correo a personas sin cuenta (hoy solo se agregan usuarios registrados).
 - Tipos generados de la base de datos (`supabase gen types`) en lugar de filas sin tipar en los repositorios.

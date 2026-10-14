@@ -117,6 +117,12 @@ export interface WorkerConfig {
   /** null = health endpoint disabled. */
   health: { port: number; host: string } | null;
   sentryDsn: string | null;
+  /**
+   * IMAP synchronization. FIXED to false in code (no environment variable can
+   * turn it on): IMAP accounts are never polled, synchronized or processed and
+   * the IMAP adapter is not even created until IMAP is launched by a code change.
+   */
+  imapSyncEnabled: boolean;
 }
 
 function oauth(
@@ -158,6 +164,8 @@ export function loadWorkerConfig(source: NodeJS.ProcessEnv = process.env): Worke
     health: (env.WORKER_HEALTH_PORT ?? env.PORT) !== undefined
       ? { port: (env.WORKER_HEALTH_PORT ?? env.PORT) as number, host: env.WORKER_HEALTH_HOST }
       : null,
-    sentryDsn: env.SENTRY_DSN ?? null
+    sentryDsn: env.SENTRY_DSN ?? null,
+    // Not read from the environment on purpose (see WorkerConfig.imapSyncEnabled).
+    imapSyncEnabled: false
   };
 }

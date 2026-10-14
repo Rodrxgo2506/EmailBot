@@ -106,6 +106,21 @@ export function createAccountStore(db: SupabaseClient): AccountStore {
       return rows.map((row) => ({ id: row.id, organizationId: row.organization_id }));
     },
 
+    async listActiveImapAccounts(limit) {
+      const rows = check(
+        await db
+          .from("email_accounts")
+          .select("id,organization_id,organizations!inner(status)")
+          .eq("status", "ACTIVE")
+          .eq("organizations.status", "ACTIVE")
+          .eq("provider", "IMAP")
+          .order("last_synced_at", { ascending: true, nullsFirst: true })
+          .limit(limit),
+        "listActiveImapAccounts"
+      ) as Row[];
+      return rows.map((row) => ({ id: row.id, organizationId: row.organization_id }));
+    },
+
     async updateSyncState(id, state) {
       check(
         await db
@@ -215,6 +230,20 @@ export function createSubscriptionMaintenance(db: SupabaseClient): SubscriptionM
 
 export function createEmailStore(db: SupabaseClient): EmailStore {
   return {
+    async findEmailIdByInternetMessageId(emailAccountId, internetMessageId, receivedAt) {
+      const rows = check(
+        await db
+          .from("emails")
+          .select("id")
+          .eq("email_account_id", emailAccountId)
+          .eq("internet_message_id", internetMessageId)
+          .eq("received_at", receivedAt)
+          .limit(1),
+        "findEmailIdByInternetMessageId"
+      ) as Row[];
+      return rows[0]?.id ?? null;
+    },
+
     async findEmail(emailAccountId, providerMessageId) {
       const row = check(
         await db

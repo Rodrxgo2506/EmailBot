@@ -22,8 +22,18 @@ export interface WorkerAccount {
 
 export interface ProviderContext {
   account: WorkerAccount;
-  /** Returns a valid access token, refreshing it when needed. */
+  /** Returns a valid access token, refreshing it when needed (OAuth providers only). */
   getAccessToken(options?: { forceRefresh?: boolean }): Promise<string>;
+  /**
+   * IMAP only: the mailbox login, decrypted in memory for this job (SecretBox v2
+   * bound to the mailbox). Never logged, stored or returned anywhere else.
+   */
+  getImapCredentials?(): Promise<ImapCredentials>;
+}
+
+export interface ImapCredentials {
+  username: string;
+  password: string;
 }
 
 export interface ChangeSet {
@@ -73,6 +83,23 @@ export class ProviderAuthError extends Error {
   ) {
     super(message);
     this.name = "ProviderAuthError";
+  }
+}
+
+/**
+ * The connection cannot be made safely: forbidden destination (SSRF guard),
+ * invalid certificate, TLS failure, STARTTLS not offered, or settings that no
+ * longer pass validation. The account goes to ERROR; not retryable (retrying
+ * cannot fix it and must never fall back to a weaker connection).
+ * The message is generic: no address, host or credential.
+ */
+export class ProviderSecurityError extends Error {
+  constructor(
+    message: string,
+    readonly code: string
+  ) {
+    super(message);
+    this.name = "ProviderSecurityError";
   }
 }
 

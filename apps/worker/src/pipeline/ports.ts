@@ -17,6 +17,8 @@ export interface AccountStore {
   findActiveAccountsByAddress(provider: EmailProvider, emailAddress: string): Promise<WorkerAccount[]>;
   findAccountBySubscription(subscriptionId: string): Promise<WorkerAccount | null>;
   listActiveOAuthAccounts(limit: number): Promise<Array<Pick<WorkerAccount, "id" | "organizationId">>>;
+  /** ACTIVE IMAP mailboxes of ACTIVE organizations (polled only while IMAP synchronization is enabled). */
+  listActiveImapAccounts?(limit: number): Promise<Array<Pick<WorkerAccount, "id" | "organizationId">>>;
   updateSyncState(id: string, state: { syncCursor: string | null; lastSyncedAt: string }): Promise<void>;
   /**
    * Compare-and-set of the history cursor: written only if it still equals
@@ -141,6 +143,12 @@ export interface IncompleteEmail {
 
 export interface EmailStore {
   findEmail(emailAccountId: string, providerMessageId: string): Promise<ExistingEmail | null>;
+  /**
+   * IMAP history-gap recovery only: an email of this account already stored with
+   * this Message-ID AND this received_at (IMAP INTERNALDATE), i.e. the same
+   * message under a new UIDVALIDITY after a mailbox renumbering.
+   */
+  findEmailIdByInternetMessageId?(emailAccountId: string, internetMessageId: string, receivedAt: string): Promise<string | null>;
   updateProcessingState(emailId: string, state: ProcessingStateUpdate): Promise<void>;
   /** Incomplete emails of ACTIVE accounts whose processing started before `startedBefore`. */
   listIncompleteEmails(options: { startedBefore: string; limit: number }): Promise<IncompleteEmail[]>;

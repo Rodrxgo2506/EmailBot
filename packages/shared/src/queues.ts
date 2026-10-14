@@ -138,6 +138,12 @@ export interface EmailProcessingJob {
   emailAccountId: string;
   provider: EmailProvider;
   providerMessageId: string;
+  /**
+   * Set by syncAccount for the messages listed by a history-gap recovery
+   * (IMAP: after a UIDVALIDITY change, when a message already stored may come
+   * back under a new provider id). Absent on every other path.
+   */
+  recovery?: true;
 }
 
 export interface NotificationJob {

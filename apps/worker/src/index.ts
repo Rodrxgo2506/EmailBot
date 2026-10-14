@@ -38,6 +38,9 @@ import { handleAccountFailure, NonRetryableError } from "./pipeline/failures.js"
 import { handleEmailEvent, SyncBusyError, type HandleEventDeps } from "./pipeline/handle-email-event.js";
 import { deliverNotification } from "./pipeline/notify.js";
 import { processEmail, type ProcessEmailDeps } from "./pipeline/process-email.js";
+import { createImapSyncAdapter } from "./providers/imap/adapter.js";
+import type { ImapClient } from "./providers/imap/connection.js";
+import { ImapConnectionPool } from "./providers/imap/pool.js";
 import { createMicrosoftSubscriptionClient } from "./providers/microsoft/subscriptions.js";
 import { createProviderRegistry } from "./providers/registry.js";
 import type { WorkerAccount } from "./providers/types.js";
@@ -91,7 +94,9 @@ const queues = createWorkerQueues(connection);
 const accounts = createAccountStore(supabase);
 const emails = createEmailStore(supabase);
 const realtime = createRealtimePublisher(publisherConnection);
-const providers = createProviderRegistry(providerFetch);
+// IMAP: the pool and the real adapter exist only when IMAP synchronization is enabled (fixed false today).
+const imapPool = config.imapSyncEnabled ? new ImapConnectionPool<ImapClient>() : null;
+const providers = createProviderRegistry(providerFetch, imapPool ? { imap: createImapSyncAdapter({ pool: imapPool }) } : {});
 const secretBox = SecretBox.fromBase64(config.tokenEncryptionKey);
 
 const createContext = (account: WorkerAccount) =>
@@ -110,7 +115,8 @@ const processDeps: Omit<ProcessEmailDeps, "logger"> = {
   providers,
   createContext,
   attachmentsBucket: config.attachmentsBucket,
-  maxAttachmentBytes: config.maxAttachmentBytes
+  maxAttachmentBytes: config.maxAttachmentBytes,
+  imapSyncEnabled: config.imapSyncEnabled
 };
 
 const eventDeps: Omit<HandleEventDeps, "logger"> = {
@@ -126,7 +132,8 @@ const eventDeps: Omit<HandleEventDeps, "logger"> = {
   watchTopic: config.gmailPubSubTopic,
   microsoftPush: config.microsoftPush,
   microsoftSubscriptions: createMicrosoftSubscriptionClient(providerFetch),
-  subscriptions: createSubscriptionMaintenance(supabase)
+  subscriptions: createSubscriptionMaintenance(supabase),
+  imapSyncEnabled: config.imapSyncEnabled
 };
 
 /**
@@ -216,6 +223,8 @@ async function shutdown(signal: string) {
   logger.info({ signal }, "shutting down worker");
   try {
     await Promise.all(workers.map((worker) => worker.close()));
+    // After the workers stopped: no job holds an IMAP connection any more.
+    await imapPool?.closeAll();
     await queues.close();
     connection.disconnect();
     publisherConnection.disconnect();

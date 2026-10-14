@@ -1,5 +1,5 @@
 import { SecretBoxError, serializeError } from "@emailbot/shared";
-import { ProviderAuthError, ProviderNotImplementedError } from "../providers/types.js";
+import { ProviderAuthError, ProviderNotImplementedError, ProviderSecurityError } from "../providers/types.js";
 import type { AccountStore, Logger, RealtimePublisher } from "./ports.js";
 
 /** Error that must not be retried by the queue. */
@@ -36,6 +36,22 @@ export async function handleAccountFailure(
       })
       .catch(() => undefined);
     deps.logger.warn({ emailAccountId: account.id, code: error.code }, "account credentials invalid");
+    throw new NonRetryableError(error.message);
+  }
+
+  if (account && error instanceof ProviderSecurityError) {
+    // IMAP: forbidden destination, certificate / TLS failure, no STARTTLS or invalid stored
+    // settings. Retrying cannot help and must never fall back to a weaker connection.
+    await deps.accounts.markError(account.id, { code: error.code, message: error.message, status: "ERROR" });
+    await deps.realtime
+      .publish({
+        type: "email-account.status",
+        organizationId: account.organizationId,
+        emailAccountId: account.id,
+        status: "ERROR"
+      })
+      .catch(() => undefined);
+    deps.logger.warn({ emailAccountId: account.id, code: error.code }, "mailbox connection refused for security reasons");
     throw new NonRetryableError(error.message);
   }
 
