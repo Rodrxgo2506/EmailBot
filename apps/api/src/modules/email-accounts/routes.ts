@@ -2,6 +2,9 @@ import {
   buildAuthorizationUrl,
   createOAuthState,
   exchangeAuthorizationCode,
+  ImapDestinationError,
+  imapCredentialContext,
+  resolveImapDestination,
   serializeError,
   verifyOAuthState,
   type OAuthProvider,
@@ -18,13 +21,22 @@ import type { FastifyInstance, FastifyReply } from "fastify";
 import { z } from "zod";
 import type { ApiConfig, OAuthProviderConfig } from "../../config/env.js";
 import type { AppDeps } from "../../deps.js";
-import { conflict, notFound, serviceUnavailable } from "../../lib/errors.js";
+import { conflict, notFound, serviceUnavailable, unprocessable } from "../../lib/errors.js";
 import { RATE_LIMITS } from "../../lib/rate-limits.js";
 import { parseWith } from "../../lib/validation.js";
 import { getAuth } from "../../plugins/auth.js";
 import { getOrganization, requirePermission } from "../../plugins/organization.js";
 import { removeStoredObjects } from "../emails/routes.js";
-import { assertWithinLimit, canUseFeature, hasCommercialAccess, isWithinLimit, requestEntitlements } from "../plans/entitlements.js";
+import {
+  assertWithinLimit,
+  canUseFeature,
+  hasCommercialAccess,
+  isWithinLimit,
+  planFeatureUnavailable,
+  planLimitReached,
+  requestEntitlements,
+  subscriptionRequired
+} from "../plans/entitlements.js";
 import { fetchMailboxIdentity } from "./mailbox-identity.js";
 import { removeMicrosoftSubscription } from "./microsoft-subscription.js";
 
@@ -237,33 +249,65 @@ export function emailAccountRoutes(deps: AppDeps) {
      * IMAP / custom domains. Synchronization is NOT implemented (the worker
      * adapter is a scaffold), so new IMAP accounts are refused with 503
      * IMAP_NOT_AVAILABLE before the body (and its password) is even parsed.
-     * When enabled, credentials are validated and stored encrypted and the
-     * account is created PAUSED with an explicit error code.
+     * When enabled (IMAP E1 groundwork, still off):
+     *   - only 993/TLS or 143/STARTTLS and a public DNS name (imapAccountCreateSchema);
+     *   - plan feature IMAP (PRO, BUSINESS);
+     *   - SSRF: every address of the host must be public (resolveImapDestination;
+     *     the worker resolves and pins again before each connection);
+     *   - the password is encrypted bound to the mailbox (SecretBox v2) and the
+     *     database decides plan, limit and reconnection atomically
+     *     (connect_imap_email_account); the account stays PAUSED, nothing is queued.
+     * No connection to the IMAP server is made yet (E3: "test connection").
      */
     app.post("/email-accounts/imap", imapGuards, async (request, reply) => {
       if (!providerAvailability(deps.config).IMAP) {
         throw serviceUnavailable("IMAP accounts are not available yet", "IMAP_NOT_AVAILABLE");
       }
+      const organizationId = getOrganization(request).id;
       const input = parseWith(imapAccountCreateSchema, request.body);
-      await requestEntitlements(request).assertWithinLimit("EMAIL_ACCOUNTS");
-      const account = await deps.privileged.createImapEmailAccount({
-        organizationId: getOrganization(request).id,
+      // Early, friendly refusal; the database checks the plan again in the same transaction as the write.
+      const entitlements = await requestEntitlements(request).assertFeatureEnabled("IMAP");
+      const plan = entitlements.effectivePlan;
+
+      try {
+        await resolveImapDestination({ host: input.host, port: input.port, security: input.security }, deps.imapResolver ? { resolver: deps.imapResolver } : {});
+      } catch (error) {
+        if (error instanceof ImapDestinationError) throw unprocessable(error.message, error.code);
+        throw error;
+      }
+
+      const connection = await deps.privileged.connectImapEmailAccount({
+        organizationId,
         emailAddress: input.emailAddress,
         displayName: input.displayName ?? null,
-        passwordEncrypted: deps.secretBox.encrypt(input.password),
+        username: input.username,
         host: input.host,
         port: input.port,
-        secure: input.secure,
-        username: input.username
+        security: input.security,
+        passwordEncrypted: deps.secretBox.encryptBound(input.password, imapCredentialContext(organizationId, input.emailAddress)),
+        syncCursor: null
       });
+      // The plan may have changed since the early check: the database's answer wins.
+      if (connection.outcome === "FEATURE_NOT_AVAILABLE") {
+        throw plan ? planFeatureUnavailable({ feature: "IMAP", plan }) : subscriptionRequired(entitlements.subscriptionStatus);
+      }
+      if (connection.outcome === "PLAN_LIMIT_REACHED") {
+        throw plan
+          ? planLimitReached({ limit: "EMAIL_ACCOUNTS", max: connection.limit, used: connection.used, plan })
+          : subscriptionRequired(entitlements.subscriptionStatus);
+      }
+      if (connection.outcome === "DUPLICATE_ACCOUNT") {
+        throw conflict("This mailbox is already connected with another provider", "EMAIL_ACCOUNT_ALREADY_CONNECTED");
+      }
+      const { account, created } = connection;
 
       await app.audit(request, {
         action: "CONNECT",
         entityType: "email_account",
         entityId: account.id,
-        metadata: { provider: "IMAP", emailAddress: account.emailAddress, host: input.host }
+        metadata: { provider: "IMAP", emailAddress: account.emailAddress, host: input.host, reconnected: !created }
       });
-      return reply.status(201).send({ account });
+      return reply.status(created ? 201 : 200).send({ account });
     });
 
     /** Pause / resume and rename. */

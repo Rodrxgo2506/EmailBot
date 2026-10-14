@@ -1,5 +1,5 @@
 import { randomBytes, randomUUID } from "node:crypto";
-import { SecretBox } from "@emailbot/shared";
+import { SecretBox, type ImapResolver } from "@emailbot/shared";
 import { CURRENT_LEGAL_VERSIONS, LEGAL_DOCUMENTS, type OrganizationRole, type OrganizationStatus } from "@emailbot/types";
 import { vi } from "vitest";
 import { buildApp } from "../app.js";
@@ -100,7 +100,7 @@ export function createFakePrivileged(): { [K in keyof PrivilegedOperations]: Ret
     findProfileIdByEmail: unexpected("privileged.findProfileIdByEmail"),
     getMemberRole: unexpected("privileged.getMemberRole"),
     connectOAuthEmailAccount: unexpected("privileged.connectOAuthEmailAccount"),
-    createImapEmailAccount: unexpected("privileged.createImapEmailAccount"),
+    connectImapEmailAccount: unexpected("privileged.connectImapEmailAccount"),
     disconnectEmailAccount: unexpected("privileged.disconnectEmailAccount"),
     insertAuditLog: vi.fn(async () => undefined),
     createSignedDownloadUrl: unexpected("privileged.createSignedDownloadUrl"),
@@ -189,6 +189,8 @@ export async function createTestApp(
     platformAdmins?: string[];
     /** Transactional e-mail provider (none by default: complaint e-mails stay pending). */
     mailer?: TransactionalMailer;
+    /** DNS resolver of the IMAP destination check (tests never query DNS). */
+    imapResolver?: ImapResolver;
   } = {}
 ) {
   const users = options.users ?? [];
@@ -247,7 +249,8 @@ export async function createTestApp(
     readinessChecks: [],
     oauthNonces: createMemoryNonceStore(),
     ...(options.rateLimitRedis ? { rateLimitRedis: options.rateLimitRedis } : {}),
-    ...(options.mailer ? { mailer: options.mailer } : {})
+    ...(options.mailer ? { mailer: options.mailer } : {}),
+    ...(options.imapResolver ? { imapResolver: options.imapResolver } : {})
   };
 
   const app = await buildApp(deps, { logger: false });

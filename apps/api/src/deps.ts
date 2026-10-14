@@ -1,4 +1,4 @@
-import type { EmailEventJob, SecretBox, SyncReason } from "@emailbot/shared";
+import type { EmailEventJob, ImapResolver, SecretBox, SyncReason } from "@emailbot/shared";
 import type { RealtimeEvent } from "@emailbot/types";
 import type { ApiConfig } from "./config/env.js";
 import type { RateLimitRedis } from "./infrastructure/rate-limit-store.js";
@@ -96,4 +96,6 @@ export interface AppDeps {
   mailer?: TransactionalMailer;
   /** Publishes realtime events to every API instance through Redis (portal signals of manual deliveries). */
   realtimePublisher?: { publish(event: RealtimeEvent): Promise<void> };
+  /** DNS resolver of the IMAP destination check (default: the system resolver; fakes in tests, no network). */
+  imapResolver?: ImapResolver;
 }

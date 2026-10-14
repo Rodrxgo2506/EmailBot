@@ -4,7 +4,8 @@ import type {
   ComplaintEmailStatus,
   ComplaintGoodType,
   ComplaintKind,
-  ComplaintStatus
+  ComplaintStatus,
+  ImapSecurity
 } from "@emailbot/types";
 import type {
   AdminActivityItem,
@@ -455,16 +456,25 @@ export type ComplaintResponseConfirmation =
   | { outcome: "NOT_UNCERTAIN" }
   | { outcome: "CONFIRMED"; status: ComplaintStatus; respondedAt: string | null };
 
-export interface ImapAccountInsert {
+/** Input of public.connect_imap_email_account (IMAP E1). The password is already encrypted (SecretBox v2, bound to the mailbox). */
+export interface ImapAccountConnect {
   organizationId: string;
   emailAddress: string;
   displayName: string | null;
-  passwordEncrypted: string;
+  username: string;
   host: string;
   port: number;
-  secure: boolean;
-  username: string;
+  security: ImapSecurity;
+  passwordEncrypted: string;
+  /** Server position at connection time; null = start from the newest message (no history is imported). */
+  syncCursor: string | null;
 }
+
+export type ImapAccountConnection =
+  | { outcome: "CREATED" | "RECONNECTED"; account: EmailAccount; created: boolean; previousStatus: EmailAccountStatus | null }
+  | { outcome: "PLAN_LIMIT_REACHED"; used: number; limit: number }
+  | { outcome: "FEATURE_NOT_AVAILABLE" }
+  | { outcome: "DUPLICATE_ACCOUNT" };
 
 /** Outcome categories of portal.create_session (never shown to the client). */
 /** SUBSCRIPTION_INACTIVE (Commercial V1.2): the organization has no commercial access (or its plan has no portal). */
@@ -526,7 +536,11 @@ export interface PrivilegedOperations {
    * reused (same organization, provider and address, case-insensitive) in one locked transaction.
    */
   connectOAuthEmailAccount(input: OAuthAccountUpsert): Promise<OAuthAccountConnection>;
-  createImapEmailAccount(input: ImapAccountInsert): Promise<EmailAccount>;
+  /**
+   * IMAP E1: the only write of an IMAP mailbox (public.connect_imap_email_account): plan feature IMAP,
+   * EMAIL_ACCOUNTS limit and insert / reconnection in one locked transaction; the mailbox stays PAUSED.
+   */
+  connectImapEmailAccount(input: ImapAccountConnect): Promise<ImapAccountConnection>;
   disconnectEmailAccount(organizationId: string, id: string): Promise<EmailAccount | null>;
   insertAuditLog(entry: AuditEntry): Promise<void>;
   createSignedDownloadUrl(bucket: string, path: string, expiresInSeconds: number, filename: string): Promise<string>;

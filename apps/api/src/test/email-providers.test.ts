@@ -23,9 +23,9 @@ const microsoft: OAuthProviderConfig = {
 
 const imapBody = {
   emailAddress: "buzon@empresa.test",
-  host: "imap.empresa.test",
+  host: "imap.empresa-correo.com",
   port: 993,
-  secure: true,
+  security: "TLS",
   username: "buzon@empresa.test",
   password: "contraseña-del-buzon"
 };
@@ -104,7 +104,7 @@ describe("B-2: new IMAP accounts are refused while IMAP synchronization does not
     const response = await ctx!.app.inject({ method: "POST", url: "/api/email-accounts/imap", headers: authHeaders(owner, ORG_A), payload: imapBody });
     expect(response.statusCode).toBe(503);
     expect(response.json().error.code).toBe("IMAP_NOT_AVAILABLE");
-    expect(privileged.createImapEmailAccount).not.toHaveBeenCalled();
+    expect(privileged.connectImapEmailAccount).not.toHaveBeenCalled();
     expect(privileged.insertAuditLog).not.toHaveBeenCalled();
     expect(response.body).not.toContain(imapBody.password);
   });
@@ -114,7 +114,7 @@ describe("B-2: new IMAP accounts are refused while IMAP synchronization does not
     const response = await ctx!.app.inject({ method: "POST", url: "/api/email-accounts/imap", headers: authHeaders(owner, ORG_A), payload: { password: "x" } });
     expect(response.statusCode).toBe(503);
     expect(response.json().error.code).toBe("IMAP_NOT_AVAILABLE");
-    expect(privileged.createImapEmailAccount).not.toHaveBeenCalled();
+    expect(privileged.connectImapEmailAccount).not.toHaveBeenCalled();
   });
 
   it("authentication and role still come first (401 / 403 before the 503)", async () => {
@@ -124,14 +124,12 @@ describe("B-2: new IMAP accounts are refused while IMAP synchronization does not
     expect(forbidden.statusCode).toBe(403);
   });
 
-  it("when IMAP is enabled in code (future), the existing creation path still encrypts the password and creates the account PAUSED", async () => {
-    const { privileged } = await setup({ imapAccountsEnabled: true });
-    privileged.createImapEmailAccount.mockResolvedValue(account({ emailAddress: imapBody.emailAddress }));
+  it("the default configuration keeps IMAP off: GET /providers says IMAP false and the route is 503 even on PRO / BUSINESS", async () => {
+    const { privileged } = await setup({ google });
+    expect((await providers()).json().providers.IMAP).toBe(false);
     const response = await ctx!.app.inject({ method: "POST", url: "/api/email-accounts/imap", headers: authHeaders(owner, ORG_A), payload: imapBody });
-    expect(response.statusCode).toBe(201);
-    const stored = privileged.createImapEmailAccount.mock.calls[0]?.[0] as { passwordEncrypted: string };
-    expect(stored.passwordEncrypted).not.toContain(imapBody.password);
-    expect(ctx!.deps.secretBox.decrypt(stored.passwordEncrypted)).toBe(imapBody.password);
+    expect(response.statusCode).toBe(503);
+    expect(privileged.connectImapEmailAccount).not.toHaveBeenCalled();
   });
 
   it("historical IMAP accounts keep working: listed, cannot be resumed, can be disconnected and deleted", async () => {

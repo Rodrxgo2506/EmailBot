@@ -268,8 +268,13 @@ Gmail, no las pruebas internas.
 - **I5. CSRF.** No aplica a la API (Bearer, sin cookies). El callback OAuth está protegido por un `state`
   firmado, con expiración y de un solo uso.
 - **I6. SSRF.** El código no hace fetch a URLs elegidas por usuarios: Gmail, Graph y OAuth usan hosts fijos y
-  `deltaLink` se restringe a `graph.microsoft.com`. La futura integración IMAP deberá bloquear IPs privadas al
-  conectar al host indicado por el usuario.
+  `deltaLink` se restringe a `graph.microsoft.com`. IMAP (host elegido por el usuario) tiene desde la fase E1
+  (20261014120000) la protección `resolveImapDestination` / `imapConnectionOptions` de `@emailbot/shared`: solo
+  nombres DNS públicos, todas las direcciones A/AAAA globales (`net.BlockList`, registros IANA), puertos 993/TLS y
+  143/STARTTLS obligatorio, conexión a una IP literal ya validada con el nombre original solo como `servername` (SNI
+  y certificado; Node no resuelve una IP literal, así que no hay segunda consulta DNS ni DNS rebinding; `lookup`
+  fijado como defensa adicional), certificado siempre validado y sin proxy. IMAP sigue desactivado; el worker deberá usarla en cada conexión (E2). Además, los miembros ya no
+  pueden escribir por Data API las columnas de conexión de `email_accounts` (solo `status` y `display_name`).
 - **I7. JWT / sesión.**
   - La API valida cada token con `auth.getUser`, que respeta revocación y logout.
   - `X-Organization-Id` se verifica contra la membresía en la base de datos en **cada** petición (tests:

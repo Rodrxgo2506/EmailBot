@@ -68,7 +68,7 @@ const basicOverview = (overrides: Partial<OrganizationPlanOverview["usage"]> = {
     access: plan === "FREE" ? "LEGACY" : "SUBSCRIPTION",
     subscriptionStatus: plan === "FREE" ? null : "ACTIVE",
     limits: { EMAIL_ACCOUNTS: 25, RULES: 10, BOTS: 2, MONTHLY_EMAILS: 2000, MEMBERS: 2, CUSTOMERS: 500, STORAGE_BYTES: GB, RETENTION_DAYS: 30 },
-    features: { GMAIL: true, MICROSOFT: false, ADVANCED_STATS: false, PORTAL: false, API: false, PRIORITY_SUPPORT: false }
+    features: { GMAIL: true, MICROSOFT: false, IMAP: false, ADVANCED_STATS: false, PORTAL: false, API: false, PRIORITY_SUPPORT: false }
   },
   usage: { EMAIL_ACCOUNTS: 1, RULES: 3, BOTS: 0, MONTHLY_EMAILS: 120, MEMBERS: 1, CUSTOMERS: 0, STORAGE_BYTES: 5 * 1024 ** 2, ...overrides }
 });

@@ -1,4 +1,4 @@
-import { AUDIT_ACTIONS, EMAIL_PROCESSING_STATUSES } from "@emailbot/types";
+import { AUDIT_ACTIONS, EMAIL_PROCESSING_STATUSES, IMAP_SECURITY_MODES, imapHostProblem, imapTransportProblem, normalizeImapHost } from "@emailbot/types";
 import { z } from "zod";
 import { booleanQuerySchema, idSchema, paginationQuerySchema, slugSchema } from "./common.js";
 
@@ -22,22 +22,50 @@ export const emailAccountUpdateSchema = z
   .partial()
   .refine((value) => Object.keys(value).length > 0, "At least one field must be provided");
 
-const hostnameSchema = z
+/**
+ * IMAP server: normalized (trim, lower-case, no trailing dot) and checked with
+ * the same rules as the network guard (@emailbot/types imapHostProblem): a
+ * public FQDN, no IP literal, no internal name. The resolved addresses are
+ * verified separately (resolveImapDestination) before any connection.
+ */
+const imapHostSchema = z
   .string()
-  .trim()
-  .min(1)
-  .max(253)
-  .regex(/^[A-Za-z0-9.-]+$/, "Invalid host name");
+  .max(300)
+  .transform(normalizeImapHost)
+  .superRefine((host, context) => {
+    const problem = imapHostProblem(host);
+    if (problem) context.addIssue({ code: "custom", message: `Invalid IMAP server (${problem})` });
+  });
 
-export const imapAccountCreateSchema = z.object({
-  emailAddress: z.email().max(320),
-  displayName: z.string().trim().max(200).optional(),
-  host: hostnameSchema,
-  port: z.number().int().min(1).max(65_535).default(993),
-  secure: z.boolean().default(true),
-  username: z.string().trim().min(1).max(320),
-  password: z.string().min(1).max(1000)
-});
+/** Only 993 + TLS or 143 + STARTTLS (mandatory). No plaintext, no other port. */
+export const imapEndpointSchema = z
+  .object({
+    host: imapHostSchema,
+    port: z.number().int(),
+    security: z.enum(IMAP_SECURITY_MODES)
+  })
+  .superRefine((endpoint, context) => {
+    const problem = imapTransportProblem(endpoint.port, endpoint.security);
+    if (problem) context.addIssue({ code: "custom", path: ["port"], message: "Use port 993 with TLS or port 143 with STARTTLS" });
+  });
+
+export const imapAccountCreateSchema = z
+  .object({
+    emailAddress: z.email().max(320),
+    displayName: z.string().trim().max(200).optional(),
+    host: imapHostSchema,
+    port: z.number().int(),
+    security: z.enum(IMAP_SECURITY_MODES),
+    username: z.string().trim().min(1).max(320),
+    password: z.string().min(1).max(1000)
+  })
+  .strict()
+  .superRefine((input, context) => {
+    const problem = imapTransportProblem(input.port, input.security);
+    if (problem) context.addIssue({ code: "custom", path: ["port"], message: "Use port 993 with TLS or port 143 with STARTTLS" });
+  });
+
+export type ImapAccountCreateInput = z.infer<typeof imapAccountCreateSchema>;
 
 /* ---------------------------------------------------------------- *
  * Categories

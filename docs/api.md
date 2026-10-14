@@ -73,7 +73,7 @@ bloquea por el plan.
 | GET | `/api/email-accounts/providers` | `email-accounts:read` → `{ providers: { GMAIL, MICROSOFT, IMAP } }` (booleanos: proveedor configurado en el servidor) |
 | POST | `/api/email-accounts/oauth/:provider/start` (`gmail`/`microsoft`) | `email-accounts:manage` → `{ authorizationUrl }` |
 | GET | `/api/oauth/:provider/callback` | público (state firmado) → redirige a `WEB_APP_URL/accounts?oauth=…` |
-| POST | `/api/email-accounts/imap` | `email-accounts:manage` — **deshabilitado**: 503 `IMAP_NOT_AVAILABLE` (no se guardan credenciales) |
+| POST | `/api/email-accounts/imap` | `email-accounts:manage` — **deshabilitado**: 503 `IMAP_NOT_AVAILABLE` (no se guardan credenciales). Preparado para cuando se active (IMAP E1): cuerpo estricto `{ emailAddress, displayName?, host, port, security: TLS (993) / STARTTLS (143), username, password }`; 400 si el puerto/modo no coinciden o el host no es un nombre DNS público; 403 `PLAN_FEATURE_UNAVAILABLE` (solo PRO y BUSINESS) / `PLAN_LIMIT_REACHED`; 422 `IMAP_HOST_FORBIDDEN` / `IMAP_ADDRESS_FORBIDDEN` / `IMAP_DNS_*` (SSRF); 409 `EMAIL_ACCOUNT_ALREADY_CONNECTED`; 201 creada / 200 reconectada, siempre en pausa |
 | PATCH | `/api/email-accounts/:id` (`status: ACTIVE/PAUSED`, `displayName`) | `email-accounts:manage` |
 | POST | `/api/email-accounts/:id/disconnect` | `email-accounts:manage` |
 | POST | `/api/email-accounts/:id/sync` | `email-accounts:sync` |

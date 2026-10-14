@@ -33,6 +33,37 @@ const V1_TABLES = [
 /** "schema.function" entries whose V1 definition a V2 migration changes on purpose. */
 const INTENTIONAL_V1_CHANGES: readonly string[] = [];
 
+/**
+ * V1 grants removed on purpose (each one listed, so any other removal still fails).
+ * IMAP E1 (20261014120000_imap_e1_security.sql): members (Data API) may no longer
+ * create mailboxes nor change the columns that drive a connection (provider,
+ * address, provider_metadata such as an IMAP host, cursor, errors); they keep
+ * UPDATE (status, display_name), which is all the API writes with their JWT.
+ */
+const INTENTIONAL_V1_GRANT_REMOVALS: readonly string[] = [
+  "email_accounts | organization_id | authenticated | INSERT",
+  "email_accounts | provider | authenticated | INSERT",
+  "email_accounts | status | authenticated | INSERT",
+  "email_accounts | email_address | authenticated | INSERT",
+  "email_accounts | display_name | authenticated | INSERT",
+  "email_accounts | provider_account_id | authenticated | INSERT",
+  "email_accounts | token_expires_at | authenticated | INSERT",
+  "email_accounts | provider_metadata | authenticated | INSERT",
+  "email_accounts | sync_cursor | authenticated | INSERT",
+  "email_accounts | last_synced_at | authenticated | INSERT",
+  "email_accounts | last_error_code | authenticated | INSERT",
+  "email_accounts | last_error_message | authenticated | INSERT",
+  "email_accounts | provider | authenticated | UPDATE",
+  "email_accounts | email_address | authenticated | UPDATE",
+  "email_accounts | provider_account_id | authenticated | UPDATE",
+  "email_accounts | token_expires_at | authenticated | UPDATE",
+  "email_accounts | provider_metadata | authenticated | UPDATE",
+  "email_accounts | sync_cursor | authenticated | UPDATE",
+  "email_accounts | last_synced_at | authenticated | UPDATE",
+  "email_accounts | last_error_code | authenticated | UPDATE",
+  "email_accounts | last_error_message | authenticated | UPDATE",
+];
+
 /** SECURITY DEFINER functions the browser (authenticated) may call through PostgREST. */
 const AUTHENTICATED_DEFINER_ALLOWLIST = [
   "private.can_view_profile",
@@ -166,9 +197,9 @@ describe("V2 migrations keep V1 protections unchanged", () => {
     }
   });
 
-  it("no V1 table or column grant was removed (V2 may only add)", () => {
+  it("no V1 table or column grant was removed (V2 may only add), except the reviewed INTENTIONAL_V1_GRANT_REMOVALS", () => {
     expect(before.tableGrants.filter((grant) => !after.tableGrants.includes(grant))).toEqual([]);
-    expect(before.columnGrants.filter((grant) => !after.columnGrants.includes(grant))).toEqual([]);
+    expect(before.columnGrants.filter((grant) => !after.columnGrants.includes(grant)).sort()).toEqual([...INTENTIONAL_V1_GRANT_REMOVALS].sort());
   });
 
   it("no new table-wide grant on a V1 table (new access must be column-scoped and reviewed)", () => {

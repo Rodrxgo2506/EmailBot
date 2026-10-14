@@ -148,6 +148,7 @@ export const PLAN_LIMIT_LABELS: Record<PlanLimitKey, string> = {
 export const PLAN_FEATURE_LABELS: Record<PlanFeatureKey, string> = {
   GMAIL: "Gmail",
   MICROSOFT: "Microsoft (Outlook / 365)",
+  IMAP: "Correo externo (IMAP)",
   ADVANCED_STATS: "Estadísticas avanzadas",
   PORTAL: "Portal de clientes",
   API: "API",

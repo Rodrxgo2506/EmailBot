@@ -52,9 +52,9 @@ export const V1_LIMITS: Record<CommercialPlan, Record<PlanLimitKey, number>> = {
 };
 
 export const V1_FEATURES: Record<CommercialPlan, Record<PlanFeatureKey, boolean>> = {
-  BASIC: { GMAIL: true, MICROSOFT: false, ADVANCED_STATS: false, PORTAL: false, API: false, PRIORITY_SUPPORT: false },
-  PRO: { GMAIL: true, MICROSOFT: true, ADVANCED_STATS: true, PORTAL: true, API: false, PRIORITY_SUPPORT: true },
-  BUSINESS: { GMAIL: true, MICROSOFT: true, ADVANCED_STATS: true, PORTAL: true, API: true, PRIORITY_SUPPORT: true }
+  BASIC: { GMAIL: true, MICROSOFT: false, IMAP: false, ADVANCED_STATS: false, PORTAL: false, API: false, PRIORITY_SUPPORT: false },
+  PRO: { GMAIL: true, MICROSOFT: true, IMAP: true, ADVANCED_STATS: true, PORTAL: true, API: false, PRIORITY_SUPPORT: true },
+  BUSINESS: { GMAIL: true, MICROSOFT: true, IMAP: true, ADVANCED_STATS: true, PORTAL: true, API: true, PRIORITY_SUPPORT: true }
 };
 
 /**

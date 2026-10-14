@@ -37,8 +37,8 @@ export const PLAN_LIMIT_KEYS = [
 ] as const;
 export type PlanLimitKey = (typeof PLAN_LIMIT_KEYS)[number];
 
-/** Boolean features (plan_entitlements kind FEATURE). */
-export const PLAN_FEATURE_KEYS = ["GMAIL", "MICROSOFT", "ADVANCED_STATS", "PORTAL", "API", "PRIORITY_SUPPORT"] as const;
+/** Boolean features (plan_entitlements kind FEATURE). IMAP: external IMAP mailboxes (PRO and BUSINESS). */
+export const PLAN_FEATURE_KEYS = ["GMAIL", "MICROSOFT", "IMAP", "ADVANCED_STATS", "PORTAL", "API", "PRIORITY_SUPPORT"] as const;
 export type PlanFeatureKey = (typeof PLAN_FEATURE_KEYS)[number];
 
 /** Limits with a measured usage (public.organization_usage). RETENTION_DAYS is a duration, not a count. */

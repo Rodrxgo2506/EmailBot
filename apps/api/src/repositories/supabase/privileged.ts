@@ -164,28 +164,48 @@ export function privilegedOperations(service: SupabaseClient): PrivilegedOperati
       };
     },
 
-    async createImapEmailAccount(input) {
+    async connectImapEmailAccount(input) {
+      // One transaction under the organization lock: plan feature IMAP + EMAIL_ACCOUNTS limit + insert / reconnection.
+      // See 20261014120000_imap_e1_security.sql. The mailbox is stored PAUSED (IMAP synchronization does not exist yet).
+      const rows = unwrap(
+        await service.rpc("connect_imap_email_account", {
+          p_organization_id: input.organizationId,
+          p_email_address: input.emailAddress,
+          p_display_name: input.displayName,
+          p_username: input.username,
+          p_host: input.host,
+          p_port: input.port,
+          p_security: input.security,
+          p_password_encrypted: input.passwordEncrypted,
+          p_sync_cursor: input.syncCursor
+        })
+      ) as Row[] | null;
+      const result = rows?.[0];
+      if (!result) throw new AppError(500, "EMAIL_ACCOUNT_CONNECT_FAILED", "The mailbox connection returned no result");
+
+      const outcome = result.outcome as string;
+      if (outcome === "PLAN_LIMIT_REACHED") {
+        return { outcome, used: Number(result.used ?? 0), limit: Number(result.limit_value ?? 0) };
+      }
+      if (outcome === "FEATURE_NOT_AVAILABLE" || outcome === "DUPLICATE_ACCOUNT") return { outcome };
+      if (outcome !== "CREATED" && outcome !== "RECONNECTED") {
+        throw new AppError(500, "EMAIL_ACCOUNT_CONNECT_FAILED", "The mailbox connection returned an unknown outcome");
+      }
+
       const row = unwrap(
         await service
           .from("email_accounts")
-          .insert({
-            organization_id: input.organizationId,
-            provider: "IMAP",
-            email_address: input.emailAddress.trim().toLowerCase(),
-            display_name: input.displayName,
-            // Credentials column documented by migration 2 as "OAuth / IMAP credentials".
-            access_token_encrypted: input.passwordEncrypted,
-            // Non-secret connection settings only.
-            provider_metadata: { imap: { host: input.host, port: input.port, secure: input.secure, username: input.username } },
-            // IMAP synchronization is not implemented yet (see apps/worker/src/providers/imap).
-            status: "PAUSED",
-            last_error_code: "IMAP_SYNC_NOT_IMPLEMENTED",
-            last_error_message: "IMAP synchronization is not available yet. Credentials were stored encrypted."
-          })
           .select(EMAIL_ACCOUNT_COLUMNS)
+          .eq("id", result.email_account_id)
+          .eq("organization_id", input.organizationId)
           .single()
       ) as Row;
-      return toEmailAccount(row);
+      return {
+        outcome,
+        account: toEmailAccount(row),
+        created: outcome === "CREATED",
+        previousStatus: (result.previous_status as EmailAccountStatus | null) ?? null
+      };
     },
 
     async disconnectEmailAccount(organizationId, id) {
