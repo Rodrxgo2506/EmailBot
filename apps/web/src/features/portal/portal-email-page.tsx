@@ -15,6 +15,9 @@ import { usePortalEmail } from "./portal-queries";
  * Email detail by DELIVERY id (never an email id). What is shown is exactly
  * what the API returns for the bot's portal settings: no body / attachments /
  * fields when they are null or absent, and nothing is fetched from elsewhere.
+ * body = null means the bot does not share the content (showBody off): a
+ * neutral note says so; a shared body with no text nor HTML says it is not
+ * available (EmailBody), never an empty box.
  * The body HTML is untrusted: it is rendered by EmailBody in a sandboxed
  * iframe (no scripts, no same-origin, remote images blocked by default).
  */
@@ -147,7 +150,13 @@ export function PortalEmailPage() {
             </dl>
           ) : null}
 
-          {email.data.body ? <EmailBody html={email.data.body.html} text={email.data.body.text} /> : null}
+          {email.data.body ? (
+            <EmailBody html={email.data.body.html} text={email.data.body.text} />
+          ) : (
+            <p role="status" className="rounded-md border bg-muted/30 p-4 text-sm text-muted-foreground">
+              El contenido completo de este correo no se muestra en el portal.
+            </p>
+          )}
 
           {email.data.attachments ? <Attachments deliveryId={deliveryId} attachments={email.data.attachments} /> : null}
         </article>

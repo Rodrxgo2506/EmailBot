@@ -264,6 +264,32 @@ describe("portal email detail and portal settings", () => {
     expect((await inbox(a.token, { bot: "yape" }))[0]).toMatchObject({ fields: [], has_attachments: false });
   });
 
+  it("enabling showBody (bot page) reveals the stored body of emails already delivered: HTML + text, text only, none", async () => {
+    const yapeDelivery = deliveriesA[3] as string;
+    const yapeEmail = emailsA[3] as string;
+    const html = '<table><tr><td style="font-size:24px">Código <b>731904</b></td></tr></table>';
+    await t.asAdmin(async (tx) => {
+      await tx.query(`update public.bots set portal_settings = portal_settings || '{"showBody": true}' where id = $1`, [botNoBody]);
+      await tx.query("update public.emails set text_body = 'Código 731904', html_body = $2 where id = $1", [yapeEmail, html]);
+    });
+    try {
+      expect((await detail(a.token, yapeDelivery))?.body).toEqual({ text: "Código 731904", html });
+      await t.asAdmin((tx) => tx.query("update public.emails set html_body = null where id = $1", [yapeEmail]));
+      expect((await detail(a.token, yapeDelivery))?.body).toEqual({ text: "Código 731904", html: null });
+      await t.asAdmin((tx) => tx.query("update public.emails set text_body = null where id = $1", [yapeEmail]));
+      expect((await detail(a.token, yapeDelivery))?.body).toEqual({ text: null, html: null });
+      // Still only for the assigned customer.
+      expect(await detail(tokenA2, yapeDelivery)).toBeNull();
+      expect(await detail(b.token, yapeDelivery)).toBeNull();
+    } finally {
+      await t.asAdmin(async (tx) => {
+        await tx.query(`update public.bots set portal_settings = portal_settings || '{"showBody": false}' where id = $1`, [botNoBody]);
+        await tx.query("update public.emails set text_body = 'Tu código es 4821', html_body = '<p>Tu código es <b>4821</b></p>' where id = $1", [yapeEmail]);
+      });
+    }
+    expect((await detail(a.token, yapeDelivery))?.body).toBeNull();
+  });
+
   it("attachments: only non-inline ones are listed; only stored ones are downloadable", async () => {
     const email = await detail(a.token, deliveriesA[0] as string);
     expect((email?.attachments as Array<{ filename: string; available: boolean }>).map((item) => [item.filename, item.available])).toEqual([

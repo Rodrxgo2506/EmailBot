@@ -151,6 +151,35 @@ describe("bots API: create, update, delete", () => {
     expect(repos.bots.update).toHaveBeenCalledTimes(1);
   });
 
+  it("ADMIN enables the email content in the portal (portalSettings), keeping the configured fields; VIEWER cannot", async () => {
+    const admin = makeUser({ [ORG_A]: "ADMIN" });
+    const viewer = makeUser({ [ORG_A]: "VIEWER" });
+    const { app, repos, privileged } = await createTestApp({ users: [admin, viewer] });
+    const fields = [{ key: "verification_code", label: "Código" }];
+    const portalSettings = { showBody: true, showAttachments: false, fields };
+    repos.bots.get.mockResolvedValue(storedBot({ portalSettings: { showBody: false, showAttachments: false, fields } }));
+    repos.bots.update.mockResolvedValue(storedBot({ portalSettings }));
+
+    const response = await app.inject({ method: "PATCH", url: `/api/bots/${BOT_ID}`, headers: authHeaders(admin, ORG_A), payload: { portalSettings } });
+    expect(response.statusCode).toBe(200);
+    expect(response.json().bot.portalSettings).toEqual(portalSettings);
+    expect(repos.bots.update).toHaveBeenCalledWith(ORG_A, BOT_ID, admin.id, { portalSettings });
+    expect(privileged.insertAuditLog).toHaveBeenCalledWith(
+      expect.objectContaining({ entityType: "bot", metadata: { event: "bot.updated", fields: ["portalSettings"] } })
+    );
+
+    const denied = await app.inject({ method: "PATCH", url: `/api/bots/${BOT_ID}`, headers: authHeaders(viewer, ORG_A), payload: { portalSettings } });
+    expect(denied.statusCode).toBe(403);
+    const invalid = await app.inject({
+      method: "PATCH",
+      url: `/api/bots/${BOT_ID}`,
+      headers: authHeaders(admin, ORG_A),
+      payload: { portalSettings: { showBody: "yes" } }
+    });
+    expect(invalid.statusCode).toBe(400);
+    expect(repos.bots.update).toHaveBeenCalledTimes(1);
+  });
+
   it("a bot of another organization is not found", async () => {
     const owner = makeUser({ [ORG_A]: "OWNER" });
     const { app, repos } = await createTestApp({ users: [owner] });

@@ -1,9 +1,12 @@
 import { ImageOff } from "lucide-react";
 import { useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
+import { sanitizeEmailHtml } from "./sanitize-email-html";
 
 /**
  * Renders untrusted email HTML in a sandboxed iframe:
+ *  - the HTML is sanitized first (sanitizeEmailHtml: no scripts, forms, event
+ *    attributes or unsafe URLs),
  *  - sandbox without allow-scripts / allow-same-origin (no JS, no access to the app),
  *  - CSP inside the document blocks remote resources by default
  *    (tracking pixels) until the user opts in,
@@ -12,16 +15,24 @@ import { Button } from "@/components/ui/button";
 export function buildEmailDocument(html: string, allowRemoteImages: boolean): string {
   const imgSrc = allowRemoteImages ? "data: cid: https:" : "data: cid:";
   return `<!doctype html><html><head><meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${imgSrc}; style-src 'unsafe-inline'; font-src data:">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${imgSrc}; style-src 'unsafe-inline'; font-src data:; form-action 'none'">
 <meta name="referrer" content="no-referrer"><base target="_blank">
 <style>body{font-family:system-ui,-apple-system,"Segoe UI",sans-serif;font-size:14px;line-height:1.5;color:#1f2430;margin:16px;word-wrap:break-word}img{max-width:100%;height:auto}table{max-width:100%}</style>
-</head><body>${html}</body></html>`;
+</head><body>${sanitizeEmailHtml(html)}</body></html>`;
 }
 
 export function EmailBody({ html, text }: { html: string | null; text: string | null }) {
   const [mode, setMode] = useState<"html" | "text">(html ? "html" : "text");
   const [allowImages, setAllowImages] = useState(false);
   const document = useMemo(() => (html ? buildEmailDocument(html, allowImages) : ""), [html, allowImages]);
+
+  if (!html && !text) {
+    return (
+      <p role="status" className="rounded-md border bg-muted/30 p-4 text-sm text-muted-foreground">
+        El contenido de este correo no está disponible.
+      </p>
+    );
+  }
 
   return (
     <div className="space-y-2">
