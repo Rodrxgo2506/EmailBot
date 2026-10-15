@@ -166,6 +166,7 @@ Leyenda: **SECRET** = nunca en logs, repositorio ni bundle; se introduce con `sy
 | Variable | Clase | Notas |
 |---|---|---|
 | `WORKER_EVENTS_CONCURRENCY`, `WORKER_PROCESSING_CONCURRENCY` | PUBLIC · WORKER ONLY | 5 / 10 |
+| `WORKER_IMAP_SYNC_CONCURRENCY` | PUBLIC · WORKER ONLY | 2 (sincronizaciones IMAP a la vez por proceso, dentro de `WORKER_EVENTS_CONCURRENCY`: se usan `max(1, min(valor, WORKER_EVENTS_CONCURRENCY − 1))`. Solo con `WORKER_EVENTS_CONCURRENCY` ≥ 2 queda al menos un hueco que IMAP no puede ocupar; con 1, IMAP puede ocupar el único hueco: no usar 1 con IMAP activado. Solo se usa con IMAP activado; no limita la cola `email-processing`, ver `docs/imap.md`, F1) |
 | `WORKER_POLL_INTERVAL_MINUTES` | PUBLIC · WORKER ONLY | 5 (recuperación; no poner 0: con 0 no hay *scheduler* de sondeo y `/health/sync` no puede detectar un worker parado) |
 | `GMAIL_PUBSUB_TOPIC` | PUBLIC · WORKER ONLY | push de Gmail (V2): `projects/<proyecto>/topics/<topic>`; sin ella, solo polling |
 | `MICROSOFT_GRAPH_NOTIFICATION_URL` | PUBLIC · WORKER ONLY | push de Microsoft (F9): URL https pública de `POST /webhooks/microsoft` de la API (`<API_PUBLIC_URL>/webhooks/microsoft`); el ciclo de vida usa `<URL>/lifecycle`. Requiere `MICROSOFT_CLIENT_*`. Sin ella, solo polling. Activarla a la vez que `MICROSOFT_GRAPH_PUSH_ENABLED=true` en la API (la API primero) |

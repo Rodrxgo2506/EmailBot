@@ -50,6 +50,8 @@ export interface ChangeSet {
    * option (never imported, never fetched); the cursor moved past them. Reported by syncAccount.
    */
   outOfWindow?: number;
+  /** IMAP only (A2): the UIDs counted in `outOfWindow`, so a run that stops early reports only those behind its cursor. */
+  outOfWindowUids?: number[];
 }
 
 export interface RecoverySet {

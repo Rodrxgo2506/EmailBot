@@ -1,4 +1,5 @@
 import { ProviderTransientError } from "../types.js";
+import { IMAP_OPERATION_DEADLINES } from "./deadline.js";
 
 /*
  * IMAP connections of one worker process.
@@ -12,7 +13,9 @@ import { ProviderTransientError } from "../types.js";
  *   - idle connections are logged out after `idleMs` (30 s): nothing stays
  *     open between polling runs;
  *   - a connection whose operation failed is discarded (never reused in an
- *     unknown state); closeAll() at shutdown logs everything out.
+ *     unknown state); closeAll() at shutdown logs everything out;
+ *   - A2: a LOGOUT gets `logoutTimeoutMs` (5 s); after it (or any failure) the
+ *     socket is closed anyway, so disposing never waits for a slow server.
  * No IDLE: the worker polls.
  */
 
@@ -29,6 +32,7 @@ export interface ImapConnectionPoolOptions {
   maxTotal?: number;
   idleMs?: number;
   acquireTimeoutMs?: number;
+  logoutTimeoutMs?: number;
 }
 
 interface Entry<C extends PoolableClient> {
@@ -50,6 +54,7 @@ export class ImapConnectionPool<C extends PoolableClient = PoolableClient> {
   readonly #maxTotal: number;
   readonly #idleMs: number;
   readonly #acquireTimeoutMs: number;
+  readonly #logoutTimeoutMs: number;
   readonly #entries = new Set<Entry<C>>();
   /** Slots reserved by connections being opened (counted against the limits). */
   readonly #opening = new Map<string, number>();
@@ -61,6 +66,7 @@ export class ImapConnectionPool<C extends PoolableClient = PoolableClient> {
     this.#maxTotal = options.maxTotal ?? IMAP_POOL_DEFAULTS.maxTotal;
     this.#idleMs = options.idleMs ?? IMAP_POOL_DEFAULTS.idleMs;
     this.#acquireTimeoutMs = options.acquireTimeoutMs ?? IMAP_POOL_DEFAULTS.acquireTimeoutMs;
+    this.#logoutTimeoutMs = options.logoutTimeoutMs ?? IMAP_OPERATION_DEADLINES.logoutMs;
   }
 
   /** Open connections (busy + idle) and connections being opened. */
@@ -191,11 +197,22 @@ export class ImapConnectionPool<C extends PoolableClient = PoolableClient> {
 
   async #dispose(entry: Entry<C>): Promise<void> {
     this.#clearIdle(entry);
+    let timer: NodeJS.Timeout | undefined;
     try {
-      if (entry.client.usable) await entry.client.logout();
+      if (entry.client.usable) {
+        const logout = entry.client.logout();
+        logout.catch(() => undefined);
+        await Promise.race([
+          logout,
+          new Promise<void>((resolve) => {
+            timer = setTimeout(resolve, this.#logoutTimeoutMs);
+          })
+        ]);
+      }
     } catch {
       // ignored: closed below
     } finally {
+      clearTimeout(timer);
       try {
         entry.client.close();
       } catch {

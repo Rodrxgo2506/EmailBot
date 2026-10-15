@@ -403,8 +403,11 @@ ${pdf}
       imapSyncEnabled: true
     };
     const start = account.syncCursor;
+    const startUid = Number(String(start).split(":")[3]);
     await expect(syncAccount(account, deps, "POLL")).rejects.toBeInstanceOf(ProviderTransientError);
-    expect(account.syncCursor).toBe(start); // never advanced past an unprocessed message
+    // Never advanced past an unprocessed message. A2: it moves past the contiguous prefix only, i.e. exactly to
+    // message 1 (stored), never to message 2 (failed) or 3.
+    expect(account.syncCursor).toBe(String(start).replace(/:\d+$/, `:${startUid + 1}`));
     const result = await syncAccount(account, deps, "POLL");
     expect(result.cursorAdvanced).toBe(true);
     expect(emails.rows, outcomes.join(" ")).toHaveLength(3);

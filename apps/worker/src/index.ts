@@ -16,14 +16,16 @@ import {
   type NotificationJob
 } from "@emailbot/shared";
 import { createClient } from "@supabase/supabase-js";
-import { UnrecoverableError, Worker, type Job } from "bullmq";
+import { Worker, type Job } from "bullmq";
 import { Redis } from "ioredis";
 import { pino } from "pino";
 import { loadWorkerConfig } from "./config/env.js";
 import { createProviderContext } from "./credentials/token-manager.js";
 import { closeServer, createHealthServer, listen, type WorkerHealthState } from "./infrastructure/health.js";
+import { createImapSyncSlots, imapSyncSlotCount } from "./infrastructure/imap-slots.js";
+import { createJobProcessors } from "./infrastructure/job-processors.js";
 import { createWorkerQueues } from "./infrastructure/queues.js";
-import { captureWorkerException, flushWorkerSentry, initWorkerSentry, jobType, reportJobFailure, type FailedJob } from "./infrastructure/sentry.js";
+import { captureWorkerException, flushWorkerSentry, initWorkerSentry, jobType, reportJobFailure } from "./infrastructure/sentry.js";
 import { createRedisSyncLock } from "./infrastructure/sync-lock.js";
 import {
   createAccountStore,
@@ -34,12 +36,12 @@ import {
   createRoutingStore,
   createSubscriptionMaintenance
 } from "./infrastructure/supabase-stores.js";
-import { handleAccountFailure, NonRetryableError } from "./pipeline/failures.js";
-import { handleEmailEvent, SyncBusyError, type HandleEventDeps } from "./pipeline/handle-email-event.js";
+import type { HandleEventDeps } from "./pipeline/handle-email-event.js";
 import { deliverNotification } from "./pipeline/notify.js";
-import { processEmail, type ProcessEmailDeps } from "./pipeline/process-email.js";
+import type { ProcessEmailDeps } from "./pipeline/process-email.js";
 import { createImapSyncAdapter } from "./providers/imap/adapter.js";
 import type { ImapClient } from "./providers/imap/connection.js";
+import { abortImapOperations } from "./providers/imap/deadline.js";
 import { ImapConnectionPool } from "./providers/imap/pool.js";
 import { createMicrosoftSubscriptionClient } from "./providers/microsoft/subscriptions.js";
 import { createProviderRegistry } from "./providers/registry.js";
@@ -133,77 +135,20 @@ const eventDeps: Omit<HandleEventDeps, "logger"> = {
   microsoftPush: config.microsoftPush,
   microsoftSubscriptions: createMicrosoftSubscriptionClient(providerFetch),
   subscriptions: createSubscriptionMaintenance(supabase),
-  imapSyncEnabled: config.imapSyncEnabled
+  imapSyncEnabled: config.imapSyncEnabled,
+  // IMAP A2: IMAP runs never take every events slot (at least one stays for Gmail / Microsoft).
+  ...(config.imapSyncEnabled ? { imapSlots: createImapSyncSlots(imapSyncSlotCount(config.eventsConcurrency, config.imapSyncConcurrency)) } : {})
 };
 
-/**
- * Maps domain failures to BullMQ semantics (UnrecoverableError = no retry).
- * Unexpected failures are reported to Sentry once, on the job's final attempt.
- */
-async function runWithFailureHandling<T>(
-  job: FailedJob,
-  account: { id: string; organizationId: string } | null,
-  jobLogger: typeof logger,
-  run: () => Promise<T>
-): Promise<T> {
-  try {
-    return await run();
-  } catch (error) {
-    // Another run holds the account: expected, retried with backoff (no error report).
-    if (error instanceof SyncBusyError) throw error;
-    try {
-      return await handleAccountFailure(error, account, { accounts, realtime, logger: jobLogger });
-    } catch (handled) {
-      if (handled instanceof NonRetryableError) throw new UnrecoverableError(handled.message);
-      reportJobFailure(handled, job, { queue: job.queueName, type: jobType(job.data) });
-      throw handled;
-    }
-  }
-}
+// Processors (job-processors.ts): failure mapping, Sentry, and the IMAP A2 "slots busy" delay.
+const processors = createJobProcessors({ eventDeps, processDeps, accounts, realtime, logger, reportJobFailure, jobType });
 
-const eventsWorker = new Worker<EmailEventJob>(
-  QUEUE_NAMES.emailEvents,
-  async (job: Job<EmailEventJob>) => {
-    const jobLogger = logger.child({ queue: QUEUE_NAMES.emailEvents, jobId: job.id, type: job.data.type });
-    const account =
-      job.data.type === "SYNC_ACCOUNT" || job.data.type === "WATCH_ACCOUNT"
-        ? { id: job.data.emailAccountId, organizationId: job.data.organizationId }
-        : null;
-    return runWithFailureHandling(job, account, jobLogger, () =>
-      handleEmailEvent(job.data, {
-        ...eventDeps,
-        // Every ingestion path (push, recovery polling, manual sync) uses the same pipeline.
-        processMessage: (message) => processEmail(message, { ...processDeps, logger: jobLogger }, { attempt: 1 }),
-        logger: jobLogger
-      })
-    );
-  },
-  { connection, concurrency: config.eventsConcurrency }
-);
+const eventsWorker = new Worker<EmailEventJob>(QUEUE_NAMES.emailEvents, processors.events, { connection, concurrency: config.eventsConcurrency });
 
-const processingWorker = new Worker<EmailProcessingJob>(
-  QUEUE_NAMES.emailProcessing,
-  async (job: Job<EmailProcessingJob>) => {
-    const jobLogger = logger.child({
-      queue: QUEUE_NAMES.emailProcessing,
-      jobId: job.id,
-      organizationId: job.data.organizationId,
-      emailAccountId: job.data.emailAccountId
-    });
-    const outcome = await runWithFailureHandling(
-      job,
-      { id: job.data.emailAccountId, organizationId: job.data.organizationId },
-      jobLogger,
-      // Whether an email is resumed is decided by its processing_status in the
-      // database (migration 9), not by BullMQ's attempt counters; `attempt`
-      // only seeds processing_attempts of a newly stored email.
-      () => processEmail(job.data, { ...processDeps, logger: jobLogger }, { attempt: job.attemptsMade + 1 })
-    );
-    jobLogger.debug({ outcome: outcome.status, ...(outcome.status === "skipped" ? { reason: outcome.reason } : {}) }, "job done");
-    return outcome;
-  },
-  { connection, concurrency: config.processingConcurrency }
-);
+const processingWorker = new Worker<EmailProcessingJob>(QUEUE_NAMES.emailProcessing, processors.processing, {
+  connection,
+  concurrency: config.processingConcurrency
+});
 
 const notificationsWorker = new Worker<NotificationJob>(
   QUEUE_NAMES.notifications,
@@ -222,6 +167,9 @@ async function shutdown(signal: string) {
   health.stopping = true;
   logger.info({ signal }, "shutting down worker");
   try {
+    // IMAP A2: running IMAP operations are closed now (transient: their jobs are retried later, no cursor moves past
+    // unprocessed mail), so worker.close() never waits for a slow IMAP server.
+    abortImapOperations();
     await Promise.all(workers.map((worker) => worker.close()));
     // After the workers stopped: no job holds an IMAP connection any more.
     await imapPool?.closeAll();

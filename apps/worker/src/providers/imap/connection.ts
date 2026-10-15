@@ -11,6 +11,7 @@ import {
 import { imapEndpointProblem, type ImapEndpoint } from "@emailbot/types";
 import type { ImapCredentials, WorkerAccount } from "../types.js";
 import { ProviderSecurityError, ProviderTransientError } from "../types.js";
+import { trackImapClient } from "./deadline.js";
 import { classifyImapError } from "./errors.js";
 
 /*
@@ -57,10 +58,11 @@ export function imapPoolKey(account: Pick<WorkerAccount, "id" | "accessTokenEncr
 /**
  * ImapFlow for already-checked options (shared transport). Connected and logged in, or throws a worker error.
  * Protocol size limits: the synchronization profile (one message up to IMAP_MAX_MESSAGE_BYTES, E6.1).
+ * A2: the client is handed to the running operation's deadline as soon as it exists (mid-connect too).
  */
 export async function openImapClient(options: ImapConnectionOptions, credentials: ImapCredentials): Promise<ImapClient> {
   try {
-    return await openSharedImapClient(options, credentials, { profile: "sync" });
+    return await openSharedImapClient(options, credentials, { profile: "sync", onClient: trackImapClient });
   } catch (error) {
     throw classifyImapError(error);
   }

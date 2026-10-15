@@ -25,6 +25,11 @@ const envSchema = z.object({
 
   WORKER_EVENTS_CONCURRENCY: z.coerce.number().int().min(1).max(100).default(5),
   WORKER_PROCESSING_CONCURRENCY: z.coerce.number().int().min(1).max(100).default(10),
+  /**
+   * IMAP A2: IMAP synchronizations run at once by one process, out of WORKER_EVENTS_CONCURRENCY (always
+   * leaving at least one events slot to Gmail / Microsoft). Only used when IMAP synchronization is enabled.
+   */
+  WORKER_IMAP_SYNC_CONCURRENCY: z.coerce.number().int().min(1).max(100).default(2),
   /** Recovery polling (not the primary ingestion once Gmail push is enabled). 0 disables it. */
   WORKER_POLL_INTERVAL_MINUTES: z.coerce.number().int().min(0).max(1440).default(5),
   /**
@@ -107,6 +112,8 @@ export interface WorkerConfig {
   oauth: { GMAIL: OAuthClientConfig | null; MICROSOFT: OAuthClientConfig | null };
   eventsConcurrency: number;
   processingConcurrency: number;
+  /** IMAP A2: requested IMAP synchronizations at once (see imapSyncSlotCount). */
+  imapSyncConcurrency: number;
   pollIntervalMinutes: number;
   /** null = Gmail push disabled (polling only). */
   gmailPubSubTopic: string | null;
@@ -154,6 +161,7 @@ export function loadWorkerConfig(source: NodeJS.ProcessEnv = process.env): Worke
     },
     eventsConcurrency: env.WORKER_EVENTS_CONCURRENCY,
     processingConcurrency: env.WORKER_PROCESSING_CONCURRENCY,
+    imapSyncConcurrency: env.WORKER_IMAP_SYNC_CONCURRENCY,
     pollIntervalMinutes: env.WORKER_POLL_INTERVAL_MINUTES,
     gmailPubSubTopic: env.GMAIL_PUBSUB_TOPIC ?? null,
     microsoftPush: env.MICROSOFT_GRAPH_NOTIFICATION_URL

@@ -14,6 +14,8 @@ import {
   type SyncReason
 } from "@emailbot/shared";
 import { ProviderHttpError } from "../providers/http.js";
+import { formatImapCursor, parseImapCursor, parseImapMessageId } from "../providers/imap/cursor.js";
+import { IMAP_RUN_BUDGET, imapRunBudgetExhausted, withImapRunBudget } from "../providers/imap/deadline.js";
 import type { MicrosoftSubscriptionClient } from "../providers/microsoft/subscriptions.js";
 import type { ProviderRegistry } from "../providers/registry.js";
 import { ProviderAuthError, ProviderSecurityError, ProviderTransientError, type ProviderContext, type WorkerAccount } from "../providers/types.js";
@@ -71,8 +73,23 @@ export interface HandleEventDeps {
    * Absent / false: IMAP accounts are never polled, synchronized or processed.
    */
   imapSyncEnabled?: boolean;
+  /**
+   * IMAP A2: IMAP synchronization runs allowed at once in this process (a share of the events concurrency, so
+   * IMAP never takes every slot Gmail / Microsoft need). Busy: syncAccount throws ImapSlotsBusyError and the
+   * job runner delays the job (no attempt used). Absent: no limit (tests, scripts).
+   */
+  imapSlots?: ImapSyncSlots;
+  /** IMAP A2: run budget (default IMAP_RUN_BUDGET; shorter only in tests). */
+  imapRunBudget?: { softMs: number; hardMs: number };
   now?: () => number;
   logger: Logger;
+}
+
+/** In-process counter of running IMAP synchronizations (infrastructure/imap-slots.ts). */
+export interface ImapSyncSlots {
+  /** Takes a slot if one is free. */
+  tryAcquire(): boolean;
+  release(): void;
 }
 
 export interface HandleEventOutcome {
@@ -132,6 +149,14 @@ export const SYNC_LOCK_TTL_MS = 15 * 60 * 1000;
 export const WATCH_RENEW_MARGIN_MS = 24 * 60 * 60 * 1000;
 export const WATCH_RENEW_BATCH = 100;
 
+/** IMAP A2: every IMAP slot of this process is busy: the job runner delays the job (no attempt used, nothing touched). */
+export class ImapSlotsBusyError extends Error {
+  constructor(readonly emailAccountId: string) {
+    super("Every IMAP synchronization slot of this worker is busy");
+    this.name = "ImapSlotsBusyError";
+  }
+}
+
 /** Another sync of the same account is running: retried with backoff (BullMQ). */
 export class SyncBusyError extends Error {
   constructor(readonly emailAccountId: string) {
@@ -175,12 +200,16 @@ async function processMessages(
   messageIds: string[],
   deps: HandleEventDeps,
   options: { recovery?: boolean } = {}
-): Promise<{ processed: number; skipped: number; halted: string | null }> {
+): Promise<MessagesOutcome> {
   const processMessage = deps.processMessage;
   // IMAP only: messages listed by a history-gap recovery may be stored already under their old UIDVALIDITY.
   const recovery = options.recovery === true && account.provider === "IMAP" ? ({ recovery: true } as const) : {};
   if (!processMessage) throw new Error("processMessage is not configured");
   const haltOnState = account.provider === "IMAP";
+  const imap = account.provider === "IMAP";
+  // IMAP A2: which messages are durably handled, so the cursor can move past a contiguous prefix only.
+  const done: boolean[] = messageIds.map(() => false);
+  let budgetExhausted = false;
   let processed = 0;
   let skipped = 0;
   const failures: unknown[] = [];
@@ -190,7 +219,13 @@ async function processMessages(
 
   const workerLoop = async () => {
     while (fatal === null && halted === null && next < messageIds.length) {
-      const providerMessageId = messageIds[next++] as string;
+      // IMAP A2: past the run's soft budget (or at worker shutdown) no new message is started.
+      if (imap && imapRunBudgetExhausted()) {
+        budgetExhausted = true;
+        break;
+      }
+      const index = next++;
+      const providerMessageId = messageIds[index] as string;
       try {
         const outcome = await processMessage({
           organizationId: account.organizationId,
@@ -201,12 +236,21 @@ async function processMessages(
         });
         // IMAP (M1 D1): the mailbox may not be processed any more: stop, never count it as handled.
         if (outcome.status === "skipped" && haltOnState && IMAP_HALT_REASONS.has(outcome.reason)) halted ??= outcome.reason;
-        else if (outcome.status === "skipped") skipped += 1;
-        else processed += 1;
+        else if (outcome.status === "skipped") {
+          skipped += 1;
+          done[index] = true;
+        } else {
+          processed += 1;
+          done[index] = true;
+        }
       } catch (error) {
-        if (error instanceof AttachmentsPendingError) processed += 1;
-        else if (error instanceof ProviderHttpError && error.status === 404) skipped += 1;
-        else if (isAccountFatal(error)) fatal = error;
+        if (error instanceof AttachmentsPendingError) {
+          processed += 1;
+          done[index] = true;
+        } else if (error instanceof ProviderHttpError && error.status === 404) {
+          skipped += 1;
+          done[index] = true;
+        } else if (isAccountFatal(error)) fatal = error;
         else failures.push(error);
       }
     }
@@ -214,14 +258,28 @@ async function processMessages(
   await Promise.all(Array.from({ length: Math.min(MESSAGE_CONCURRENCY, messageIds.length) }, workerLoop));
 
   if (fatal !== null) throw fatal;
-  if (failures.length > 0) {
+  // Gmail / Microsoft: unchanged (any failure: the cursor is not advanced, the run is retried).
+  if (failures.length > 0 && !imap) {
     deps.logger.warn(
       { event: "gmail.sync.failed", emailAccountId: account.id, failed: failures.length, err: serializeError(failures[0]) },
       "some messages could not be processed; the cursor is not advanced"
     );
     throw failures[0];
   }
-  return { processed, skipped, halted };
+  const pending = done.indexOf(false);
+  return { processed, skipped, halted, failures, budgetExhausted, firstPending: pending < 0 ? messageIds.length : pending };
+}
+
+interface MessagesOutcome {
+  processed: number;
+  skipped: number;
+  halted: string | null;
+  /** IMAP only: failed messages (Gmail / Microsoft throw instead, unchanged). */
+  failures: unknown[];
+  /** IMAP A2: the run budget stopped the batch before every message was started. */
+  budgetExhausted: boolean;
+  /** Index of the first message not durably handled (messageIds.length when all were). */
+  firstPending: number;
 }
 
 /**
@@ -254,6 +312,19 @@ export async function syncAccount(account: WorkerAccount, deps: HandleEventDeps,
     return empty;
   }
 
+  // IMAP A2: a bounded share of this process's events concurrency, and a run budget below the sync lock.
+  // Gmail / Microsoft: no slot, no budget (unchanged).
+  if (account.provider !== "IMAP") return syncLocked(account, deps, reason);
+  if (deps.imapSlots && !deps.imapSlots.tryAcquire()) throw new ImapSlotsBusyError(account.id);
+  try {
+    return await withImapRunBudget(deps.imapRunBudget ?? IMAP_RUN_BUDGET, () => syncLocked(account, deps, reason));
+  } finally {
+    deps.imapSlots?.release();
+  }
+}
+
+/** syncAccount after its checks: lock, list, process, cursor. */
+async function syncLocked(account: WorkerAccount, deps: HandleEventDeps, reason: SyncReason): Promise<SyncResult> {
   const now = deps.now ?? Date.now;
   const lockToken = deps.lock ? await deps.lock.acquire(account.id, SYNC_LOCK_TTL_MS) : "unlocked";
   if (lockToken === null) throw new SyncBusyError(account.id);
@@ -300,7 +371,8 @@ export async function syncAccount(account: WorkerAccount, deps: HandleEventDeps,
       );
     }
 
-    const { processed, skipped, halted } = await processMessages(account, messageIds, deps, { recovery: historyGap });
+    const batch = await processMessages(account, messageIds, deps, { recovery: historyGap });
+    const { processed, skipped, halted } = batch;
 
     // IMAP (M1 D1): the mailbox stopped being processable during the batch (paused, disconnected, no access, IMAP
     // left the plan): the cursor is NOT moved, so the remaining messages are processed after a resume (the ones
@@ -308,6 +380,19 @@ export async function syncAccount(account: WorkerAccount, deps: HandleEventDeps,
     if (halted !== null) {
       deps.logger.warn({ event: "imap.sync.halted", ...log, reason: halted, found: messageIds.length, processed, skipped }, "IMAP sync stopped; cursor unchanged");
       return { found: messageIds.length, processed, skipped, historyGap, hasMore: false, cursorAdvanced: false };
+    }
+
+    // IMAP A2: a message failed (e.g. its deadline) or the run budget stopped the batch: the cursor only moves past
+    // the contiguous prefix of durably handled messages, never past a pending, failed or unstarted one.
+    if (imap && batch.firstPending < messageIds.length) {
+      return await advanceImapPrefix(account, deps, {
+        messageIds,
+        batch,
+        outOfWindowUids: changes.outOfWindowUids ?? [],
+        historyGap,
+        log,
+        now
+      });
     }
 
     // Only now, with every message durably handled, the cursor moves (IMAP: only while the mailbox is still ACTIVE).
@@ -321,22 +406,7 @@ export async function syncAccount(account: WorkerAccount, deps: HandleEventDeps,
 
     // IMAP (decision B): messages older than the window were skipped on purpose; say so, never claim them imported.
     const outOfWindow = changes.outOfWindow ?? 0;
-    if (imap && outOfWindow > 0 && cursorAdvanced) {
-      deps.logger.warn(
-        { event: "imap.sync.outside_window", ...log, count: outOfWindow, windowDays: RECOVERY_MAX_WINDOW_MS / 86_400_000 },
-        "IMAP messages older than the window were not imported"
-      );
-      await deps.audit
-        ?.recordAccountEvent({
-          organizationId: account.organizationId,
-          emailAccountId: account.id,
-          action: "PROCESS",
-          event: "imap.sync.outside_window",
-          description: `${outOfWindow} message(s) received more than ${RECOVERY_MAX_WINDOW_MS / 86_400_000} days ago were not imported`,
-          metadata: { provider: account.provider, count: outOfWindow, windowDays: RECOVERY_MAX_WINDOW_MS / 86_400_000 }
-        })
-        .catch((error: unknown) => deps.logger.warn({ err: serializeError(error) }, "could not record the skipped IMAP messages"));
-    }
+    if (imap && outOfWindow > 0 && cursorAdvanced) await reportOutOfWindow(account, deps, log, outOfWindow);
 
     const hasMore = changes.hasMore === true;
     if (hasMore && cursorAdvanced) await deps.enqueueSync(account, "CONTINUATION");
@@ -357,6 +427,70 @@ export async function syncAccount(account: WorkerAccount, deps: HandleEventDeps,
       await deps.lock.release(account.id, lockToken).catch((error: unknown) => deps.logger.warn({ err: serializeError(error) }, "could not release sync lock"));
     }
   }
+}
+
+/** IMAP (decision B): messages older than the window were skipped on purpose; say so, never claim them imported. */
+async function reportOutOfWindow(account: WorkerAccount, deps: HandleEventDeps, log: Record<string, unknown>, count: number): Promise<void> {
+  deps.logger.warn(
+    { event: "imap.sync.outside_window", ...log, count, windowDays: RECOVERY_MAX_WINDOW_MS / 86_400_000 },
+    "IMAP messages older than the window were not imported"
+  );
+  await deps.audit
+    ?.recordAccountEvent({
+      organizationId: account.organizationId,
+      emailAccountId: account.id,
+      action: "PROCESS",
+      event: "imap.sync.outside_window",
+      description: `${count} message(s) received more than ${RECOVERY_MAX_WINDOW_MS / 86_400_000} days ago were not imported`,
+      metadata: { provider: account.provider, count, windowDays: RECOVERY_MAX_WINDOW_MS / 86_400_000 }
+    })
+    .catch((error: unknown) => deps.logger.warn({ err: serializeError(error) }, "could not record the skipped IMAP messages"));
+}
+
+/**
+ * IMAP A2: an incomplete batch (a message failed, or the run budget stopped it). The cursor moves to the UID just
+ * before the first message not durably handled (compare-and-set, only while the mailbox is ACTIVE): everything
+ * behind it was processed, skipped on purpose or out of the window; nothing pending is ever jumped. Messages
+ * processed after the first pending one are deduplicated by the next run. Then a failure is rethrown (BullMQ
+ * retry with backoff, from the new cursor) and a budget stop continues in a CONTINUATION run.
+ */
+async function advanceImapPrefix(
+  account: WorkerAccount,
+  deps: HandleEventDeps,
+  run: { messageIds: string[]; batch: MessagesOutcome; outOfWindowUids: number[]; historyGap: boolean; log: Record<string, unknown>; now: () => number }
+): Promise<SyncResult> {
+  const { batch, messageIds, log } = run;
+  const pending = parseImapMessageId(messageIds[batch.firstPending] as string);
+  const current = parseImapCursor(account.syncCursor);
+  let cursorAdvanced = false;
+  let behindCursor = 0;
+  if (pending) {
+    const uid = pending.uid - 1;
+    if (!current || current.uidValidity !== pending.uidValidity || uid > current.uid) {
+      cursorAdvanced = await deps.accounts.advanceSyncCursor(account.id, {
+        from: account.syncCursor,
+        to: formatImapCursor({ uidValidity: pending.uidValidity, uid }),
+        lastSyncedAt: new Date(run.now()).toISOString(),
+        requireActive: true
+      });
+      if (cursorAdvanced) behindCursor = run.outOfWindowUids.filter((outside) => outside <= uid).length;
+    }
+  }
+  if (behindCursor > 0) await reportOutOfWindow(account, deps, log, behindCursor);
+  const result = { found: messageIds.length, processed: batch.processed, skipped: batch.skipped, historyGap: run.historyGap };
+  if (batch.failures.length > 0) {
+    deps.logger.warn(
+      { event: "gmail.sync.failed", ...log, failed: batch.failures.length, completedPrefix: batch.firstPending, cursorAdvanced, err: serializeError(batch.failures[0]) },
+      "some messages could not be processed; the cursor only moved past the messages before the first pending one"
+    );
+    throw batch.failures[0];
+  }
+  deps.logger.warn(
+    { event: "imap.sync.budget_exhausted", ...log, found: messageIds.length, completedPrefix: batch.firstPending, cursorAdvanced },
+    "IMAP run budget reached; the rest continues in another run"
+  );
+  await deps.enqueueSync(account, "CONTINUATION");
+  return { ...result, hasMore: true, cursorAdvanced };
 }
 
 /**

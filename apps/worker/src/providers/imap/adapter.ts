@@ -12,6 +12,7 @@ import {
 } from "../types.js";
 import { createImapConnector, imapPoolKey, readImapEndpoint, type ImapClient, type ImapConnector } from "./connection.js";
 import { formatImapCursor, formatImapMessageId, parseImapCursor, parseImapMessageId } from "./cursor.js";
+import { assertImapOperationAlive, IMAP_OPERATION_DEADLINES, runImapOperation, trackImapClient, withinImapPhase } from "./deadline.js";
 import { classifyImapError } from "./errors.js";
 import { extractImapAttachment, IMAP_MAX_BODY_CHARS, IMAP_MAX_MESSAGE_BYTES, normalizeImapMessage, snippetOf, type ImapEnvelope } from "./normalize.js";
 import type { ImapConnectionPool } from "./pool.js";
@@ -37,7 +38,10 @@ import type { ImapConnectionPool } from "./pool.js";
  *   - messages up to 10 MB are parsed in full; bigger ones keep their headers
  *     and text parts (bounded), their attachments are listed, not downloadable;
  *   - every connection goes through the E1 checks (connection.ts) and the
- *     process-wide pool (pool.ts: 2 per mailbox, 10 in total, 30 s idle).
+ *     process-wide pool (pool.ts: 2 per mailbox, 10 in total, 30 s idle);
+ *   - A2: every operation (new connection, listing, one message) has a total
+ *     deadline (deadline.ts); on expiry its connection is closed and the
+ *     operation fails as transient (retried, never an account ERROR).
  */
 
 /** Registry entry while IMAP synchronization is disabled: an explicit scaffold that refuses everything. */
@@ -61,6 +65,8 @@ export interface ImapAdapterDeps {
   /** Default: createImapConnector() (E1 SSRF / TLS checks, then ImapFlow). */
   connect?: ImapConnector;
   maxMessageBytes?: number;
+  /** A2 total deadlines (default IMAP_OPERATION_DEADLINES; shorter only in tests). */
+  deadlines?: Partial<Record<"connectMs" | "listMs" | "fetchMs", number>>;
 }
 
 interface BodyNode {
@@ -133,46 +139,60 @@ const isAttachmentNode = (node: BodyNode) =>
 export function createImapSyncAdapter(deps: ImapAdapterDeps): ProviderAdapter {
   const connect = deps.connect ?? createImapConnector();
   const maxMessageBytes = deps.maxMessageBytes ?? IMAP_MAX_MESSAGE_BYTES;
+  const deadlines = { ...IMAP_OPERATION_DEADLINES, ...deps.deadlines };
 
   async function credentialsOf(context: ProviderContext): Promise<ImapCredentials> {
     if (!context.getImapCredentials) throw new ProviderAuthError("The IMAP login is not available", "IMAP_CREDENTIALS_MISSING");
     return context.getImapCredentials();
   }
 
-  /** Runs `fn` on INBOX opened read-only (EXAMINE), on a pooled connection that passed the E1 checks. */
-  async function withInbox<T>(context: ProviderContext, fn: (client: ImapClient, mailbox: Mailbox) => Promise<T>): Promise<T> {
+  /**
+   * Runs `fn` on INBOX opened read-only (EXAMINE), on a pooled connection that passed the E1 checks.
+   * A2: the whole operation (a new connection included, itself bounded by connectMs) has a total deadline;
+   * on expiry the connection is closed and the operation rejects with ImapDeadlineError (transient).
+   */
+  async function withInbox<T>(context: ProviderContext, kind: "list" | "fetch", fn: (client: ImapClient, mailbox: Mailbox) => Promise<T>): Promise<T> {
     try {
       const endpoint = readImapEndpoint(context.account);
       const credentials = await credentialsOf(context);
       const key = imapPoolKey(context.account, endpoint, credentials.username);
-      return await deps.pool.use(
-        key,
-        () => connect(endpoint, credentials),
-        async (client) => {
-          try {
-            // A pooled connection may still have INBOX selected by an earlier operation: ImapFlow
-            // would not EXAMINE it again, leaving UIDNEXT / UIDVALIDITY stale. Leave it first. CLOSE
-            // on a mailbox opened read-only never expunges (RFC 3501 6.4.2); a read-write one is
-            // never opened by this adapter and is refused rather than closed.
-            const open = client.mailbox;
-            if (open) {
-              if (open.readOnly !== true) throw new Error("Unexpected read-write mailbox on an IMAP sync connection");
-              await client.mailboxClose();
-            }
-            const lock = await client.getMailboxLock("INBOX", { readOnly: true });
+      return await runImapOperation(kind, kind === "list" ? deadlines.listMs : deadlines.fetchMs, () =>
+        deps.pool.use(
+          key,
+          // An operation that expired while waiting for a pool slot never opens a connection afterwards.
+          () => {
+            assertImapOperationAlive();
+            return withinImapPhase("connect", deadlines.connectMs, () => connect(endpoint, credentials));
+          },
+          async (client) => {
+            // A pooled connection is closed by this operation's deadline too; an expired operation runs nothing.
+            trackImapClient(client);
+            assertImapOperationAlive();
             try {
-              const mailbox = client.mailbox;
-              if (!mailbox) throw new Error("INBOX is not open");
-              return await fn(client, { uidValidity: Number(mailbox.uidValidity), uidNext: Number(mailbox.uidNext) });
-            } finally {
-              lock.release();
+              // A pooled connection may still have INBOX selected by an earlier operation: ImapFlow
+              // would not EXAMINE it again, leaving UIDNEXT / UIDVALIDITY stale. Leave it first. CLOSE
+              // on a mailbox opened read-only never expunges (RFC 3501 6.4.2); a read-write one is
+              // never opened by this adapter and is refused rather than closed.
+              const open = client.mailbox;
+              if (open) {
+                if (open.readOnly !== true) throw new Error("Unexpected read-write mailbox on an IMAP sync connection");
+                await client.mailboxClose();
+              }
+              const lock = await client.getMailboxLock("INBOX", { readOnly: true });
+              try {
+                const mailbox = client.mailbox;
+                if (!mailbox) throw new Error("INBOX is not open");
+                return await fn(client, { uidValidity: Number(mailbox.uidValidity), uidNext: Number(mailbox.uidNext) });
+              } finally {
+                lock.release();
+              }
+            } catch (error) {
+              // E6.1: an answer above the protocol limits closed the connection, and the pending command
+              // only saw "connection not available". Report the real cause (security: never retried).
+              throw imapProtocolLimitFailure(client) ?? error;
             }
-          } catch (error) {
-            // E6.1: an answer above the protocol limits closed the connection, and the pending command
-            // only saw "connection not available". Report the real cause (security: never retried).
-            throw imapProtocolLimitFailure(client) ?? error;
           }
-        }
+        )
       );
     } catch (error) {
       throw classifyImapError(error);
@@ -201,7 +221,7 @@ export function createImapSyncAdapter(deps: ImapAdapterDeps): ProviderAdapter {
 
   async function listNewMessageIds(context: ProviderContext, options: { maxMessages?: number; since?: Date } = {}): Promise<ChangeSet> {
     const max = Math.max(1, options.maxMessages ?? 200);
-    return withInbox(context, async (client, mailbox) => {
+    return withInbox(context, "list", async (client, mailbox) => {
       const top = newest(mailbox);
       const cursor = parseImapCursor(context.account.syncCursor);
       // No (readable) cursor: start at the newest message, import nothing.
@@ -239,7 +259,7 @@ export function createImapSyncAdapter(deps: ImapAdapterDeps): ProviderAdapter {
     let fetched = 0;
     let candidateIndex = 0;
     const taken: number[] = [];
-    let outOfWindow = 0;
+    const outOfWindowUids: number[] = [];
     let last = after;
     let hasMore = false;
     for (const uid of uids) {
@@ -260,7 +280,7 @@ export function createImapSyncAdapter(deps: ImapAdapterDeps): ProviderAdapter {
         inWindow = date === undefined || date.getTime() >= since.getTime();
       }
       if (inWindow) taken.push(uid);
-      else outOfWindow += 1;
+      else outOfWindowUids.push(uid);
       last = uid;
     }
     // Everything listed was examined: no UID up to `top` is left (any gap was expunged), the cursor may reach it.
@@ -269,12 +289,13 @@ export function createImapSyncAdapter(deps: ImapAdapterDeps): ProviderAdapter {
       messageIds: taken.map((uid) => messageId(mailbox, uid)),
       nextCursor: formatImapCursor({ uidValidity: mailbox.uidValidity, uid: last }),
       hasMore,
-      outOfWindow
+      outOfWindow: outOfWindowUids.length,
+      outOfWindowUids
     };
   }
 
   async function recoverMessageIds(context: ProviderContext, options: { since: Date; maxMessages: number }): Promise<RecoverySet> {
-    return withInbox(context, async (client, mailbox) => {
+    return withInbox(context, "list", async (client, mailbox) => {
       // Position taken before listing: anything arriving meanwhile is picked up by the next run.
       const top = newest(mailbox);
       // Coarse, timezone-proof candidates (2 days earlier), then the exact instant from INTERNALDATE:
@@ -347,7 +368,7 @@ export function createImapSyncAdapter(deps: ImapAdapterDeps): ProviderAdapter {
   async function fetchMessage(context: ProviderContext, providerMessageId: string): Promise<NormalizedEmail> {
     const ref = parseImapMessageId(providerMessageId);
     if (!ref) throw new ProviderHttpError("Invalid IMAP message id", 404);
-    return withInbox(context, async (client, mailbox) => {
+    return withInbox(context, "fetch", async (client, mailbox) => {
       if (ref.uidValidity !== mailbox.uidValidity) throw new ProviderHttpError("The IMAP message is no longer available", 404);
       const meta = await client.fetchOne(
         String(ref.uid),
@@ -367,7 +388,7 @@ export function createImapSyncAdapter(deps: ImapAdapterDeps): ProviderAdapter {
   async function downloadAttachment(context: ProviderContext, providerMessageId: string, providerAttachmentId: string): Promise<Uint8Array> {
     const ref = parseImapMessageId(providerMessageId);
     if (!ref) throw new ProviderHttpError("Invalid IMAP message id", 404);
-    return withInbox(context, async (client, mailbox) => {
+    return withInbox(context, "fetch", async (client, mailbox) => {
       if (ref.uidValidity !== mailbox.uidValidity) throw new ProviderHttpError("The IMAP message is no longer available", 404);
       const meta = await client.fetchOne(String(ref.uid), { uid: true, size: true }, { uid: true });
       const size = meta ? ((meta as unknown as MessageInfo).size ?? 0) : 0;
