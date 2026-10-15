@@ -1,6 +1,8 @@
 import { evaluateRules, parseRuleRow, type EngineRule, type RuleEvaluationResult } from "@emailbot/rules-engine";
 import { buildAttachmentPath, serializeError, type EmailProcessingJob } from "@emailbot/shared";
 import type { NormalizedAttachment, NormalizedEmail } from "@emailbot/types";
+import { imapOperationsRefused } from "../providers/imap/deadline.js";
+import { imapMessageReusableById } from "../providers/imap/message-scope.js";
 import type { ProviderRegistry } from "../providers/registry.js";
 import { ProviderAuthError, type ProviderContext, type WorkerAccount } from "../providers/types.js";
 import { hasCommercialAccess } from "./commercial-access.js";
@@ -370,7 +372,14 @@ async function completeAttachments(
 
   const providerContext = context ?? deps.createContext(account);
   let pending = 0;
-  for (const row of eligible) {
+  for (const [index, row] of eligible.entries()) {
+    // IMAP A2 / A2.1: once the run may not start IMAP operations (budget, worker shutdown) the remaining contents
+    // stay pending (the email stays PROCESSING / ATTACHMENTS_PENDING and is resumed later), unless the job already
+    // holds this message (message-scope.ts: no IMAP operation needed). Never true for Gmail / Microsoft.
+    if (account.provider === "IMAP" && imapOperationsRefused() && !imapMessageReusableById(account.id, providerMessageId)) {
+      pending += eligible.length - index;
+      break;
+    }
     try {
       if (!(await storeContent(row, emailId, providerMessageId, account, providerContext, deps))) continue;
     } catch (error) {

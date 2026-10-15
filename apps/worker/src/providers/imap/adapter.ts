@@ -12,7 +12,8 @@ import {
 } from "../types.js";
 import { createImapConnector, imapPoolKey, readImapEndpoint, type ImapClient, type ImapConnector } from "./connection.js";
 import { formatImapCursor, formatImapMessageId, parseImapCursor, parseImapMessageId } from "./cursor.js";
-import { assertImapOperationAlive, IMAP_OPERATION_DEADLINES, runImapOperation, trackImapClient, withinImapPhase } from "./deadline.js";
+import { assertImapOperationAlive, assertImapOperationMayStart, IMAP_OPERATION_DEADLINES, runImapOperation, trackImapClient, withinImapPhase } from "./deadline.js";
+import { imapMessageReusable, rememberImapSource, reusedImapAttachment, type ImapMessageKey } from "./message-scope.js";
 import { classifyImapError } from "./errors.js";
 import { extractImapAttachment, IMAP_MAX_BODY_CHARS, IMAP_MAX_MESSAGE_BYTES, normalizeImapMessage, snippetOf, type ImapEnvelope } from "./normalize.js";
 import type { ImapConnectionPool } from "./pool.js";
@@ -159,15 +160,17 @@ export function createImapSyncAdapter(deps: ImapAdapterDeps): ProviderAdapter {
       return await runImapOperation(kind, kind === "list" ? deadlines.listMs : deadlines.fetchMs, () =>
         deps.pool.use(
           key,
-          // An operation that expired while waiting for a pool slot never opens a connection afterwards.
+          // An operation that expired while waiting for a pool slot never opens a connection afterwards (A2.1: nor
+          // once its run's start limit passed).
           () => {
-            assertImapOperationAlive();
+            assertImapOperationMayStart();
             return withinImapPhase("connect", deadlines.connectMs, () => connect(endpoint, credentials));
           },
           async (client) => {
-            // A pooled connection is closed by this operation's deadline too; an expired operation runs nothing.
+            // A pooled connection is closed by this operation's deadline too; an expired operation runs nothing
+            // (A2.1: nor one that only gets its connection after its run's start limit).
             trackImapClient(client);
-            assertImapOperationAlive();
+            assertImapOperationMayStart();
             try {
               // A pooled connection may still have INBOX selected by an earlier operation: ImapFlow
               // would not EXAMINE it again, leaving UIDNEXT / UIDVALIDITY stale. Leave it first. CLOSE
@@ -381,6 +384,10 @@ export function createImapSyncAdapter(deps: ImapAdapterDeps): ProviderAdapter {
 
       const source = await fetchSource(client, ref.uid);
       if (!source) throw new ProviderHttpError("The IMAP message is no longer available", 404);
+      // A2.1 (C): kept for this job's attachment downloads (only inside an IMAP job's message scope; never a late
+      // result of an operation that already expired).
+      assertImapOperationAlive();
+      rememberImapSource({ accountId: context.account.id, uidValidity: mailbox.uidValidity, uid: ref.uid }, source, maxMessageBytes);
       return normalizeImapMessage(source, { providerMessageId, internalDate: info.internalDate, envelope: info.envelope }, context.account.id);
     });
   }
@@ -388,13 +395,26 @@ export function createImapSyncAdapter(deps: ImapAdapterDeps): ProviderAdapter {
   async function downloadAttachment(context: ProviderContext, providerMessageId: string, providerAttachmentId: string): Promise<Uint8Array> {
     const ref = parseImapMessageId(providerMessageId);
     if (!ref) throw new ProviderHttpError("Invalid IMAP message id", 404);
+    // A2.1 (C): the same job already read this very message (same account, UIDVALIDITY and UID): no IMAP operation.
+    const key: ImapMessageKey = { accountId: context.account.id, uidValidity: ref.uidValidity, uid: ref.uid };
+    const reused = await reusedImapAttachment(key, providerAttachmentId);
+    if (reused !== undefined) {
+      if (!reused) throw new ProviderHttpError("The IMAP attachment is not available", 404);
+      return reused;
+    }
     return withInbox(context, "fetch", async (client, mailbox) => {
       if (ref.uidValidity !== mailbox.uidValidity) throw new ProviderHttpError("The IMAP message is no longer available", 404);
       const meta = await client.fetchOne(String(ref.uid), { uid: true, size: true }, { uid: true });
       const size = meta ? ((meta as unknown as MessageInfo).size ?? 0) : 0;
       if (!meta || size > maxMessageBytes) throw new ProviderHttpError("The IMAP attachment is not available", 404);
       const source = await fetchSource(client, ref.uid);
-      const content = source ? await extractImapAttachment(source, providerAttachmentId) : null;
+      let content: Uint8Array | null = null;
+      if (source) {
+        // A2.1 (C): inside an IMAP job, the next attachments of this message are served from this read.
+        assertImapOperationAlive();
+        rememberImapSource(key, source, maxMessageBytes);
+        content = imapMessageReusable(key) ? ((await reusedImapAttachment(key, providerAttachmentId)) ?? null) : await extractImapAttachment(source, providerAttachmentId);
+      }
       if (!content) throw new ProviderHttpError("The IMAP attachment is not available", 404);
       return content;
     });

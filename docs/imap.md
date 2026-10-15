@@ -201,9 +201,10 @@ las rutas siguen en 503 (estado por defecto del código).
   límites del protocolo, arriba) y E6.3 (texto de los mensajes grandes de una sola parte) están en commits **locales**
   de la rama `feat/imap-e4-abuse-hardening` (`578cec5` y `6f8c7c3`), sin publicar ni desplegar. Antes de activar
   IMAP: M1 está en un commit local (ciclo de vida, arriba) y A2 (plazos totales por operación IMAP y huecos IMAP en la
-  cola `email-events`, abajo) también; la cola `email-processing` **no** está aislada y el lote de recuperación de
-  incompletos es común (F1 y F2, abajo): ambos requieren corrección o una decisión explícita antes de activar, y
-  sigue haciendo falta un cambio de código que active `imapAccountsEnabled` / `imapSyncEnabled`.
+  cola `email-events`, abajo) también; A2.1 (huecos IMAP y presupuesto en la cola `email-processing`, F1) está
+  implementado en local, sin commit. El lote de recuperación de incompletos sigue siendo común (F2, abajo): requiere
+  corrección o una decisión explícita antes de activar, y sigue haciendo falta un cambio de código que active
+  `imapAccountsEnabled` / `imapSyncEnabled`.
 - **H2 (pendiente, bajo)**: si un trabajo atrasado falla después de desconectar una cuenta IMAP, la base de datos
   queda bien (`DISCONNECTED`, `markError` no la toca), pero `handleAccountFailure` publica igualmente el evento
   realtime `email-account.status` `ERROR` y la web muestra el aviso "Una cuenta de correo necesita reconectarse"
@@ -247,12 +248,12 @@ cambia UIDVALIDITY antes de la primera sincronización, se aplica la recuperaci�
   `ImapDeadlineError` (`IMAP_TIMEOUT`, transitorio): reintento con el *backoff* existente, nunca ERROR de cuenta.
   Un mensaje cuya descarga vence no se guarda y el cursor no lo salta; si vence la descarga de un adjunto de un
   correo ya guardado, el correo queda `PROCESSING` / `ATTACHMENTS_PENDING` y lo retoma la recuperación de
-  incompletos (cola `email-processing`, F1). Los errores de autenticación, certificado, TLS y política conservan su
+  incompletos (cola `email-processing`, A2.1). Los errores de autenticación, certificado, TLS y política conservan su
   clasificación. Una operación que vence esperando un hueco del *pool* no abre después ninguna conexión.
   Los plazos son **por operación**, no por trabajo: un trabajo encadena varias (un listado, una por mensaje y una
   por cada adjunto pendiente, cada una de hasta 180 s o 60 s de espera del *pool*), así que puede durar bastante
-  más de 180 s; en una sincronización IMAP lo acota además el presupuesto por ejecución (abajo), en
-  `email-processing` nada (F1).
+  más de 180 s; lo acota el presupuesto del trabajo: el de la sincronización (abajo) o, en `email-processing`, el
+  de A2.1 (abajo).
   **Presupuesto por ejecución** (sincronización IMAP, `withImapRunBudget`): tras 8 min no se empieza ningún mensaje
   nuevo; a los 11 min se cierra toda operación IMAP aún abierta. El bloqueo de sincronización dura 15 min (sin
   renovación). Los 4 min restantes están pensados para el trabajo de base de datos de los mensajes en curso (como
@@ -277,35 +278,77 @@ cambia UIDVALIDITY antes de la primera sincronización, se aplica la recuperaci�
   `WORKER_EVENTS_CONCURRENCY` huecos) con Gmail y Microsoft. Cada proceso ejecuta como mucho
   `max(1, min(WORKER_IMAP_SYNC_CONCURRENCY, WORKER_EVENTS_CONCURRENCY − 1))` a la vez (2 con los valores por
   defecto, 2 y 5): con `WORKER_EVENTS_CONCURRENCY` ≥ 2 queda al menos un hueco que IMAP no puede ocupar; con
-  `WORKER_EVENTS_CONCURRENCY=1` IMAP puede ocupar el único hueco y **no** queda ninguno reservado (no usar 1 con
-  IMAP activado). Los huecos son por proceso. Un
+  `WORKER_EVENTS_CONCURRENCY=1` IMAP podría ocupar el único hueco, así que con IMAP activado el worker **no arranca**
+  si `WORKER_EVENTS_CONCURRENCY` o `WORKER_PROCESSING_CONCURRENCY` es menor que 2 (`assertImapWorkerConcurrency`,
+  error de configuración que nombra la variable; con IMAP desactivado, 1 sigue siendo válido). Los huecos son por
+  proceso. Un
   `SYNC_ACCOUNT` IMAP que no encuentra hueco vuelve a `delayed` con su propio *token* (15–20 s): libera su hueco de
   BullMQ al momento, no gasta intentos, conserva su id (la coalescencia lo sigue viendo pendiente) y no toca nada.
   No hay cola ni motor IMAP paralelo. Verificado con BullMQ real (`imap-a2-isolation.test.ts`, opt-in): con 6
   buzones IMAP saturados, 20 sincronizaciones Gmail / Microsoft terminan; sin los huecos (control) no avanza ninguna.
   Esto solo cubre la cola `email-events`.
-- **Pendiente antes de activar IMAP (F1 y F2, fuera de A2)**:
-  - F1: la cola `email-processing` **no** tiene huecos IMAP ni presupuesto por ejecución. La recuperación de
-    correos incompletos (`RECOVER_INCOMPLETE`, cada 10 min) encola allí los correos IMAP que quedaron a medias
-    (por ejemplo `ATTACHMENTS_PENDING` tras vencer el plazo de un adjunto). Cada trabajo hace una operación por el
-    mensaje y otra por cada adjunto pendiente, en serie, y sin tope en el número de adjuntos, así que puede ocupar
-    su hueco unos (1 + adjuntos) × 180 s. Trabajos IMAP lentos pueden ocupar los **diez** huecos de
-    `WORKER_PROCESSING_CONCURRENCY` y retrasar la reanudación de correos de Gmail / Microsoft (no su ingesta
-    normal, que va por `email-events`). Medido con BullMQ real (`imap-a2-processing-risk.test.ts`, plazos
-    acortados a 1,5 s): 10 trabajos IMAP ocupan los 10 huecos y Gmail / Microsoft esperan un plazo completo, o
-    tres con tres adjuntos pendientes. Esa prueba mide el riesgo; no demuestra ningún aislamiento.
-  - F2: el lote de recuperación toma los 100 correos incompletos más antiguos de todos los proveedores
-    (`processing_started_at` no cambia al reanudar): correos IMAP atascados pueden llenarlo y retrasar que se
-    encolen los de Gmail / Microsoft.
-  - Mientras `imapSyncEnabled` sea `false` no hay exposición: `processEmail` descarta los correos IMAP sin
-    conectar. Ambos puntos requieren corrección o una decisión explícita antes de activar IMAP; corregirlos toca
-    el procesador de `email-processing` y la política de recuperación, compartidos con Gmail / Microsoft.
-- Pruebas opt-in de A2 con BullMQ real (`imap-a2-isolation.test.ts`, `imap-a2-processing-risk.test.ts`): solo con
+- **Recuperación de correos incompletos en `email-processing` (A2.1, F1; implementado en local, sin commit)**: la
+  recuperación (`RECOVER_INCOMPLETE`, cada 10 min) encola en esa cola los correos IMAP que quedaron a medias (por
+  ejemplo `ATTACHMENTS_PENDING` tras vencer el plazo de un adjunto). Cada trabajo hace una operación por el mensaje y
+  otra por cada adjunto pendiente, en serie y sin tope en el número de adjuntos; antes de A2.1 podía ocupar su hueco
+  unos (1 + adjuntos) × 180 s, y trabajos IMAP lentos podían ocupar los **diez** huecos de
+  `WORKER_PROCESSING_CONCURRENCY` y retrasar la reanudación de correos de Gmail / Microsoft. Ahora, solo para los
+  trabajos cuyo `provider` es `IMAP` (lo fija `RECOVER_INCOMPLETE` desde `email_accounts.provider`):
+  - huecos propios por proceso, `max(1, min(WORKER_IMAP_PROCESSING_CONCURRENCY, WORKER_PROCESSING_CONCURRENCY − 1))`
+    (2 con los valores por defecto, 2 y 10; con IMAP activado, `WORKER_PROCESSING_CONCURRENCY` menor que 2 impide
+    arrancar el worker, porque no quedaría ningún hueco reservado). Un
+    trabajo que no encuentra hueco vuelve a `delayed` con su propio *token* (15–20 s), como en `email-events`: libera
+    su hueco de BullMQ, no gasta intentos, conserva su id y no toca nada. Si BullMQ rechaza el movimiento (por
+    ejemplo, bloqueo perdido), ese error falla el trabajo como cualquier otro;
+  - presupuesto del trabajo (`IMAP_PROCESSING_BUDGET`), con tres límites distintos contados desde que el trabajo
+    toma su hueco:
+    - **inicio (6 min)**: después no empieza ninguna operación IMAP; una operación que aún esperaba conexión del
+      *pool* tampoco la abre ni la usa. Los adjuntos que no empezaron quedan pendientes (ni se consultan en Storage),
+      salvo los del mensaje que el trabajo ya tiene en memoria (abajo), que no necesitan ninguna operación;
+    - **plazo de cada operación** (`IMAP_OPERATION_DEADLINES`: 180 s un mensaje o un adjunto, con su conexión):
+      una operación empezada antes del inicio dispone de su plazo completo, el límite duro nunca lo recorta;
+    - **límite duro (9 min)**: toda operación IMAP del trabajo aún abierta se cierra (socket destruido; su rechazo
+      tardío se consume).
+    **No** es la duración máxima del trabajo: después de una operación sigue el trabajo de base de datos, Storage
+    y Redis (guardar contenidos, estados, avisos), cada llamada acotada solo por su propio plazo (por ejemplo
+    `SUPABASE_HTTP_TIMEOUT_MS`, 60 s, con reintentos en Storage). Si quedan contenidos pendientes, el correo sigue
+    `PROCESSING` / `ATTACHMENTS_PENDING` (nunca `PROCESSED`) y el reintento de BullMQ, con la política de siempre,
+    lo retoma: solo guarda los contenidos que faltan (nada duplicado). El cursor de sincronización no se toca;
+  - **reutilización del mensaje** (`message-scope.ts`): dentro de un trabajo, el mensaje que el adaptador ya leyó
+    (al procesarlo, o en la primera descarga de un adjunto) sirve las demás descargas de adjuntos de ese mismo
+    mensaje sin volver a leerlo del servidor. Antes cada adjunto volvía a leer el mensaje entero (hasta 10 MiB):
+    con un servidor lento, un correo con muchos adjuntos podía agotar los 25 intentos de la recuperación y quedar
+    `FAILED` con contenidos sin guardar (en el caso extremo, sin ninguno). Ahora un mensaje que se puede leer
+    dentro de su plazo guarda todos sus adjuntos en el mismo intento. Alcance: un solo trabajo y un solo mensaje,
+    identificado por cuenta + UIDVALIDITY + UID (nunca otra cuenta, otra generación del buzón u otro UID); se
+    vacía al terminar el trabajo (éxito, fallo, presupuesto o apagado) y nunca guarda el resultado tardío de una
+    operación ya vencida. Memoria: como mucho un mensaje (≤ 10 MiB, `IMAP_MAX_MESSAGE_BYTES`; tras la primera
+    extracción solo sus adjuntos decodificados, que ocupan como mucho lo mismo) por trabajo IMAP de esta cola, es
+    decir, ≤ 10 MiB × `WORKER_IMAP_PROCESSING_CONCURRENCY` por proceso (20 MiB con el valor por defecto), más el
+    análisis MIME transitorio. Las sincronizaciones (`email-events`) no reutilizan: allí cada adjunto sigue leyendo
+    el mensaje, y lo que no quepa en su presupuesto queda pendiente para esta recuperación;
+  - un buzón pausado o desconectado sigue sin abrir conexión (M1: el trabajo se descarta al empezar). Una pausa
+    durante el trabajo no lo detiene; lo acota el presupuesto. El apagado cierra las operaciones y no deja empezar
+    otras; los huecos y la memoria del mensaje se liberan al terminar cada trabajo.
+  Gmail / Microsoft no pasan por ese código. Verificado con BullMQ real (`imap-a2-1-processing-isolation.test.ts`,
+  opt-in): con 10 trabajos IMAP saturados, 2 ocupan sus huecos, 8 vuelven a `delayed` con 0 intentos y los 20
+  trabajos de Gmail / Microsoft terminan como sin IMAP; sin los huecos (control, igual que
+  `imap-a2-processing-risk.test.ts`) no avanza ninguno; un trabajo con 30 adjuntos cuya lectura se cuelga ocupa su
+  hueco hasta el límite duro y el reintento guarda los 30 leyendo el mensaje una sola vez. Si un trabajo lleva un `provider` distinto del de su cuenta,
+  no usa estos huecos (solo lo produce `RECOVER_INCOMPLETE`, desde la base de datos).
+- **Pendiente antes de activar IMAP (F2, fuera de A2 y A2.1)**: el lote de recuperación toma los 100 correos
+  incompletos más antiguos de todos los proveedores (`processing_started_at` no cambia al reanudar): correos IMAP
+  atascados pueden llenarlo e impedir que se encolen y recuperen los incompletos de Gmail / Microsoft. A2.1 no lo
+  resuelve (limita cuántos trabajos IMAP se ejecutan, no cuántos entran en el lote). Mientras `imapSyncEnabled` sea
+  `false` no hay exposición (`processEmail` descarta los correos IMAP sin conectar). Requiere corrección o una
+  decisión explícita antes de activar IMAP; corregirlo cambia la política de recuperación, común a Gmail / Microsoft.
+- Pruebas opt-in de A2 / A2.1 con BullMQ real (`imap-a2-isolation.test.ts`, `imap-a2-processing-risk.test.ts`,
+  `imap-a2-1-processing-isolation.test.ts`): solo con
   `A2_BULLMQ_URL` hacia un Valkey **desechable** en esta máquina (la guarda de E4.4 rechaza todo lo que no sea TCP
   a loopback). Ambas vacían la base de datos entre escenarios: antes comprueban que estaba vacía al empezar (o que
   es suya) y que ninguna otra suite la usa; si no, fallan sin tocar nada. Se ejecutan **en serie**:
   `pnpm exec vitest run src/test/imap-a2-isolation.test.ts src/test/imap-a2-processing-risk.test.ts
-  --no-file-parallelism`. Nunca contra un Redis / Valkey compartido, de desarrollo o de producción. Sin la
+  src/test/imap-a2-1-processing-isolation.test.ts --no-file-parallelism`. Nunca contra un Redis / Valkey compartido, de desarrollo o de producción. Sin la
   variable (CI) se omiten.
 - `cursor.ts` — reexporta el cursor compartido (`imap:v1:<UIDVALIDITY>:<UID>`, id `<UIDVALIDITY>:<UID>`).
 - `normalize.ts` — MIME con `postal-mime` (límites de partes, anidamiento y cabeceras; cuerpos de hasta

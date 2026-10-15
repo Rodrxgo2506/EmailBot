@@ -140,8 +140,20 @@ const eventDeps: Omit<HandleEventDeps, "logger"> = {
   ...(config.imapSyncEnabled ? { imapSlots: createImapSyncSlots(imapSyncSlotCount(config.eventsConcurrency, config.imapSyncConcurrency)) } : {})
 };
 
-// Processors (job-processors.ts): failure mapping, Sentry, and the IMAP A2 "slots busy" delay.
-const processors = createJobProcessors({ eventDeps, processDeps, accounts, realtime, logger, reportJobFailure, jobType });
+// Processors (job-processors.ts): failure mapping, Sentry, and the IMAP A2 / A2.1 "slots busy" delay.
+// IMAP A2.1: IMAP email-processing jobs (recovery of incomplete emails) get their own slots and a budget.
+const processors = createJobProcessors({
+  eventDeps,
+  processDeps,
+  accounts,
+  realtime,
+  logger,
+  reportJobFailure,
+  jobType,
+  ...(config.imapSyncEnabled
+    ? { imapProcessingSlots: createImapSyncSlots(imapSyncSlotCount(config.processingConcurrency, config.imapProcessingConcurrency)) }
+    : {})
+});
 
 const eventsWorker = new Worker<EmailEventJob>(QUEUE_NAMES.emailEvents, processors.events, { connection, concurrency: config.eventsConcurrency });
 

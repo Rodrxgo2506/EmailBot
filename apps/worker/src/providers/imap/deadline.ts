@@ -18,7 +18,10 @@ import { ProviderTransientError } from "../types.js";
  *
  * A synchronization run of an IMAP mailbox also has a budget (withImapRunBudget, set by syncAccount): after
  * the soft limit no new message is started; at the hard limit every IMAP operation still running is closed
- * (its deadline is the earlier of its own and the hard limit). Both stay well below the 15-minute sync lock.
+ * (its deadline is the earlier of its own and the hard limit) and none is started. Both stay below the
+ * 15-minute sync lock. A2.1: an IMAP job of the email-processing queue (recovery of an incomplete email) runs
+ * under IMAP_PROCESSING_BUDGET (set by the job runner, job-processors.ts), whose START limit comes before its
+ * hard limit: no operation starts after the start limit, one already started keeps its own full deadline.
  *
  * abortImapOperations() (worker shutdown) expires every running operation and refuses new ones, so
  * worker.close() never waits for a slow IMAP server.
@@ -38,9 +41,32 @@ export const IMAP_OPERATION_DEADLINES = Object.freeze({
 /**
  * Budget of one IMAP synchronization run (SYNC_LOCK_TTL_MS is 15 minutes, never renewed). Soft: no message
  * is started after it. Hard: every IMAP operation of the run is closed at it. The 4 minutes left before the
- * lock can expire cover the database work of the messages already fetched and the lock release.
+ * lock can expire are meant for the database work of the messages in flight and the lock release, but are NOT
+ * a strict guarantee: the budget does not cut Supabase / Redis calls (each bounded only by its own timeout).
+ * A longer run can overlap the next one; the cursor compare-and-set and the insert dedup keep it safe.
  */
 export const IMAP_RUN_BUDGET = Object.freeze({ softMs: 8 * 60_000, hardMs: 11 * 60_000 });
+
+/**
+ * A2.1: budget of one IMAP job of the email-processing queue (recovery of an incomplete email). Three separate
+ * limits, from the start of the job:
+ *   - start (6 min): no IMAP operation starts after it, and an operation still waiting for a pooled connection
+ *     then never opens or uses one; the attachments not started stay pending (the email remains resumable);
+ *   - per operation (IMAP_OPERATION_DEADLINES, e.g. fetchMs 180 s): an operation started before the start limit
+ *     keeps its full deadline (hardMs - startMs >= fetchMs, so the hard limit never shortens it);
+ *   - hard (9 min): every IMAP operation of the job still open is closed (socket destroyed), whatever happens.
+ * NOT a limit on the job: the database / Storage / Redis work after an operation (each call bounded only by its
+ * own timeout) can run past 9 minutes. Together with the message reuse (message-scope.ts) a message whose source
+ * can be read within its deadline gets all its attachments in the same job.
+ */
+export const IMAP_PROCESSING_BUDGET = Object.freeze({ softMs: 6 * 60_000, startMs: 6 * 60_000, hardMs: 9 * 60_000 });
+
+/** Limits of a run budget (withImapRunBudget). startMs (default hardMs): no IMAP operation starts after it. */
+export interface ImapRunBudgetLimits {
+  softMs: number;
+  hardMs: number;
+  startMs?: number;
+}
 
 export type ImapOperationKind = "connect" | "list" | "fetch";
 
@@ -88,6 +114,8 @@ class OperationGuard {
 
 interface RunBudget {
   softDeadlineAt: number;
+  /** No IMAP operation starts at or after it (the hard limit unless the budget sets startMs). */
+  startDeadlineAt: number;
   hardDeadlineAt: number;
 }
 
@@ -104,8 +132,9 @@ let aborted = false;
 export async function runImapOperation<T>(kind: ImapOperationKind, ms: number, fn: () => Promise<T>): Promise<T> {
   if (aborted) throw new ImapDeadlineError(kind, "shutdown");
   const now = Date.now();
-  const hard = runBudgets.getStore()?.hardDeadlineAt ?? Number.POSITIVE_INFINITY;
-  if (hard <= now) throw new ImapDeadlineError(kind, "run_budget");
+  const budget = runBudgets.getStore();
+  const hard = budget?.hardDeadlineAt ?? Number.POSITIVE_INFINITY;
+  if ((budget?.startDeadlineAt ?? Number.POSITIVE_INFINITY) <= now) throw new ImapDeadlineError(kind, "run_budget");
   const byBudget = hard < now + ms;
   const guard = new OperationGuard(kind);
   running.add(guard);
@@ -171,10 +200,23 @@ export function assertImapOperationAlive(): void {
   if (expired) throw expired;
 }
 
-/** Runs one IMAP synchronization under the run budget (syncAccount). */
-export function withImapRunBudget<T>(budget: { softMs: number; hardMs: number }, fn: () => Promise<T>): Promise<T> {
+/**
+ * A2.1: an operation that only now gets its connection (it waited for the pool) must not begin its network work
+ * once the run's start limit passed: throws ImapDeadlineError (run_budget). Also refuses after a shutdown.
+ */
+export function assertImapOperationMayStart(): void {
+  assertImapOperationAlive();
+  const guard = operations.getStore();
+  if (guard && imapOperationsRefused()) throw new ImapDeadlineError(guard.kind, aborted ? "shutdown" : "run_budget");
+}
+
+/** Runs one IMAP synchronization (syncAccount) or one IMAP email-processing job (A2.1) under a run budget. */
+export function withImapRunBudget<T>(budget: ImapRunBudgetLimits, fn: () => Promise<T>): Promise<T> {
   const start = Date.now();
-  return runBudgets.run({ softDeadlineAt: start + budget.softMs, hardDeadlineAt: start + budget.hardMs }, fn);
+  return runBudgets.run(
+    { softDeadlineAt: start + budget.softMs, startDeadlineAt: start + Math.min(budget.startMs ?? budget.hardMs, budget.hardMs), hardDeadlineAt: start + budget.hardMs },
+    fn
+  );
 }
 
 /** True once the current run must not start another message (soft budget reached, or worker shutdown). */
@@ -182,6 +224,17 @@ export function imapRunBudgetExhausted(): boolean {
   if (aborted) return true;
   const budget = runBudgets.getStore();
   return budget !== undefined && Date.now() >= budget.softDeadlineAt;
+}
+
+/**
+ * True once no IMAP operation may start in the current run: its start limit passed (the hard limit unless the
+ * budget sets startMs), or worker shutdown (runImapOperation refuses them then; this lets a caller stop before
+ * doing the work around them).
+ */
+export function imapOperationsRefused(): boolean {
+  if (aborted) return true;
+  const budget = runBudgets.getStore();
+  return budget !== undefined && Date.now() >= budget.startDeadlineAt;
 }
 
 /** Worker shutdown: closes every running IMAP operation and refuses new ones. */

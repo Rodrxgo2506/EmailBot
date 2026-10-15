@@ -1,4 +1,4 @@
-import { encryptionKeyEnv, graphLifecycleUrl, optionalEnv, parseEnv, type OAuthClientConfig } from "@emailbot/shared";
+import { encryptionKeyEnv, EnvValidationError, graphLifecycleUrl, optionalEnv, parseEnv, type OAuthClientConfig } from "@emailbot/shared";
 import { productionUrlProblem, PUBLIC_URL, REDIS_URL } from "@emailbot/validation";
 import { z } from "zod";
 
@@ -26,10 +26,17 @@ const envSchema = z.object({
   WORKER_EVENTS_CONCURRENCY: z.coerce.number().int().min(1).max(100).default(5),
   WORKER_PROCESSING_CONCURRENCY: z.coerce.number().int().min(1).max(100).default(10),
   /**
-   * IMAP A2: IMAP synchronizations run at once by one process, out of WORKER_EVENTS_CONCURRENCY (always
-   * leaving at least one events slot to Gmail / Microsoft). Only used when IMAP synchronization is enabled.
+   * IMAP A2: IMAP synchronizations run at once by one process, out of WORKER_EVENTS_CONCURRENCY (one events
+   * slot stays for Gmail / Microsoft only when WORKER_EVENTS_CONCURRENCY >= 2; see imapSyncSlotCount). Only
+   * used when IMAP synchronization is enabled.
    */
   WORKER_IMAP_SYNC_CONCURRENCY: z.coerce.number().int().min(1).max(100).default(2),
+  /**
+   * IMAP A2.1: IMAP jobs of the email-processing queue (recovery of incomplete emails) run at once by one process,
+   * out of WORKER_PROCESSING_CONCURRENCY (one slot stays for Gmail / Microsoft only when it is >= 2). Only used
+   * when IMAP synchronization is enabled.
+   */
+  WORKER_IMAP_PROCESSING_CONCURRENCY: z.coerce.number().int().min(1).max(100).default(2),
   /** Recovery polling (not the primary ingestion once Gmail push is enabled). 0 disables it. */
   WORKER_POLL_INTERVAL_MINUTES: z.coerce.number().int().min(0).max(1440).default(5),
   /**
@@ -114,6 +121,8 @@ export interface WorkerConfig {
   processingConcurrency: number;
   /** IMAP A2: requested IMAP synchronizations at once (see imapSyncSlotCount). */
   imapSyncConcurrency: number;
+  /** IMAP A2.1: requested IMAP email-processing jobs at once (see imapSyncSlotCount). */
+  imapProcessingConcurrency: number;
   pollIntervalMinutes: number;
   /** null = Gmail push disabled (polling only). */
   gmailPubSubTopic: string | null;
@@ -142,9 +151,31 @@ function oauth(
   return { clientId, clientSecret, redirectUri, tenant };
 }
 
+/** IMAP A2.1: queue concurrency needed so the IMAP slots always leave one slot to Gmail / Microsoft. */
+export const IMAP_MIN_QUEUE_CONCURRENCY = 2;
+
+/**
+ * IMAP A2 / A2.1: with IMAP synchronization enabled, each shared queue needs a concurrency of 2 or more: with 1,
+ * its only slot would be IMAP's (imapSyncSlotCount) and nothing would be reserved for Gmail / Microsoft. Throws
+ * EnvValidationError naming every offending variable. IMAP disabled: no requirement (concurrency 1 stays valid).
+ */
+export function assertImapWorkerConcurrency(config: Pick<WorkerConfig, "imapSyncEnabled" | "eventsConcurrency" | "processingConcurrency">): void {
+  if (!config.imapSyncEnabled) return;
+  const issues: string[] = [];
+  for (const [name, value] of [
+    ["WORKER_EVENTS_CONCURRENCY", config.eventsConcurrency],
+    ["WORKER_PROCESSING_CONCURRENCY", config.processingConcurrency]
+  ] as const) {
+    if (value < IMAP_MIN_QUEUE_CONCURRENCY) {
+      issues.push(`${name}: must be at least ${IMAP_MIN_QUEUE_CONCURRENCY} while IMAP synchronization is enabled (got ${value}), so IMAP never takes every slot of the queue`);
+    }
+  }
+  if (issues.length > 0) throw new EnvValidationError(issues);
+}
+
 export function loadWorkerConfig(source: NodeJS.ProcessEnv = process.env): WorkerConfig {
   const env = parseEnv(envSchema, source);
-  return {
+  const config: WorkerConfig = {
     env: env.NODE_ENV,
     logLevel: env.LOG_LEVEL ?? (env.NODE_ENV === "production" ? "info" : "debug"),
     supabaseUrl: env.SUPABASE_URL,
@@ -162,6 +193,7 @@ export function loadWorkerConfig(source: NodeJS.ProcessEnv = process.env): Worke
     eventsConcurrency: env.WORKER_EVENTS_CONCURRENCY,
     processingConcurrency: env.WORKER_PROCESSING_CONCURRENCY,
     imapSyncConcurrency: env.WORKER_IMAP_SYNC_CONCURRENCY,
+    imapProcessingConcurrency: env.WORKER_IMAP_PROCESSING_CONCURRENCY,
     pollIntervalMinutes: env.WORKER_POLL_INTERVAL_MINUTES,
     gmailPubSubTopic: env.GMAIL_PUBSUB_TOPIC ?? null,
     microsoftPush: env.MICROSOFT_GRAPH_NOTIFICATION_URL
@@ -176,4 +208,6 @@ export function loadWorkerConfig(source: NodeJS.ProcessEnv = process.env): Worke
     // Not read from the environment on purpose (see WorkerConfig.imapSyncEnabled).
     imapSyncEnabled: false
   };
+  assertImapWorkerConcurrency(config);
+  return config;
 }

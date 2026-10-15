@@ -20,6 +20,17 @@ export interface SlowServerOptions {
   dripMetaUids?: number[];
   /** UIDs whose source FETCH (BODY.PEEK[]) drips. */
   dripSourceUids?: number[];
+  /**
+   * A2.1: the Nth source FETCH of this server (1-based, any UID) and every later one drip. Mutable at runtime
+   * (server.options.dripSourceFrom = 0 heals the server), so a retry can succeed. 0 = off.
+   */
+  dripSourceFrom?: number;
+  /** A2.1: every message is multipart/mixed with this many small PDF attachments (0 = text/plain only). */
+  attachments?: number;
+  /** A2.1: a source FETCH that does not drip is answered completely, but only after this delay (slow, finite). Mutable. */
+  sourceDelayMs?: number;
+  /** A2.1: written into every attachment, so two servers (two accounts) serve different bytes for the same UID. */
+  label?: string;
   logout?: "normal" | "hang";
   uids?: number[];
   uidValidity?: number;
@@ -35,10 +46,14 @@ export interface SlowServer {
   dripBytes(): number;
   /** Drip timers still running. */
   activeDrips(): number;
+  /** Delayed (sourceDelayMs) answers not sent yet. */
+  pendingDelays(): number;
   /** Sockets still open on the server side. */
   openSockets(): number;
   /** Connections accepted so far. */
   connections(): number;
+  /** Source FETCHes (BODY.PEEK[]) received so far, answered or dripped. */
+  sourceFetches(): number;
   /** Resolves once every socket accepted so far is closed (or rejects after `ms`). */
   allClosed(ms?: number): Promise<void>;
   stop(): Promise<void>;
@@ -59,11 +74,26 @@ export const localImapOptions = (port: number): ImapConnectionOptions => ({
   lookup: noLookup
 });
 
-function messageOf(uid: number): { header: Buffer; body: Buffer; size: number } {
+function messageOf(uid: number, attachments = 0, label = ""): { header: Buffer; body: Buffer; size: number } {
+  const boundary = `a2-boundary-${uid}`;
+  const contentType = attachments > 0 ? `multipart/mixed; boundary="${boundary}"` : "text/plain; charset=utf-8";
   const header = Buffer.from(
-    `From: Streaming <info@account.streaming.example>\r\nTo: me@empresa-correo.com\r\nSubject: Codigo ${uid}\r\nMessage-ID: <a2-${uid}@streaming.example>\r\nDate: Wed, 14 Oct 2026 10:00:00 +0000\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n`
+    `From: Streaming <info@account.streaming.example>\r\nTo: me@empresa-correo.com\r\nSubject: Codigo ${uid}\r\nMessage-ID: <a2-${uid}@streaming.example>\r\nDate: Wed, 14 Oct 2026 10:00:00 +0000\r\nMIME-Version: 1.0\r\nContent-Type: ${contentType}\r\n\r\n`
   );
-  const body = Buffer.from(`Tu codigo es 4821 (${uid})\r\n`);
+  const text = `Tu codigo es 4821 (${uid})\r\n`;
+  if (attachments === 0) {
+    const body = Buffer.from(text);
+    return { header, body, size: header.length + body.length };
+  }
+  // Synthetic attachments only (a few bytes each).
+  const parts = [`--${boundary}\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n${text}`];
+  for (let n = 0; n < attachments; n++) {
+    const content = Buffer.from(`%PDF-1.4 factura ${n} del mensaje ${uid}${label ? ` ${label}` : ""}`).toString("base64");
+    parts.push(
+      `--${boundary}\r\nContent-Type: application/pdf; name="factura-${n}.pdf"\r\nContent-Disposition: attachment; filename="factura-${n}.pdf"\r\nContent-Transfer-Encoding: base64\r\n\r\n${content}\r\n`
+    );
+  }
+  const body = Buffer.from(`${parts.join("")}--${boundary}--\r\n`);
   return { header, body, size: header.length + body.length };
 }
 
@@ -87,6 +117,10 @@ export async function startSlowImapServer(options: SlowServerOptions = {}): Prom
     search: options.search ?? "normal",
     dripMetaUids: new Set(options.dripMetaUids ?? []),
     dripSourceUids: new Set(options.dripSourceUids ?? []),
+    dripSourceFrom: options.dripSourceFrom ?? 0,
+    attachments: options.attachments ?? 0,
+    sourceDelayMs: options.sourceDelayMs ?? 0,
+    label: options.label ?? "",
     logout: options.logout ?? "normal",
     uids: options.uids ?? [1, 2, 3],
     uidValidity: options.uidValidity ?? 7,
@@ -95,9 +129,11 @@ export async function startSlowImapServer(options: SlowServerOptions = {}): Prom
   const sockets = new Set<net.Socket>();
   const closed: Array<Promise<void>> = [];
   const drips = new Set<NodeJS.Timeout>();
+  const delays = new Set<NodeJS.Timeout>();
   const commands: string[] = [];
   let dripBytes = 0;
   let connections = 0;
+  let sourceFetches = 0;
 
   /** Writes `prefix`, then one more byte every dripMs, forever (until the socket closes). */
   const drip = (socket: net.Socket, prefix: string) => {
@@ -126,9 +162,11 @@ export async function startSlowImapServer(options: SlowServerOptions = {}): Prom
     const parts: Buffer[] = [];
     for (const uid of uidSet(match[1] ?? "", settings.uids)) {
       const seq = settings.uids.indexOf(uid) + 1;
-      if (wantsSource && settings.dripSourceUids.has(uid)) return drip(socket, `* ${seq} FETCH (UID ${uid} BODY[] {100000}\r\n`);
+      if (wantsSource) sourceFetches += 1;
+      const dripFrom = settings.dripSourceFrom > 0 && sourceFetches >= settings.dripSourceFrom;
+      if (wantsSource && (settings.dripSourceUids.has(uid) || dripFrom)) return drip(socket, `* ${seq} FETCH (UID ${uid} BODY[] {100000}\r\n`);
       if (!wantsSource && /BODYSTRUCTURE/i.test(items) && settings.dripMetaUids.has(uid)) return drip(socket, `* ${seq} FETCH (UID ${uid} RFC822.SIZE `);
-      const message = messageOf(uid);
+      const message = messageOf(uid, settings.attachments, settings.label);
       const out: Buffer[] = [Buffer.from(`* ${seq} FETCH (UID ${uid}`)];
       if (/RFC822\.SIZE/i.test(items)) out.push(Buffer.from(` RFC822.SIZE ${message.size}`));
       if (/INTERNALDATE/i.test(items)) out.push(Buffer.from(` INTERNALDATE "${internalDate()}"`));
@@ -145,7 +183,18 @@ export async function startSlowImapServer(options: SlowServerOptions = {}): Prom
       parts.push(...out);
     }
     parts.push(Buffer.from(`${tag} OK done\r\n`));
-    socket.write(Buffer.concat(parts));
+    if (!wantsSource || settings.sourceDelayMs <= 0) return socket.write(Buffer.concat(parts));
+    // Slow but finite: the whole answer after sourceDelayMs (unless the client closed the socket first).
+    const timer = setTimeout(() => {
+      delays.delete(timer);
+      if (!socket.destroyed) socket.write(Buffer.concat(parts));
+    }, settings.sourceDelayMs);
+    delays.add(timer);
+    socket.once("close", () => {
+      clearTimeout(timer);
+      delays.delete(timer);
+    });
+    return true;
   };
 
   const server = net.createServer((socket) => {
@@ -212,8 +261,10 @@ export async function startSlowImapServer(options: SlowServerOptions = {}): Prom
     commands,
     dripBytes: () => dripBytes,
     activeDrips: () => drips.size,
+    pendingDelays: () => delays.size,
     openSockets: () => sockets.size,
     connections: () => connections,
+    sourceFetches: () => sourceFetches,
     allClosed: async (ms = 2_000) => {
       let timer: NodeJS.Timeout | undefined;
       await Promise.race([
@@ -226,6 +277,8 @@ export async function startSlowImapServer(options: SlowServerOptions = {}): Prom
     stop: async () => {
       for (const timer of drips) clearInterval(timer);
       drips.clear();
+      for (const timer of delays) clearTimeout(timer);
+      delays.clear();
       for (const socket of sockets) socket.destroy();
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }

@@ -222,14 +222,29 @@ export async function normalizeImapMessage(
   };
 }
 
-/** The bytes of one attachment ("part-<n>") of a full message; null when the message or the part cannot be read. */
-export async function extractImapAttachment(source: Uint8Array, providerAttachmentId: string): Promise<Uint8Array | null> {
+/** Index of an attachment id ("part-<n>", the order of normalizeImapMessage); null when it is not one. */
+export function imapAttachmentIndex(providerAttachmentId: string): number | null {
   const match = /^part-(0|[1-9][0-9]{0,3})$/.exec(providerAttachmentId);
-  if (!match) return null;
-  const parsed = await parse(source);
-  const attachment = parsed?.attachments[Number(match[1])];
-  if (!attachment) return null;
+  return match ? Number(match[1]) : null;
+}
+
+function attachmentBytes(attachment: ParsedEmail["attachments"][number]): Uint8Array {
   const content = attachment.content;
   if (typeof content === "string") return new Uint8Array(Buffer.from(content, attachment.encoding === "base64" ? "base64" : "utf8"));
   return content instanceof Uint8Array ? content : new Uint8Array(content);
+}
+
+/** The bytes of one attachment ("part-<n>") of a full message; null when the message or the part cannot be read. */
+export async function extractImapAttachment(source: Uint8Array, providerAttachmentId: string): Promise<Uint8Array | null> {
+  const index = imapAttachmentIndex(providerAttachmentId);
+  if (index === null) return null;
+  const parsed = await parse(source);
+  const attachment = parsed?.attachments[index];
+  return attachment ? attachmentBytes(attachment) : null;
+}
+
+/** A2.1: the bytes of EVERY attachment of a full message, in "part-<n>" order (one parse); null when it cannot be read. */
+export async function extractImapAttachments(source: Uint8Array): Promise<Uint8Array[] | null> {
+  const parsed = await parse(source);
+  return parsed ? parsed.attachments.map(attachmentBytes) : null;
 }

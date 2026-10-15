@@ -44,7 +44,8 @@ import { localImapOptions, SLOW_LOGIN, startSlowImapServer, type SlowServer } fr
  * In memory: the database stores and the Gmail / Microsoft APIs. "attachments" scenario: the IMAP message
  * metadata comes from a fake fetchMessage (3 attachments); every download is the REAL adapter call.
  *
- * It MEASURES the pending risk F1 (docs/imap.md, "Worker"); it does not prove any isolation. The database is
+ * It MEASURES risk F1 with the processor WITHOUT the A2.1 IMAP slots (as before A2.1): a control, not a proof of
+ * isolation; the production wiring with the slots is tested in imap-a2-1-processing-isolation.test.ts. The database is
  * emptied between scenarios only after a2-bullmq-target.ts proved it belongs to these suites (empty at the
  * start, one suite at a time). Run together with imap-a2-isolation.test.ts only with --no-file-parallelism.
  * Every resource is closed in `finally`, also on failure. Synthetic messages and fictitious logins only.
