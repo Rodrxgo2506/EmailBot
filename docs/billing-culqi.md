@@ -83,6 +83,10 @@ token + plan + periodo + T&C ────► POST /api/billing/subscriptions
   - `payment_events_external_payment_unique`: un cargo se registra una sola vez;
   - `billing_activate_culqi_subscription` exige un id de cargo `chr_(test|live)_…` del mismo entorno y que la clave
     de activación **sea** ese id; si no, error y nada cambia.
+- Migraciones `20261007150000` (valor `REVIEW_REQUIRED` del enum, en su propio archivo) y
+  `20261007150100_culqi_billing_review_required.sql`: columnas de traza (`review_required_at`, `last_reconciled_at`,
+  `last_charge_id`, `last_outcome_type`, `last_outcome_code`, `last_decline_code`), transiciones, la función
+  `billing_mark_culqi_review_required` (solo `service_role`) y la guarda `CONFLICT` en la activación.
 - RLS: ningún miembro accede por la Data API. `service_role` (API + worker): `SELECT / INSERT / UPDATE`, nunca `DELETE`.
 - Lo que toca `subscriptions`, `payment_events` o `platform_audit_logs` pasa por tres funciones `SECURITY DEFINER`
   (solo `service_role`):
@@ -102,10 +106,12 @@ token + plan + periodo + T&C ────► POST /api/billing/subscriptions
 | `FAILED` | Primer cobro rechazado, suscripción no creada o checkout caducado (`confirmation_timeout`, `checkout_incomplete`) | sin plan |
 | `CANCELED` | Cancelada (motivo `USER`, `PROVIDER` o `UPGRADED`) | sin cambio inmediato: el periodo pagado se respeta |
 | `EXPIRED` | Vencida en Culqi | sin cambio inmediato: expira al final del periodo |
+| `REVIEW_REQUIRED` | El cargo no se pudo confirmar ni rechazar en `CULQI_UNCONFIRMED_REVIEW_AFTER_HOURS` (168 h); no se sabe si hubo un pago legítimo (`failure_code` `CULQI_UNCONFIRMED_REVIEW`) | sin plan nuevo; **no se cancela en Culqi** y **no bloquea** un nuevo checkout |
 
-Transiciones permitidas (BD): `PENDING → FAILED / CANCELED / EXPIRED`, `FAILED → CANCELED / EXPIRED`,
+Transiciones permitidas (BD): `PENDING → FAILED / CANCELED / EXPIRED / REVIEW_REQUIRED` (este último solo con
+`billing_mark_culqi_review_required`), `REVIEW_REQUIRED → FAILED / CANCELED / EXPIRED`, `FAILED → CANCELED / EXPIRED`,
 `ACTIVE → PAST_DUE / CANCELED / EXPIRED`, `PAST_DUE → CANCELED / EXPIRED`. `ACTIVE` solo por pago confirmado
-(también desde `FAILED` / `PAST_DUE` si un reintento se cobra). `CANCELED` / `EXPIRED` son terminales: un evento
+(también desde `FAILED` / `PAST_DUE` si un reintento se cobra, y desde `REVIEW_REQUIRED` con la guarda de conflicto). `CANCELED` / `EXPIRED` son terminales: un evento
 tardío no las revive.
 
 Mapper Culqi → EmailBot (`mapCulqiSubscriptionStatus`, `packages/shared/src/culqi.ts`). Los códigos de estado de
@@ -125,10 +131,11 @@ Casos cubiertos:
 | Caso | Qué pasa |
 |---|---|
 | Pago inicial verificado | `ACTIVATED` |
-| Pago inicial rechazado | `FAILED` + `payment_events` `FAILED`; la suscripción se cancela en Culqi (no cobra después) |
+| Pago inicial rechazado (rechazo confirmado: `card_declined`, u `operacion_denegada` / `DNGE0015` sin autorización) | `FAILED` + `payment_events` `FAILED`; la suscripción se cancela en Culqi (no cobra después) |
+| Cargo que no es ni éxito ni rechazo confirmados | sin activar y **sin cancelar**: sigue `PENDING` y la reconciliación lo vuelve a leer (`CHARGE_STATUS_UNCONFIRMED`); a las 168 h pasa a `REVIEW_REQUIRED` |
 | Renovación verificada | `RENEWED`, se extiende el periodo |
 | Renovación fallida | `PAST_DUE` (Culqi reintenta; no se cancela) |
-| `PENDING` sin cargo pagado tras 48 h | se cancela en Culqi y queda `FAILED` (`confirmation_timeout`) |
+| `PENDING` sin ningún cargo tras 48 h | se cancela en Culqi y queda `FAILED` (`confirmation_timeout`); con un cargo no confirmado nunca se cancela |
 | `PENDING` sin suscripción de Culqi tras 30 min | `FAILED` (`checkout_incomplete`) |
 | Culqi cancela tras reintentos | `CANCELED` (`PROVIDER`) o `EXPIRED` |
 | Cancelación del usuario | `CANCELED` (`USER`); se representa, pero no hay botón en esta fase |
@@ -263,13 +270,31 @@ Si algo no coincide: no se activa, el evento queda `IGNORED` con `REJECTED:<moti
 
 **Cargo (F1, `verifyCulqiCharge`).** Candidatos: los `chr_…` del evento y de `periods[].charges[]` de la suscripción.
 Cada uno se lee con `GET /v2/charges/{id}`:
-- `PAID` solo si `paid === true` y `outcome.code === "succesfull_charge"` (así lo escribe Culqi), importe = catálogo,
-  `currency_code = PEN`, mismo entorno, y el cargo pertenece a la suscripción (listado en ella o hecho con su tarjeta /
-  cliente; una tarjeta o cliente distinto lo invalida);
-- `DECLINED` si `paid === false` o `card_declined` → se registra el fallo una sola vez (por id de cargo);
-- cualquier otra cosa → rechazado (`CHARGE_AMOUNT_MISMATCH`, `CHARGE_CURRENCY_MISMATCH`, `CHARGE_NOT_CONFIRMED`, …).
+- integridad (si falla → `REJECTED`, nunca se aplica): mismo entorno, el cargo pertenece a la suscripción (listado en
+  ella o hecho con su tarjeta / cliente; una tarjeta o cliente distinto lo invalida), importe = catálogo
+  (`culqiAmountToCents`), `currency_code = PEN`; un cargo con `amount_refunded > 0` (`CHARGE_REFUNDED`) o en disputa
+  (`CHARGE_DISPUTED`) tampoco activa;
+- `PAID` (venta confirmada) solo con toda esta evidencia: `capture === true`, `outcome.type === "venta_exitosa"`,
+  `outcome.code === "AUT0000"`, `authorization_code` presente, `amount_refunded === 0` y `dispute === false`. Es lo que
+  devolvió el sandbox para un cargo aprobado y capturado; otros códigos no se dan por éxito;
+- `DECLINED` (rechazo confirmado, `isConfirmedCulqiDecline` en `packages/shared/src/culqi.ts`), solo con evidencia
+  explícita: el código documentado `outcome.code === "card_declined"`, o un rechazo bancario observado en el sandbox,
+  `outcome.type === "operacion_denegada"` con un código de la lista `CULQI_CONFIRMED_DECLINE_CODES` (hoy solo `DNGE0015`,
+  el primer cobro de una suscripción con la tarjeta de prueba `insufficient_funds`) y sin `authorization_code`. Otros
+  códigos `DNGE…` no se asumen. Se registra el fallo una sola vez (por id de cargo; `failure_code` = `decline_code` si
+  viene, si no el código de Culqi) y, si es el primer cobro, la suscripción se cancela en Culqi. Las comprobaciones de
+  integridad van antes: un cargo rechazado de otro importe, tarjeta o entorno es `REJECTED` y no cancela nada;
+- `UNCONFIRMED` (`CHARGE_STATUS_UNCONFIRMED`) en cualquier otro caso: **ni se activa ni se cancela**; queda en el log
+  (`billing.culqi.charge_unconfirmed`) y en la fila (`last_reconciled_at`, `last_charge_id`, `last_outcome_type`,
+  `last_outcome_code`, `last_decline_code`); la fila sigue `PENDING` y la reconciliación lo vuelve a leer (ver
+  `REVIEW_REQUIRED` más abajo).
 
-Sin cargo pagado verificado, la fila sigue `PENDING` (el evento queda `PROCESSED` con `NO_VERIFIED_CHARGE`).
+**`paid` no se usa para decidir.** En la primera prueba real del sandbox, un cargo aprobado y capturado
+(`venta_exitosa` / `AUT0000`) volvió con `paid: false`; tomarlo como rechazo canceló una suscripción legítima. Culqi
+no documenta qué significa `paid` en este caso (la descripción de la especificación no corresponde al campo).
+
+Sin cargo pagado verificado, la fila sigue `PENDING` (el evento queda `PROCESSED` con `NO_VERIFIED_CHARGE` o
+`CHARGE_STATUS_UNCONFIRMED`).
 
 **Idempotencia y orden:**
 - **Clave de activación = id del cargo** (`chr_…`), exigido también por la BD. Webhook y reconciliación del mismo cargo
@@ -289,9 +314,25 @@ Sin cargo pagado verificado, la fila sigue `PENDING` (el evento queda `PROCESSED
 **Reconciliación periódica (F3/F4, `CULQI_RECONCILE_DUE`, cada 60 min; solo si el worker tiene `CULQI_SECRET_KEY`).**
 - Suscripciones `ACTIVE` / `PAST_DUE` cuyo periodo termina en los próximos 4 días (gracia + 24 h) o terminó hace menos
   de 7 días: se aplican sus cargos nuevos (renovaciones) aunque no llegue webhook.
-- `PENDING` con suscripción de Culqi y sin cargo pagado tras **N = 48 h** (`CULQI_PENDING_CONFIRMATION_TIMEOUT_MS`):
-  se vuelve a sincronizar; si sigue sin cargo, se cancela en Culqi, se sincroniza otra vez (por si el cargo llegó
-  justo antes) y queda `FAILED` (`confirmation_timeout`). **Nunca** se cancela una suscripción con cargo pagado.
+- `PENDING` con suscripción de Culqi creados hace más de 2 h (`CULQI_RECONCILE_RETRY_WINDOW_MS`, cuando terminan los
+  reintentos del job tras el checkout): se leen **cada hora desde la base de datos** (no dependen del primer job):
+  - venta o rechazo confirmados → se aplican (ACTIVE / FAILED + cancelación);
+  - sin ningún cargo tras **48 h** (`CULQI_PENDING_CONFIRMATION_TIMEOUT_MS`) → se cancela en Culqi, se sincroniza
+    otra vez (por si el cargo llegó justo antes) y queda `FAILED` (`confirmation_timeout`);
+  - con un cargo no confirmado, un cargo rechazado por integridad (`REJECTED`) o una suscripción que no coincide →
+    **nunca se cancela**; sigue `PENDING` (`billing.culqi.pending_unconfirmed_charge`)
+    hasta **168 h** (`CULQI_UNCONFIRMED_REVIEW_AFTER_HOURS`, desde su creación) y entonces pasa a `REVIEW_REQUIRED`.
+- `REVIEW_REQUIRED` (`billing_mark_culqi_review_required`, auditado): deja de bloquear nuevos checkouts (el índice
+  único y `hasPending` solo cuentan `PENDING`), conserva toda la traza y genera la alerta
+  `billing.culqi.review_required` (organización, ids de Culqi, plan, importe, último outcome, `alert: true`). No se
+  cancela ni se activa por ese estado. Se vuelve a leer **una vez al día durante 30 días**
+  (`CULQI_REVIEW_RECONCILE_INTERVAL_MS`, `CULQI_REVIEW_RECONCILE_MAX_AGE_MS`); después, solo revisión manual:
+  - un rechazo confirmado → `FAILED` y se cancela en Culqi si sigue viva;
+  - una venta confirmada → se activa (clave = id del cargo) **solo si nada cambió desde que empezó ese checkout**;
+    si hubo un checkout posterior vivo o la suscripción de la organización cambió después, la BD devuelve
+    `CONFLICT`, no se aplica nada y se registra `billing.culqi.review_conflict` para que una persona decida;
+  - el estado de Culqi por sí solo no cambia una fila en revisión;
+  - la activación de un checkout nuevo no cancela (no reemplaza) un `REVIEW_REQUIRED` anterior.
 - `PENDING` sin suscripción de Culqi tras 30 min (`CULQI_PENDING_INCOMPLETE_TIMEOUT_MS`): `FAILED`
   (`checkout_incomplete`); el posible cliente / tarjeta en Culqi queda registrado en el log.
 - Lotes de 100; un error en una suscripción no detiene el resto.
@@ -363,6 +404,7 @@ Nada en `connect-src`: la tarjeta y el token viajan dentro del iframe de Culqi. 
 | Forma de `data` por tipo de evento | Worker | Búsqueda de ids por prefijo documentado y relectura de la suscripción |
 | Si el estado 3 «Activa» implica primer cobro hecho | Activación | Ya no importa: solo activa un cargo verificado con `GET /v2/charges/{id}`. Confirmar en sandbox que `periods[].charges[]` o el evento traen el `chr_` |
 | Estado 8 (aceptado por los SDK, no documentado) | Mapper | Sin cambio de estado; se registra |
+| Resultado de un cargo: la especificación documenta `paid` + `succesfull_charge`, el sandbox devolvió `paid: false` + `venta_exitosa` / `AUT0000` para un cargo aprobado | Activación | Éxito solo con la evidencia observada (captura, `AUT0000`, código de autorización, sin reembolso ni disputa); rechazo solo con `card_declined` o con el rechazo observado (`operacion_denegada` / `DNGE0015`, que vino con `capture: true` y `paid: false`); lo demás no activa ni cancela |
 | Semántica de `interval_count` («si envía 0 se cobrará de forma indefinida») | Planes | Verificado en sandbox: se envía y Culqi registra `interval_count: 1`, `interval_unit_time: 3` y los mismos `initial_cycles`. Falta confirmar la primera renovación |
 | Unidades de `next_billing_date` (los ejemplos mezclan segundos y ms) | Periodo | Se aceptan ambos |
 | Respuesta al crear un cliente con email repetido | Checkout | Si Culqi lo rechaza, se busca el cliente por email y se reutiliza |

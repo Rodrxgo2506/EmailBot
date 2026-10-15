@@ -418,6 +418,19 @@ describe("POST /api/billing/subscriptions", () => {
     expect(ctx.queue.enqueueEmailEvent).not.toHaveBeenCalled();
   });
 
+  it("M/N. an older REVIEW_REQUIRED checkout does not block a new one: own reservation, own Culqi subscription", async () => {
+    const culqi = culqiFake();
+    const ctx = await setup({ fetch: culqi.fetch });
+    ctx.billing.current.mockResolvedValue(summary({ id: "bill-review", status: "REVIEW_REQUIRED" }));
+    ctx.billing.hasPending.mockResolvedValue(false); // the only guard: a PENDING checkout (billing_subscriptions_one_pending)
+    expect((await subscribe(ctx)).statusCode).toBe(202);
+    expect(ctx.billing.createPending).toHaveBeenCalledTimes(1);
+    expect(culqi.calls.filter((call) => call.key === "POST /v2/recurrent/subscriptions/create")).toHaveLength(1);
+    expect(culqi.calls.some((call) => call.key.startsWith("DELETE"))).toBe(false); // the review is never cancelled
+    const current = await ctx.app.inject({ method: "GET", url: "/api/billing/subscriptions/current", headers: ctx.headers });
+    expect(current.json().billingSubscription.status).toBe("REVIEW_REQUIRED");
+  });
+
   it("GET /api/billing/subscriptions/current returns the organization's latest Culqi subscription", async () => {
     const ctx = await setup();
     ctx.billing.current.mockResolvedValue(summary({ status: "ACTIVE" }));
