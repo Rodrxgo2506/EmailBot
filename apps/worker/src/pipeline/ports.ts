@@ -161,8 +161,11 @@ export interface EmailStore {
    */
   findEmailIdByInternetMessageId?(emailAccountId: string, internetMessageId: string, receivedAt: string): Promise<string | null>;
   updateProcessingState(emailId: string, state: ProcessingStateUpdate): Promise<void>;
-  /** Incomplete emails of ACTIVE accounts whose processing started before `startedBefore`. */
-  listIncompleteEmails(options: { startedBefore: string; limit: number }): Promise<IncompleteEmail[]>;
+  /**
+   * Incomplete emails of ACTIVE accounts whose processing started before `startedBefore`, oldest first.
+   * `imap` (F2): "exclude" = every provider but IMAP, "only" = IMAP mailboxes only; absent = every provider.
+   */
+  listIncompleteEmails(options: { startedBefore: string; limit: number; imap?: "only" | "exclude" }): Promise<IncompleteEmail[]>;
   loadEnabledRules(organizationId: string): Promise<EmailRuleRow[]>;
   loadSettings(organizationId: string): Promise<OrganizationProcessingSettings>;
   /** INSERT ... ON CONFLICT (email_account_id, provider_message_id) DO NOTHING. Null = duplicate. */

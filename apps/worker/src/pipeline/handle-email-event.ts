@@ -106,7 +106,16 @@ const POLL_BATCH = 500;
 
 /** An email still RECEIVED / PROCESSING this long after it started was abandoned by its job. */
 export const RECOVERY_STALE_MS = 15 * 60 * 1000;
+/** Incomplete emails of every provider but IMAP recovered per run (unchanged; IMAP never takes a place of it, F2). */
 export const RECOVERY_BATCH = 100;
+/**
+ * F2: incomplete emails of IMAP mailboxes recovered per run, in a batch of their own (only while IMAP
+ * synchronization is enabled). Their jobs run in this process's IMAP processing slots (2 by default, up to
+ * 9 minutes each) and the sweep runs every 10 minutes: 20 is ample for several workers while keeping the IMAP
+ * backlog on email-processing small. Oldest first; an email that keeps failing reaches MAX_PROCESSING_ATTEMPTS
+ * and leaves the batch (FAILED), so the batch always moves on.
+ */
+export const IMAP_RECOVERY_BATCH = 20;
 /**
  * Every run (first attempt, BullMQ retries, recovery runs) increments
  * processing_attempts. Past this, the email is marked FAILED instead of being
@@ -751,7 +760,13 @@ export async function handleEmailEvent(job: EmailEventJob, deps: HandleEventDeps
 
     case "RECOVER_INCOMPLETE": {
       const startedBefore = new Date(Date.now() - RECOVERY_STALE_MS).toISOString();
-      const stale = await deps.emails.listIncompleteEmails({ startedBefore, limit: RECOVERY_BATCH });
+      // F2: every provider but IMAP keeps the whole batch, selected as before; IMAP mailboxes get a batch of their own
+      // (only while IMAP synchronization is enabled: disabled, their jobs would only be skipped), so incomplete IMAP
+      // emails can never fill the batch and hold back the recovery of Gmail / Microsoft ones.
+      const stale = [
+        ...(await deps.emails.listIncompleteEmails({ startedBefore, limit: RECOVERY_BATCH, imap: "exclude" })),
+        ...(deps.imapSyncEnabled === true ? await deps.emails.listIncompleteEmails({ startedBefore, limit: IMAP_RECOVERY_BATCH, imap: "only" }) : [])
+      ];
       // Without commercial access an incomplete email is left as it is (no attempt consumed, nothing queued).
       const incomplete = await withCommercialAccess(stale, deps.accounts, deps.logger, "recover_incomplete", job.type);
       let enqueued = 0;

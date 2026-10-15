@@ -201,10 +201,9 @@ las rutas siguen en 503 (estado por defecto del código).
   límites del protocolo, arriba) y E6.3 (texto de los mensajes grandes de una sola parte) están en commits **locales**
   de la rama `feat/imap-e4-abuse-hardening` (`578cec5` y `6f8c7c3`), sin publicar ni desplegar. Antes de activar
   IMAP: M1 está en un commit local (ciclo de vida, arriba) y A2 (plazos totales por operación IMAP y huecos IMAP en la
-  cola `email-events`, abajo) también; A2.1 (huecos IMAP y presupuesto en la cola `email-processing`, F1) está
-  implementado en local, sin commit. El lote de recuperación de incompletos sigue siendo común (F2, abajo): requiere
-  corrección o una decisión explícita antes de activar, y sigue haciendo falta un cambio de código que active
-  `imapAccountsEnabled` / `imapSyncEnabled`.
+  cola `email-events`, abajo) también, igual que A2.1 (huecos IMAP y presupuesto en la cola `email-processing`, F1).
+  F2 (lote de recuperación de incompletos propio para IMAP, abajo) está implementado en local, sin commit. Sigue
+  haciendo falta un cambio de código que active `imapAccountsEnabled` / `imapSyncEnabled`.
 - **H2 (pendiente, bajo)**: si un trabajo atrasado falla después de desconectar una cuenta IMAP, la base de datos
   queda bien (`DISCONNECTED`, `markError` no la toca), pero `handleAccountFailure` publica igualmente el evento
   realtime `email-account.status` `ERROR` y la web muestra el aviso "Una cuenta de correo necesita reconectarse"
@@ -336,12 +335,37 @@ cambia UIDVALIDITY antes de la primera sincronización, se aplica la recuperaci�
   `imap-a2-processing-risk.test.ts`) no avanza ninguno; un trabajo con 30 adjuntos cuya lectura se cuelga ocupa su
   hueco hasta el límite duro y el reintento guarda los 30 leyendo el mensaje una sola vez. Si un trabajo lleva un `provider` distinto del de su cuenta,
   no usa estos huecos (solo lo produce `RECOVER_INCOMPLETE`, desde la base de datos).
-- **Pendiente antes de activar IMAP (F2, fuera de A2 y A2.1)**: el lote de recuperación toma los 100 correos
-  incompletos más antiguos de todos los proveedores (`processing_started_at` no cambia al reanudar): correos IMAP
-  atascados pueden llenarlo e impedir que se encolen y recuperen los incompletos de Gmail / Microsoft. A2.1 no lo
-  resuelve (limita cuántos trabajos IMAP se ejecutan, no cuántos entran en el lote). Mientras `imapSyncEnabled` sea
-  `false` no hay exposición (`processEmail` descarta los correos IMAP sin conectar). Requiere corrección o una
-  decisión explícita antes de activar IMAP; corregirlo cambia la política de recuperación, común a Gmail / Microsoft.
+- **Lote de recuperación de incompletos (F2; implementado en local, sin commit)**: `RECOVER_INCOMPLETE` (cada 10 min)
+  tomaba un único lote de los 100 correos incompletos más antiguos de todos los proveedores. Como
+  `processing_started_at` no cambia al reanudar, los correos IMAP atascados quedaban siempre en cabeza y podían
+  llenarlo: los incompletos de Gmail / Microsoft ni siquiera se encolaban. Ahora:
+  - todos los proveedores salvo IMAP conservan el lote completo (`RECOVERY_BATCH`, 100) con la misma consulta, el
+    mismo orden y los mismos filtros (correo incompleto y estancado 15 min, buzón ACTIVE, organización ACTIVE),
+    más `email_accounts.provider <> 'IMAP'`;
+  - los buzones IMAP tienen un lote propio (`IMAP_RECOVERY_BATCH`, 20, los más antiguos), solo mientras
+    `imapSyncEnabled` sea `true`: desactivado, sus trabajos solo se descartarían (`imap_disabled`), así que ni se
+    consultan. Un correo IMAP que sigue fallando llega a `MAX_PROCESSING_ATTEMPTS` y sale del lote (FAILED), de modo
+    que el lote avanza;
+  - los intentos, el marcado FAILED, el filtro de acceso comercial y los ids deterministas de los trabajos
+    (`resume-<correo>-<intentos>`) no cambian. Sin cambio de esquema.
+  Con IMAP desactivado (hoy), Gmail / Microsoft se recuperan igual que antes; si quedaran correos IMAP incompletos
+  (por ejemplo, tras revertir una activación) ya no ocupan su lote. Verificado con pruebas del worker
+  (`imap-f2-recovery-isolation.test.ts`) y contra PostgreSQL + PostgREST reales en un Supabase local desechable: con
+  150 correos IMAP atascados, el lote anterior era 100 % IMAP y ahora Gmail y Microsoft se recuperan.
+  **Límites conocidos del lote IMAP (pendientes antes de activar; no afectan a Gmail / Microsoft):**
+  - A: los correos IMAP de organizaciones sin acceso comercial se seleccionan pero no se encolan ni gastan intentos
+    (política comercial común), y los de organizaciones cuyo plan ya no incluye IMAP se encolan pero `processEmail`
+    los descarta (`imap_not_entitled`) sin gastar intentos. Si los 20 más antiguos son de ese tipo, el lote IMAP queda
+    **bloqueado indefinidamente** para las demás organizaciones (0 trabajos IMAP por barrido) hasta que recuperen el
+    acceso o el plan. Corrección propuesta, solo IMAP y sin cambiar la política: recorrer los candidatos IMAP por
+    páginas (orden estable) saltando los de organizaciones sin acceso o sin IMAP hasta reunir 20 recuperables, con
+    un tope de lectura por barrido; requiere autorización.
+  - B: el orden es por antigüedad, sin reparto por organización: una organización con muchos correos IMAP atascados
+    (pero procesables) ocupa los 20 puestos hasta que agotan sus 25 intentos y salen como FAILED. El lote avanza
+    siempre, pero el retraso para las demás crece con ese número (con 60 atascados, unos 17 barridos, ≈ 170 min).
+    Mejora propuesta: un máximo de correos por organización dentro de la ventana leída (por ejemplo 5 de 20); un
+    reparto exacto por organización necesitaría una consulta en la base de datos (RPC o vista, es decir, una
+    migración). Requiere autorización.
 - Pruebas opt-in de A2 / A2.1 con BullMQ real (`imap-a2-isolation.test.ts`, `imap-a2-processing-risk.test.ts`,
   `imap-a2-1-processing-isolation.test.ts`): solo con
   `A2_BULLMQ_URL` hacia un Valkey **desechable** en esta máquina (la guarda de E4.4 rechaza todo lo que no sea TCP

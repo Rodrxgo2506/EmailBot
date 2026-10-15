@@ -1,6 +1,6 @@
 import type { EmailRuleRow } from "@emailbot/rules-engine";
 import type { EmailProcessingJob, NotificationJob } from "@emailbot/shared";
-import type { CustomerIdentifierType, CustomerStatus, NormalizedEmail, RealtimeEvent } from "@emailbot/types";
+import type { CustomerIdentifierType, CustomerStatus, EmailProvider, NormalizedEmail, RealtimeEvent } from "@emailbot/types";
 import { vi } from "vitest";
 import type {
   AccountStore,
@@ -144,23 +144,30 @@ export class MemoryEmailStore implements EmailStore {
     this.stateHistory.push({ emailId, status: state.status });
   });
 
-  listIncompleteEmails = vi.fn(async ({ startedBefore, limit }: { startedBefore: string; limit: number }): Promise<IncompleteEmail[]> =>
-    this.rows
-      .map((row, index) => ({ row, id: `email-${index + 1}` }))
-      .filter(
-        ({ row }) =>
-          (row.processing_status === "RECEIVED" || row.processing_status === "PROCESSING") &&
-          String(row.processing_started_at) < startedBefore
-      )
-      .slice(0, limit)
-      .map(({ row, id }) => ({
-        id,
-        organizationId: row.organization_id,
-        emailAccountId: row.email_account_id,
-        provider: "GMAIL" as const,
-        providerMessageId: row.provider_message_id,
-        processingAttempts: Number(row.processing_attempts ?? 0)
-      }))
+  /** Provider of each mailbox (email_accounts.provider); GMAIL when absent. */
+  accountProviders = new Map<string, EmailProvider>();
+
+  /** Mirrors the store query: incomplete, stale, oldest first (stable), optionally IMAP only / every provider but IMAP. */
+  listIncompleteEmails = vi.fn(
+    async ({ startedBefore, limit, imap }: { startedBefore: string; limit: number; imap?: "only" | "exclude" }): Promise<IncompleteEmail[]> =>
+      this.rows
+        .map((row, index) => ({ row, id: `email-${index + 1}`, provider: this.accountProviders.get(row.email_account_id) ?? ("GMAIL" as EmailProvider) }))
+        .filter(
+          ({ row, provider }) =>
+            (row.processing_status === "RECEIVED" || row.processing_status === "PROCESSING") &&
+            String(row.processing_started_at) < startedBefore &&
+            (imap === undefined || (imap === "only") === (provider === "IMAP"))
+        )
+        .sort((a, b) => String(a.row.processing_started_at).localeCompare(String(b.row.processing_started_at)))
+        .slice(0, limit)
+        .map(({ row, id, provider }) => ({
+          id,
+          organizationId: row.organization_id,
+          emailAccountId: row.email_account_id,
+          provider,
+          providerMessageId: row.provider_message_id,
+          processingAttempts: Number(row.processing_attempts ?? 0)
+        }))
   );
 
   loadEnabledRules = vi.fn(async (organizationId: string) => {

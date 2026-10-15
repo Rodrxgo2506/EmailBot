@@ -294,22 +294,21 @@ export function createEmailStore(db: SupabaseClient): EmailStore {
       check(await db.from("emails").update(columns).eq("id", emailId), "updateProcessingState");
     },
 
-    async listIncompleteEmails({ startedBefore, limit }) {
-      const rows = check(
-        await db
-          .from("emails")
-          .select(
-            "id,organization_id,email_account_id,provider_message_id,processing_attempts,email_accounts!inner(provider,status),organizations!inner(status)"
-          )
-          .in("processing_status", ["RECEIVED", "PROCESSING"])
-          .lt("processing_started_at", startedBefore)
-          .eq("email_accounts.status", "ACTIVE")
-          // Suspended organizations keep their incomplete emails untouched (not retried towards FAILED).
-          .eq("organizations.status", "ACTIVE")
-          .order("processing_started_at", { ascending: true })
-          .limit(limit),
-        "listIncompleteEmails"
-      ) as Row[];
+    async listIncompleteEmails({ startedBefore, limit, imap }) {
+      let query = db
+        .from("emails")
+        .select(
+          "id,organization_id,email_account_id,provider_message_id,processing_attempts,email_accounts!inner(provider,status),organizations!inner(status)"
+        )
+        .in("processing_status", ["RECEIVED", "PROCESSING"])
+        .lt("processing_started_at", startedBefore)
+        .eq("email_accounts.status", "ACTIVE")
+        // Suspended organizations keep their incomplete emails untouched (not retried towards FAILED).
+        .eq("organizations.status", "ACTIVE");
+      // F2: IMAP mailboxes get their own recovery batch (handle-email-event.ts), so they never fill this one.
+      if (imap === "exclude") query = query.neq("email_accounts.provider", "IMAP");
+      if (imap === "only") query = query.eq("email_accounts.provider", "IMAP");
+      const rows = check(await query.order("processing_started_at", { ascending: true }).limit(limit), "listIncompleteEmails") as Row[];
       return rows.map((row) => ({
         id: row.id,
         organizationId: row.organization_id,
