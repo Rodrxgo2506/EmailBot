@@ -237,6 +237,30 @@ sentencia en PostgreSQL; con la configuración anterior tardaba ~11 s y llegaba 
 cambiar: el plazo de 60 s de las lecturas (un plazo propio más corto depende de verificar el `statement_timeout`
 de producción; en local `authenticator` tiene 8 s y `service_role` ninguno).
 
+## Peticiones HTTP a proveedores del worker (F5.4)
+
+| Petición | Proveedor | Límite | Cancelación por el apagado |
+|---|---|---|---|
+| Listado, mensajes, adjuntos, `users.watch` | Gmail API | `PROVIDER_HTTP_TIMEOUT_MS` (20 s; 1000 a 120000) | sí |
+| *Delta*, mensajes, adjuntos, suscripciones (crear, renovar, borrar) | Microsoft Graph | igual | sí |
+| Refresco de tokens | Google / Microsoft OAuth | igual | sí |
+| PostgREST, Storage | Supabase | `SUPABASE_HTTP_TIMEOUT_MS` (60 s) | no (F5.3) |
+| Envío de eventos | Sentry (SDK) | su propio *flush* de 2 s en el apagado | no |
+
+El límite (`fetchWithTimeout`, compartido con la API, sin cambios) cubre la petición entera, cuerpo incluido, y se
+aplica con un `AbortSignal` que llega a undici: el socket se cierra. F5.4 añade en el worker una señal de
+cancelación (`apps/worker/src/infrastructure/http-cancellation.ts`) que la fase de cancelación del apagado activa:
+corta las peticiones en curso y rechaza las nuevas al momento. Los fallos se distinguen: plazo vencido
+(`HttpTimeoutError` → `ProviderTransientError` "Timed out"), cancelación por el apagado (`ProviderCancelledError`,
+también transitorio, registrado como `worker.shutdown.request_cancelled` y no como error) y errores de red o HTTP
+(sin cambios). En todos los casos el trabajo falla y BullMQ lo reintenta; nunca es un error de la cuenta.
+
+Cancelar solo detiene la petición local: el proveedor puede haberla recibido y seguir procesándola (un token
+emitido que no llega a guardarse, una suscripción de Graph o un *watch* de Gmail creados sin registrar). Son los
+mismos casos que un plazo vencido, ya existentes: el reintento vuelve a pedir el token o a crear la suscripción, un
+*watch* nuevo de Gmail sustituye al anterior y una suscripción de Graph sin registrar no está asociada a ninguna
+cuenta y caduca sola. El mismo límite de 20 s se aplica a las descargas de adjuntos (sus plazos son F5.5).
+
 ## Apagado del worker
 
 F5.1 (`apps/worker/src/infrastructure/shutdown.ts`). Con `SIGTERM` o `SIGINT` el worker se apaga por fases dentro
@@ -251,7 +275,7 @@ presupuesto debe quedar por debajo.
 |---|---|---|
 | 1. Parar | 3 s (workers en paralelo) | `/readyz` pasa a *stopping*; se cancelan las operaciones IMAP en curso (sockets cerrados, no se abren nuevas) y `pause(true)` en cada worker BullMQ: no se toma ningún trabajo nuevo |
 | 2. Gracia | hasta total − 13,1 s (11,9 s) | espera a que terminen los trabajos en curso |
-| 3. Cancelación | 3 s | solo si queda alguno: se desconecta el cliente Redis del publicador *realtime*; un trabajo esperando un `PUBLISH` falla y BullMQ lo reintenta |
+| 3. Cancelación | 3 s | solo si queda alguno: se desconecta el cliente Redis del publicador *realtime* y se cancelan las peticiones HTTP a proveedores en curso (F5.4); un trabajo esperando en ellas falla y BullMQ lo reintenta |
 | 4. Cierre | 3 s (workers en paralelo) | `close()`; forzado solo si aún queda un trabajo en curso |
 | 5. Liberación | 5 s cada uno, en paralelo | pool IMAP, colas, servidor de health; después se desconectan las conexiones Redis |
 | 6. Sentry | 2 s | `flush` |
@@ -279,7 +303,8 @@ presupuesto debe quedar por debajo.
   - F5.3: el cliente del worker ya no reintenta las lecturas de PostgREST (ver *Lecturas de PostgREST del
     worker*), pero una lectura colgada sigue esperando hasta `SUPABASE_HTTP_TIMEOUT_MS` (60 s, más que la gracia):
     un trabajo en ese punto no se cancela, agota la gracia y se cierra forzado.
-  - F5.4: las peticiones HTTP (Supabase, Gmail, Microsoft Graph) no reciben una señal de cancelación.
+  - F5.4: las peticiones HTTP a proveedores (Gmail, Microsoft Graph, OAuth) se cancelan en la fase 3 (ver
+    *Peticiones HTTP a proveedores del worker*); las de Supabase no: siguen limitadas por `SUPABASE_HTTP_TIMEOUT_MS`.
 
 ## Web: cabeceras
 

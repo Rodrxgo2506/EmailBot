@@ -129,3 +129,14 @@ export class ProviderTransientError extends Error {
     this.name = "ProviderTransientError";
   }
 }
+
+/**
+ * F5.4: a provider request cancelled by the worker shutdown (infrastructure/http-cancellation.ts). Transient: the
+ * job fails and BullMQ retries it; never an account error. The provider may still have processed the request.
+ */
+export class ProviderCancelledError extends ProviderTransientError {
+  constructor(message: string) {
+    super(message, null);
+    this.name = "ProviderCancelledError";
+  }
+}

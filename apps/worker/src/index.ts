@@ -22,6 +22,7 @@ import { loadWorkerConfig } from "./config/env.js";
 import { createProviderContext } from "./credentials/token-manager.js";
 import { createAppRedis } from "./infrastructure/app-redis.js";
 import { closeServer, createHealthServer, listen, type WorkerHealthState } from "./infrastructure/health.js";
+import { cancellableFetch, createRequestCancellation } from "./infrastructure/http-cancellation.js";
 import { createImapSyncSlots, imapSyncSlotCount } from "./infrastructure/imap-slots.js";
 import { createJobProcessors } from "./infrastructure/job-processors.js";
 import { createWorkerQueues } from "./infrastructure/queues.js";
@@ -63,8 +64,10 @@ initWorkerSentry({ dsn: config.sentryDsn, environment: config.env, release: sent
 // SERVICE ROLE client: the worker processes every tenant; it scopes all
 // writes with ids read from the database. F5.3: PostgREST reads are not retried by the client (supabase-client.ts).
 const supabase = createWorkerSupabase(config.supabaseUrl, config.supabaseServiceRoleKey, config.supabaseHttpTimeoutMs);
-// Google / Microsoft: OAuth refresh, Gmail, Graph and attachment downloads.
-const providerFetch = fetchWithTimeout(globalThis.fetch, config.providerHttpTimeoutMs);
+// Google / Microsoft: OAuth refresh, Gmail, Graph and attachment downloads. Each request is limited by
+// PROVIDER_HTTP_TIMEOUT_MS; F5.4: the shutdown's cancel phase also cancels the ones in flight (http-cancellation.ts).
+const providerRequests = createRequestCancellation();
+const providerFetch = cancellableFetch(fetchWithTimeout(globalThis.fetch, config.providerHttpTimeoutMs), providerRequests.signal);
 
 // BullMQ workers require maxRetriesPerRequest = null (BullMQ workers and queues only).
 const connection = new Redis(config.redisUrl, { maxRetriesPerRequest: null });
@@ -194,8 +197,12 @@ const shutdown = createShutdown(
     },
     // IMAP A2: running IMAP operations are closed (transient: retried later, no cursor moves past unprocessed mail).
     abortImap: abortImapOperations,
-    // Used only by realtime publishing: a job waiting on it fails and is retried (never marked completed).
-    interruptBlockedClients: () => publisherConnection.disconnect(),
+    // After the grace period: realtime publishing (a job waiting on it fails and is retried, never marked completed)
+    // and, F5.4, the provider HTTP requests in flight (cancelled jobs fail as transient and are retried).
+    interruptBlockedClients: () => {
+      publisherConnection.disconnect();
+      providerRequests.abort();
+    },
     release: [
       // After the workers stopped: no job holds an IMAP connection any more.
       ...(imapPool ? [{ name: "imap pool", run: () => imapPool.closeAll() }] : []),

@@ -1,5 +1,6 @@
 import { HttpTimeoutError } from "@emailbot/shared";
-import { ProviderAuthError, ProviderTransientError, type ProviderContext } from "./types.js";
+import { RequestCancelledError } from "../infrastructure/http-cancellation.js";
+import { ProviderAuthError, ProviderCancelledError, ProviderTransientError, type ProviderContext } from "./types.js";
 
 export class ProviderHttpError extends Error {
   constructor(
@@ -17,6 +18,7 @@ export class ProviderHttpError extends Error {
  * - 401: refreshes the token once and retries; a second 401 means the
  *   credentials are no longer valid (ProviderAuthError).
  * - 429 / 5xx / network errors: ProviderTransientError (job is retried).
+ * - cancelled by the worker shutdown (F5.4): ProviderCancelledError, also transient (job is retried).
  * - other 4xx: ProviderHttpError (caller decides).
  *
  * Error messages contain the status only, never tokens or response bodies.
@@ -64,6 +66,7 @@ async function providerRequest(
         ...(body === undefined ? {} : { body: JSON.stringify(body) })
       });
     } catch (error) {
+      if (error instanceof RequestCancelledError) throw new ProviderCancelledError(`Cancelled by the worker shutdown calling ${new URL(url).host}`);
       // Timeouts (HttpTimeoutError) and network failures are transient: BullMQ retries with backoff.
       const reason = error instanceof HttpTimeoutError ? "Timed out" : "Network error";
       throw new ProviderTransientError(`${reason} calling ${new URL(url).host}`, null);
