@@ -352,20 +352,33 @@ cambia UIDVALIDITY antes de la primera sincronización, se aplica la recuperaci�
   (por ejemplo, tras revertir una activación) ya no ocupan su lote. Verificado con pruebas del worker
   (`imap-f2-recovery-isolation.test.ts`) y contra PostgreSQL + PostgREST reales en un Supabase local desechable: con
   150 correos IMAP atascados, el lote anterior era 100 % IMAP y ahora Gmail y Microsoft se recuperan.
-  **Límites conocidos del lote IMAP (pendientes antes de activar; no afectan a Gmail / Microsoft):**
-  - A: los correos IMAP de organizaciones sin acceso comercial se seleccionan pero no se encolan ni gastan intentos
-    (política comercial común), y los de organizaciones cuyo plan ya no incluye IMAP se encolan pero `processEmail`
-    los descarta (`imap_not_entitled`) sin gastar intentos. Si los 20 más antiguos son de ese tipo, el lote IMAP queda
-    **bloqueado indefinidamente** para las demás organizaciones (0 trabajos IMAP por barrido) hasta que recuperen el
-    acceso o el plan. Corrección propuesta, solo IMAP y sin cambiar la política: recorrer los candidatos IMAP por
-    páginas (orden estable) saltando los de organizaciones sin acceso o sin IMAP hasta reunir 20 recuperables, con
-    un tope de lectura por barrido; requiere autorización.
-  - B: el orden es por antigüedad, sin reparto por organización: una organización con muchos correos IMAP atascados
-    (pero procesables) ocupa los 20 puestos hasta que agotan sus 25 intentos y salen como FAILED. El lote avanza
-    siempre, pero el retraso para las demás crece con ese número (con 60 atascados, unos 17 barridos, ≈ 170 min).
-    Mejora propuesta: un máximo de correos por organización dentro de la ventana leída (por ejemplo 5 de 20); un
-    reparto exacto por organización necesitaría una consulta en la base de datos (RPC o vista, es decir, una
-    migración). Requiere autorización.
+  **Selección del lote IMAP (F2.2; implementado en local, sin commit; no afecta a Gmail / Microsoft):** en F2 el lote
+  eran los 20 correos IMAP más antiguos. Los de organizaciones sin acceso comercial no se encolan ni gastan intentos
+  y los de organizaciones cuyo plan ya no incluye IMAP los descarta `processEmail` (`imap_not_entitled`) sin gastar
+  intentos: 20 de ellos podían **bloquear el lote indefinidamente** (A); y una organización con muchos correos
+  atascados ocupaba los 20 puestos hasta agotar sus 25 intentos (B). Ahora (`selectImapRecovery`, sin esquema ni
+  cursor persistente):
+  - los candidatos IMAP se leen por páginas de 50, del más antiguo al más reciente con orden total
+    (`processing_started_at`, `id`), cada página estrictamente después de la anterior, como mucho 500 filas por
+    ejecución; mismos filtros (correo incompleto y estancado, buzón ACTIVE, organización ACTIVE);
+  - cada organización se comprueba una vez por ejecución con la regla comercial común (sin cambios) y con IMAP en
+    su plan; si no puede procesarse se deja fuera de las páginas siguientes. Sus correos no se tocan (ni marca ni
+    intento) y vuelven a seleccionarse cuando recupere el acceso o el plan;
+  - una organización con 20 candidatos ya reunidos también se deja fuera de las páginas siguientes;
+  - los 20 puestos se reparten por turnos entre organizaciones (en el orden de su candidato más antiguo; dentro de
+    cada una, el más antiguo primero; reparto max-min): si 4 o más organizaciones tienen 5 o más candidatos, ninguna pasa
+    de 5; los puestos que las demás no pueden usar (porque tienen menos candidatos) se dan a las que tienen más correos,
+    sin dejar puestos vacíos (por ejemplo, 100, 1, 1 y 1 candidatos reciben 17, 1, 1 y 1; una organización sola, 20);
+  - los correos que ya agotaron sus intentos (de organizaciones procesables) se marcan FAILED como antes, fuera de
+    los 20 puestos. Ids de trabajo deterministas, sin cambios.
+  **Límites que permanecen:** no es una equidad garantizada. La lectura se detiene al reunir candidatos de 20
+  organizaciones, a las 500 filas o con 100 organizaciones dejadas fuera; lo que quede detrás espera a una ejecución
+  posterior. Con más de 20 organizaciones compitiendo se atiende antes a las de candidatos más antiguos, y las demás
+  avanzan a medida que esas terminan o agotan sus intentos. Un reparto exacto y rotatorio entre organizaciones
+  necesitaría estado persistente o una consulta en la base de datos (RPC o vista, es decir, una migración).
+  Verificado con pruebas del worker (`imap-f2-2-fair-recovery.test.ts`) y contra PostgreSQL + PostgREST reales en un
+  Supabase local desechable (paginación con empates en la marca de tiempo, organizaciones bloqueadas, más de 20 correos
+  por organización y más de 500 candidatos).
 - Pruebas opt-in de A2 / A2.1 con BullMQ real (`imap-a2-isolation.test.ts`, `imap-a2-processing-risk.test.ts`,
   `imap-a2-1-processing-isolation.test.ts`): solo con
   `A2_BULLMQ_URL` hacia un Valkey **desechable** en esta máquina (la guarda de E4.4 rechaza todo lo que no sea TCP

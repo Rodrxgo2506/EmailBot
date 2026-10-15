@@ -150,6 +150,8 @@ export interface IncompleteEmail {
   provider: EmailProvider;
   providerMessageId: string;
   processingAttempts: number;
+  /** F2.2: returned by the IMAP-only query (the page key of the IMAP recovery scan). */
+  processingStartedAt?: string;
 }
 
 export interface EmailStore {
@@ -164,8 +166,16 @@ export interface EmailStore {
   /**
    * Incomplete emails of ACTIVE accounts whose processing started before `startedBefore`, oldest first.
    * `imap` (F2): "exclude" = every provider but IMAP, "only" = IMAP mailboxes only; absent = every provider.
+   * F2.2, with `imap: "only"` only: ordered by (processing_started_at, id); `after` = the page key (rows strictly
+   * after it); `excludeOrganizations` = organizations left out of this page.
    */
-  listIncompleteEmails(options: { startedBefore: string; limit: number; imap?: "only" | "exclude" }): Promise<IncompleteEmail[]>;
+  listIncompleteEmails(options: {
+    startedBefore: string;
+    limit: number;
+    imap?: "only" | "exclude";
+    after?: { startedAt: string; id: string };
+    excludeOrganizations?: string[];
+  }): Promise<IncompleteEmail[]>;
   loadEnabledRules(organizationId: string): Promise<EmailRuleRow[]>;
   loadSettings(organizationId: string): Promise<OrganizationProcessingSettings>;
   /** INSERT ... ON CONFLICT (email_account_id, provider_message_id) DO NOTHING. Null = duplicate. */

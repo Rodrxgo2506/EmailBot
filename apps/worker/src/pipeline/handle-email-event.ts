@@ -20,7 +20,7 @@ import type { MicrosoftSubscriptionClient } from "../providers/microsoft/subscri
 import type { ProviderRegistry } from "../providers/registry.js";
 import { ProviderAuthError, ProviderSecurityError, ProviderTransientError, type ProviderContext, type WorkerAccount } from "../providers/types.js";
 import { hasCommercialAccess, withCommercialAccess } from "./commercial-access.js";
-import type { AccountStore, AuditRecorder, EmailStore, JobProducer, Logger, SubscriptionMaintenance, SyncLock } from "./ports.js";
+import type { AccountStore, AuditRecorder, EmailStore, IncompleteEmail, JobProducer, Logger, SubscriptionMaintenance, SyncLock } from "./ports.js";
 import { AttachmentsPendingError, type ProcessEmailOutcome } from "./process-email.js";
 
 /*
@@ -112,10 +112,15 @@ export const RECOVERY_BATCH = 100;
  * F2: incomplete emails of IMAP mailboxes recovered per run, in a batch of their own (only while IMAP
  * synchronization is enabled). Their jobs run in this process's IMAP processing slots (2 by default, up to
  * 9 minutes each) and the sweep runs every 10 minutes: 20 is ample for several workers while keeping the IMAP
- * backlog on email-processing small. Oldest first; an email that keeps failing reaches MAX_PROCESSING_ATTEMPTS
- * and leaves the batch (FAILED), so the batch always moves on.
+ * backlog on email-processing small. An email that keeps failing reaches MAX_PROCESSING_ATTEMPTS and leaves the
+ * batch (FAILED). F2.2: filled by selectImapRecovery (bounded scan, organizations shared fairly).
  */
 export const IMAP_RECOVERY_BATCH = 20;
+/** F2.2: rows read per page of the IMAP recovery scan, and at most per run (no persistent cursor). */
+export const IMAP_RECOVERY_PAGE = 50;
+export const IMAP_RECOVERY_SCAN_MAX = 500;
+/** F2.2: organizations left out of the scan (blocked or settled) at most; each page query lists them. */
+export const IMAP_RECOVERY_MAX_EXCLUDED_ORGANIZATIONS = 100;
 /**
  * Every run (first attempt, BullMQ retries, recovery runs) increments
  * processing_attempts. Past this, the email is marked FAILED instead of being
@@ -765,7 +770,7 @@ export async function handleEmailEvent(job: EmailEventJob, deps: HandleEventDeps
       // emails can never fill the batch and hold back the recovery of Gmail / Microsoft ones.
       const stale = [
         ...(await deps.emails.listIncompleteEmails({ startedBefore, limit: RECOVERY_BATCH, imap: "exclude" })),
-        ...(deps.imapSyncEnabled === true ? await deps.emails.listIncompleteEmails({ startedBefore, limit: IMAP_RECOVERY_BATCH, imap: "only" }) : [])
+        ...(deps.imapSyncEnabled === true ? await selectImapRecovery(deps, startedBefore, job.type) : [])
       ];
       // Without commercial access an incomplete email is left as it is (no attempt consumed, nothing queued).
       const incomplete = await withCommercialAccess(stale, deps.accounts, deps.logger, "recover_incomplete", job.type);
@@ -814,4 +819,81 @@ export async function handleEmailEvent(job: EmailEventJob, deps: HandleEventDeps
       return { accounts: 0, enqueued: 0, expired };
     }
   }
+}
+
+/**
+ * F2.2: the IMAP recovery batch of one RECOVER_INCOMPLETE run (IMAP only; Gmail / Microsoft never get here).
+ *
+ * F2 took the 20 oldest incomplete IMAP emails. Emails of organizations without commercial access are never queued
+ * and those whose plan no longer includes IMAP are skipped by processEmail - neither consumes an attempt - so 20 of
+ * them could block the batch for everybody, indefinitely; and one organization with many stuck emails took every
+ * place until they reached MAX_PROCESSING_ATTEMPTS. Now, with no schema change and no persistent cursor:
+ *   - a bounded scan: pages of IMAP_RECOVERY_PAGE candidates, oldest first by (processing_started_at, id), each
+ *     strictly after the previous page's last key, at most IMAP_RECOVERY_SCAN_MAX rows per run;
+ *   - each organization is checked once per run with the shared commercial-access rule and for IMAP in its plan;
+ *     a blocked one is left out of the following pages. Its emails are untouched (nothing marked, no attempt) and
+ *     are selected again by a later run once the organization may be processed;
+ *   - an organization with IMAP_RECOVERY_BATCH candidates is settled and left out of the following pages too;
+ *   - the batch is filled round robin over the organizations, in the order of their oldest candidate, oldest first
+ *     within each one (max-min fair): when 4 or more organizations have 5 or more candidates none gets more than 5 of
+ *     the 20 places; places the others cannot use (they have fewer candidates) go to those with more emails;
+ *   - emails of allowed organizations that already reached MAX_PROCESSING_ATTEMPTS are returned too (outside the 20
+ *     places) and become FAILED as before.
+ * The scan stops at IMAP_RECOVERY_BATCH organizations, at the read limit, at the end of the candidates or at
+ * IMAP_RECOVERY_MAX_EXCLUDED_ORGANIZATIONS settled organizations; whatever it did not reach is read by later runs.
+ * Not a guarantee of fairness: organizations whose oldest candidate lies beyond the read limit (behind many blocked
+ * or settled organizations) wait for a later run, and with more than 20 competing organizations those with the
+ * oldest candidates are served first.
+ */
+async function selectImapRecovery(deps: HandleEventDeps, startedBefore: string, jobType: string): Promise<IncompleteEmail[]> {
+  const candidates = new Map<string, IncompleteEmail[]>();
+  const exhausted: IncompleteEmail[] = [];
+  const blocked = new Set<string>();
+  const settled = new Set<string>();
+  const checked = new Set<string>();
+  let after: { startedAt: string; id: string } | undefined;
+  let scanned = 0;
+  let pages = 0;
+  while (scanned < IMAP_RECOVERY_SCAN_MAX && candidates.size < IMAP_RECOVERY_BATCH && blocked.size + settled.size <= IMAP_RECOVERY_MAX_EXCLUDED_ORGANIZATIONS) {
+    const limit = Math.min(IMAP_RECOVERY_PAGE, IMAP_RECOVERY_SCAN_MAX - scanned);
+    const page = await deps.emails.listIncompleteEmails({ startedBefore, limit, imap: "only", ...(after ? { after } : {}), excludeOrganizations: [...blocked, ...settled] });
+    pages += 1;
+    scanned += page.length;
+    const unchecked = [...new Set(page.map((email) => email.organizationId).filter((id) => !checked.has(id)))];
+    if (unchecked.length > 0) {
+      // The shared commercial-access rule, unchanged (denials logged as before), then IMAP in the organization's plan.
+      const allowed = new Set((await withCommercialAccess(unchecked.map((organizationId) => ({ organizationId })), deps.accounts, deps.logger, "recover_incomplete", jobType)).map((item) => item.organizationId));
+      for (const organizationId of unchecked) {
+        checked.add(organizationId);
+        if (!allowed.has(organizationId) || !(await deps.accounts.imapEntitled(organizationId))) blocked.add(organizationId);
+      }
+    }
+    for (const email of page) {
+      if (blocked.has(email.organizationId) || settled.has(email.organizationId)) continue;
+      if (email.processingAttempts >= MAX_PROCESSING_ATTEMPTS) {
+        exhausted.push(email);
+        continue;
+      }
+      const list = candidates.get(email.organizationId) ?? [];
+      list.push(email);
+      candidates.set(email.organizationId, list);
+      if (list.length >= IMAP_RECOVERY_BATCH) settled.add(email.organizationId);
+    }
+    const last = page[page.length - 1];
+    if (page.length < limit || !last?.processingStartedAt) break;
+    after = { startedAt: last.processingStartedAt, id: last.id };
+  }
+  const selected: IncompleteEmail[] = [];
+  const organizations = [...candidates.keys()];
+  for (let round = 0; selected.length < IMAP_RECOVERY_BATCH && organizations.some((id) => (candidates.get(id)?.length ?? 0) > round); round++) {
+    for (const organizationId of organizations) {
+      const email = candidates.get(organizationId)?.[round];
+      if (email && selected.length < IMAP_RECOVERY_BATCH) selected.push(email);
+    }
+  }
+  deps.logger.info(
+    { event: "imap.recovery.selected", pages, scanned, organizations: organizations.length, blocked: blocked.size, selected: selected.length, exhausted: exhausted.length, readLimitReached: scanned >= IMAP_RECOVERY_SCAN_MAX },
+    "IMAP recovery batch selected"
+  );
+  return [...selected, ...exhausted];
 }

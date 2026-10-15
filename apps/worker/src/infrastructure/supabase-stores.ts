@@ -294,11 +294,13 @@ export function createEmailStore(db: SupabaseClient): EmailStore {
       check(await db.from("emails").update(columns).eq("id", emailId), "updateProcessingState");
     },
 
-    async listIncompleteEmails({ startedBefore, limit, imap }) {
+    async listIncompleteEmails({ startedBefore, limit, imap, after, excludeOrganizations }) {
       let query = db
         .from("emails")
         .select(
-          "id,organization_id,email_account_id,provider_message_id,processing_attempts,email_accounts!inner(provider,status),organizations!inner(status)"
+          imap === "only"
+            ? "id,organization_id,email_account_id,provider_message_id,processing_attempts,processing_started_at,email_accounts!inner(provider,status),organizations!inner(status)"
+            : "id,organization_id,email_account_id,provider_message_id,processing_attempts,email_accounts!inner(provider,status),organizations!inner(status)"
         )
         .in("processing_status", ["RECEIVED", "PROCESSING"])
         .lt("processing_started_at", startedBefore)
@@ -307,7 +309,26 @@ export function createEmailStore(db: SupabaseClient): EmailStore {
         .eq("organizations.status", "ACTIVE");
       // F2: IMAP mailboxes get their own recovery batch (handle-email-event.ts), so they never fill this one.
       if (imap === "exclude") query = query.neq("email_accounts.provider", "IMAP");
-      if (imap === "only") query = query.eq("email_accounts.provider", "IMAP");
+      if (imap === "only") {
+        // F2.2: a page of the bounded IMAP recovery scan: a total order (id breaks ties), rows strictly after the previous
+        // page's last key, minus the organizations already settled for this run (blocked or with enough candidates).
+        query = query.eq("email_accounts.provider", "IMAP");
+        if (after) query = query.or(`processing_started_at.gt."${after.startedAt}",and(processing_started_at.eq."${after.startedAt}",id.gt.${after.id})`);
+        if (excludeOrganizations && excludeOrganizations.length > 0) query = query.not("organization_id", "in", `(${excludeOrganizations.join(",")})`);
+        const page = check(
+          await query.order("processing_started_at", { ascending: true }).order("id", { ascending: true }).limit(limit),
+          "listIncompleteEmails"
+        ) as Row[];
+        return page.map((row) => ({
+          id: row.id,
+          organizationId: row.organization_id,
+          emailAccountId: row.email_account_id,
+          provider: row.email_accounts.provider,
+          providerMessageId: row.provider_message_id,
+          processingAttempts: row.processing_attempts,
+          processingStartedAt: row.processing_started_at
+        }));
+      }
       const rows = check(await query.order("processing_started_at", { ascending: true }).limit(limit), "listIncompleteEmails") as Row[];
       return rows.map((row) => ({
         id: row.id,

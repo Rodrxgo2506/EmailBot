@@ -147,27 +147,54 @@ export class MemoryEmailStore implements EmailStore {
   /** Provider of each mailbox (email_accounts.provider); GMAIL when absent. */
   accountProviders = new Map<string, EmailProvider>();
 
-  /** Mirrors the store query: incomplete, stale, oldest first (stable), optionally IMAP only / every provider but IMAP. */
+  /** Provider-free order (processing_started_at, then id): the IMAP-only query's total order (F2.2). */
+  private static byKey(a: { startedAt: string; id: string }, b: { startedAt: string; id: string }): number {
+    if (a.startedAt !== b.startedAt) return a.startedAt < b.startedAt ? -1 : 1;
+    return a.id === b.id ? 0 : a.id < b.id ? -1 : 1;
+  }
+
+  /**
+   * Mirrors the store query: incomplete, stale, oldest first (stable), optionally IMAP only / every provider but IMAP;
+   * IMAP only (F2.2): ordered by (processing_started_at, id), after a page key, minus excluded organizations.
+   */
   listIncompleteEmails = vi.fn(
-    async ({ startedBefore, limit, imap }: { startedBefore: string; limit: number; imap?: "only" | "exclude" }): Promise<IncompleteEmail[]> =>
-      this.rows
-        .map((row, index) => ({ row, id: `email-${index + 1}`, provider: this.accountProviders.get(row.email_account_id) ?? ("GMAIL" as EmailProvider) }))
+    async ({
+      startedBefore,
+      limit,
+      imap,
+      after,
+      excludeOrganizations
+    }: {
+      startedBefore: string;
+      limit: number;
+      imap?: "only" | "exclude";
+      after?: { startedAt: string; id: string };
+      excludeOrganizations?: string[];
+    }): Promise<IncompleteEmail[]> => {
+      const rows = this.rows
+        .map((row, index) => ({ row, id: `email-${index + 1}`, startedAt: String(row.processing_started_at), provider: this.accountProviders.get(row.email_account_id) ?? ("GMAIL" as EmailProvider) }))
         .filter(
-          ({ row, provider }) =>
+          ({ row, provider, startedAt }) =>
             (row.processing_status === "RECEIVED" || row.processing_status === "PROCESSING") &&
-            String(row.processing_started_at) < startedBefore &&
+            startedAt < startedBefore &&
             (imap === undefined || (imap === "only") === (provider === "IMAP"))
-        )
-        .sort((a, b) => String(a.row.processing_started_at).localeCompare(String(b.row.processing_started_at)))
-        .slice(0, limit)
-        .map(({ row, id, provider }) => ({
-          id,
-          organizationId: row.organization_id,
-          emailAccountId: row.email_account_id,
-          provider,
-          providerMessageId: row.provider_message_id,
-          processingAttempts: Number(row.processing_attempts ?? 0)
-        }))
+        );
+      const page =
+        imap === "only"
+          ? rows
+              .filter((entry) => !excludeOrganizations?.includes(entry.row.organization_id) && (!after || MemoryEmailStore.byKey(entry, after) > 0))
+              .sort((a, b) => MemoryEmailStore.byKey(a, b))
+          : rows.sort((a, b) => a.startedAt.localeCompare(b.startedAt));
+      return page.slice(0, limit).map(({ row, id, provider, startedAt }) => ({
+        id,
+        organizationId: row.organization_id,
+        emailAccountId: row.email_account_id,
+        provider,
+        providerMessageId: row.provider_message_id,
+        processingAttempts: Number(row.processing_attempts ?? 0),
+        ...(imap === "only" ? { processingStartedAt: startedAt } : {})
+      }));
+    }
   );
 
   loadEnabledRules = vi.fn(async (organizationId: string) => {
