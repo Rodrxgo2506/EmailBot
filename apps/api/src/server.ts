@@ -10,7 +10,7 @@ import { createBullJobQueue, createRedisConnection } from "./infrastructure/queu
 import { attachRealtime } from "./infrastructure/realtime.js";
 import { createResendMailer } from "./infrastructure/resend-mailer.js";
 import { flushSentry, initSentry } from "./lib/sentry.js";
-import { adminOperations, createSupabaseClients, createSupabaseRepositories, privilegedOperations } from "./repositories/supabase/index.js";
+import { adminOperations, billingRepository, createSupabaseClients, createSupabaseRepositories, privilegedOperations } from "./repositories/supabase/index.js";
 
 // Local .env first, then the monorepo root .env (both optional).
 loadDotenv({ path: [resolve(process.cwd(), ".env"), resolve(process.cwd(), "../../.env")], quiet: true });
@@ -40,6 +40,7 @@ const deps: AppDeps = {
   repositories: (accessToken) => createSupabaseRepositories(supabase.forUser(accessToken)),
   privileged: privilegedOperations(supabase.service),
   admin: adminOperations(supabase.service),
+  billing: billingRepository(supabase.service),
   queue,
   secretBox: SecretBox.fromBase64(config.tokenEncryptionKey),
   // OAuth token exchange and mailbox identity (Google / Microsoft).

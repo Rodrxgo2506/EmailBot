@@ -12,3 +12,4 @@ export * from "./portal.js";
 export * from "./admin.js";
 export * from "./legal.js";
 export * from "./complaints.js";
+export * from "./billing.js";

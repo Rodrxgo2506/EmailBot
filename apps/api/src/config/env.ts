@@ -1,4 +1,4 @@
-import { csvEnv, encryptionKeyEnv, optionalEnv, parseEnv } from "@emailbot/shared";
+import { CULQI_API_URL, csvEnv, culqiKeyProblem, encryptionKeyEnv, optionalEnv, parseEnv } from "@emailbot/shared";
 import { COMPLAINTS_BOOK_PROVIDER } from "@emailbot/types";
 import { normalizeOrigin, productionUrlProblem, PUBLIC_URL, REDIS_URL } from "@emailbot/validation";
 import { z } from "zod";
@@ -130,10 +130,37 @@ const envSchema = z
         )
     ),
 
-    SENTRY_DSN: optionalEnv(z.url())
+    SENTRY_DSN: optionalEnv(z.url()),
+
+    /**
+     * Commercial V1 phase 2: Culqi recurring subscriptions, SANDBOX ONLY. The secret key (sk_test_) stays on the
+     * server; the public key (pk_test_) is handed to the browser by GET /api/billing/checkout. Live keys are refused
+     * in this phase. Both unset = card checkout disabled (the web keeps the "Próximamente" notice).
+     */
+    CULQI_SECRET_KEY: optionalEnv(z.string().min(1)),
+    CULQI_PUBLIC_KEY: optionalEnv(z.string().min(1)),
+    CULQI_API_URL: optionalEnv(z.url()),
+    /**
+     * Optional shared secret appended to the webhook URL configured in CulqiPanel (?token=...). The Culqi
+     * documentation does not describe a webhook signature; every event is re-read from the Culqi API anyway.
+     */
+    CULQI_WEBHOOK_TOKEN: optionalEnv(z.string().min(32, "must contain at least 32 characters"))
   })
   .superRefine((env, ctx) => {
     const issue = (path: string, message: string) => ctx.addIssue({ code: "custom", path: [path], message });
+
+    // Every environment: sandbox keys only, set together.
+    if ((env.CULQI_SECRET_KEY === undefined) !== (env.CULQI_PUBLIC_KEY === undefined)) {
+      issue("CULQI_SECRET_KEY", "CULQI_SECRET_KEY and CULQI_PUBLIC_KEY must be set together");
+    }
+    if (env.CULQI_SECRET_KEY !== undefined) {
+      const problem = culqiKeyProblem(env.CULQI_SECRET_KEY, "secret");
+      if (problem) issue("CULQI_SECRET_KEY", problem);
+    }
+    if (env.CULQI_PUBLIC_KEY !== undefined) {
+      const problem = culqiKeyProblem(env.CULQI_PUBLIC_KEY, "public");
+      if (problem) issue("CULQI_PUBLIC_KEY", problem);
+    }
 
     // Every environment: CORS matches the Origin header by exact string, so
     // each entry must be a pure origin (normalized in loadConfig).
@@ -258,6 +285,8 @@ export interface ApiConfig {
   /** GET /health/sync stale threshold (SYNC_HEALTH_STALE_MINUTES). */
   syncHealthStaleMinutes: number;
   sentryDsn: string | null;
+  /** Commercial V1 phase 2: Culqi sandbox; null = card checkout disabled. */
+  culqi: { secretKey: string; publicKey: string; apiUrl: string; webhookToken: string | null } | null;
 }
 
 function oauthConfig(
@@ -341,6 +370,15 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): ApiConfig {
         ? { resendApiKey: env.RESEND_API_KEY, from: env.TRANSACTIONAL_EMAIL_FROM, replyTo: COMPLAINTS_BOOK_PROVIDER.supportEmail }
         : null,
     syncHealthStaleMinutes: env.SYNC_HEALTH_STALE_MINUTES,
-    sentryDsn: env.SENTRY_DSN ?? null
+    sentryDsn: env.SENTRY_DSN ?? null,
+    culqi:
+      env.CULQI_SECRET_KEY && env.CULQI_PUBLIC_KEY
+        ? {
+            secretKey: env.CULQI_SECRET_KEY,
+            publicKey: env.CULQI_PUBLIC_KEY,
+            apiUrl: env.CULQI_API_URL ?? CULQI_API_URL,
+            webhookToken: env.CULQI_WEBHOOK_TOKEN ?? null
+          }
+        : null
   };
 }

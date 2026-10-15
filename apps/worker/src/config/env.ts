@@ -1,4 +1,4 @@
-import { encryptionKeyEnv, EnvValidationError, graphLifecycleUrl, optionalEnv, parseEnv, type OAuthClientConfig } from "@emailbot/shared";
+import { CULQI_API_URL, culqiKeyProblem, encryptionKeyEnv, EnvValidationError, graphLifecycleUrl, optionalEnv, parseEnv, type OAuthClientConfig } from "@emailbot/shared";
 import { productionUrlProblem, PUBLIC_URL, REDIS_URL } from "@emailbot/validation";
 import { z } from "zod";
 import { DEFAULT_REDIS_COMMAND_TIMEOUT_MS, MAX_REDIS_COMMAND_TIMEOUT_MS, MIN_REDIS_COMMAND_TIMEOUT_MS } from "../infrastructure/app-redis.js";
@@ -112,7 +112,15 @@ const envSchema = z.object({
     .min(MIN_REDIS_COMMAND_TIMEOUT_MS)
     .max(MAX_REDIS_COMMAND_TIMEOUT_MS)
     .default(DEFAULT_REDIS_COMMAND_TIMEOUT_MS),
-  SENTRY_DSN: optionalEnv(z.url())
+  SENTRY_DSN: optionalEnv(z.url()),
+
+  /**
+   * Commercial V1 phase 2 (Culqi SANDBOX only): secret key used to re-read Culqi webhook events and
+   * subscriptions and to cancel replaced subscriptions. Integration keys only (sk_test_); a live key is refused.
+   * Unset = Culqi jobs are not processed (recorded as FAILED, retried when configured).
+   */
+  CULQI_SECRET_KEY: optionalEnv(z.string().min(1)),
+  CULQI_API_URL: optionalEnv(z.url())
 }).superRefine((env, ctx) => {
   const issue = (path: string, message: string) => ctx.addIssue({ code: "custom", path: [path], message });
 
@@ -124,6 +132,11 @@ const envSchema = z.object({
   // F5.5: an attachment transfer may not have a shorter limit than any other provider request.
   if (env.WORKER_ATTACHMENT_TIMEOUT_MS < env.PROVIDER_HTTP_TIMEOUT_MS) {
     issue("WORKER_ATTACHMENT_TIMEOUT_MS", "must be at least PROVIDER_HTTP_TIMEOUT_MS");
+  }
+
+  if (env.CULQI_SECRET_KEY !== undefined) {
+    const problem = culqiKeyProblem(env.CULQI_SECRET_KEY, "secret");
+    if (problem) issue("CULQI_SECRET_KEY", problem);
   }
 
   // Every environment: subscriptions are created with the Microsoft account's delegated token.
@@ -202,6 +215,8 @@ export interface WorkerConfig {
    * the IMAP adapter is not even created until IMAP is launched by a code change.
    */
   imapSyncEnabled: boolean;
+  /** Commercial V1 phase 2: Culqi sandbox; null = not configured. */
+  culqi: { secretKey: string; apiUrl: string } | null;
 }
 
 function oauth(
@@ -274,7 +289,8 @@ export function loadWorkerConfig(source: NodeJS.ProcessEnv = process.env): Worke
     shutdownTimeoutMs: env.WORKER_SHUTDOWN_TIMEOUT_MS,
     redisCommandTimeoutMs: env.WORKER_REDIS_COMMAND_TIMEOUT_MS,
     // Not read from the environment on purpose (see WorkerConfig.imapSyncEnabled).
-    imapSyncEnabled: false
+    imapSyncEnabled: false,
+    culqi: env.CULQI_SECRET_KEY ? { secretKey: env.CULQI_SECRET_KEY, apiUrl: env.CULQI_API_URL ?? CULQI_API_URL } : null
   };
   assertImapWorkerConcurrency(config);
   return config;

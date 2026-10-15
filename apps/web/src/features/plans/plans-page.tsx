@@ -12,7 +12,7 @@ import { getErrorMessage } from "@/lib/errors";
 import { useAuth } from "@/providers/auth-provider";
 import { useOrganization } from "@/providers/organization-provider";
 import { usePlanCatalog } from "./api";
-import { ComingSoonDialog } from "./coming-soon-dialog";
+import { ChoosePlanDialog } from "@/features/billing/choose-plan-dialog";
 import { PlanComparison } from "./plan-comparison";
 import { PlanOfferCard } from "./plan-offer-card";
 import { planCta, type Viewer } from "./plans-model";
@@ -146,7 +146,7 @@ export function PlansPage() {
 
       <PublicFooter showLogin={!viewer?.authenticated} />
 
-      <ComingSoonDialog plan={choosing} onOpenChange={(open) => !open && setChoosing(null)} />
+      <ChoosePlanDialog plan={choosing} onOpenChange={(open) => !open && setChoosing(null)} />
     </div>
   );
 }

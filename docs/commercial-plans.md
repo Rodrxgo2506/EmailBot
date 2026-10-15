@@ -235,11 +235,14 @@ suscripción.
 - Fase 2: la única acción a sustituir es la del botón «Elegir / Mejorar» (`PlanCta` `CHOOSE` en
   `apps/web/src/features/plans/plans-model.ts`), que pasará del aviso al checkout.
 
-**Flujo objetivo con Culqi (fase 2):**
-1. `/planes` → `/checkout?plan=PRO&period=MONTHLY`.
-2. Pago confirmado por webhook.
-3. `/register?purchase=…` → crear la cuenta y la organización.
-4. `private.activate_subscription(..., origin CULQI, external_event_id = id del evento de Culqi)`.
+**Fase 2: Culqi (implementada SOLO en sandbox, rama `feat/culqi-subscriptions-sandbox`):**
+- Detalle completo en [billing-culqi.md](billing-culqi.md).
+- Flujo: usuario autenticado → «Elegir / Mejorar» → Culqi Custom Checkout (token) → `POST /api/billing/subscriptions`
+  (cliente, tarjeta y suscripción en Culqi) → pago confirmado por webhook o reconciliación →
+  `private.activate_subscription(..., origin CULQI)` con una clave idempotente por ciclo de cobro.
+- Upgrades (BÁSICO → PRO / BUSINESS, PRO → BUSINESS), sin downgrade ni prorrateo.
+- Las llaves live se rechazan.
+- Comprar antes de registrarse (`/register?purchase=…`) sigue pendiente: hoy se paga ya con cuenta y organización.
 
 No hay endpoints de pago simulado.
 

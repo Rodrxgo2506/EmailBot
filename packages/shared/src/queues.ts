@@ -103,7 +103,60 @@ export interface ExpireSubscriptionsJob {
   type: "EXPIRE_SUBSCRIPTIONS";
 }
 
+/**
+ * Commercial V1 phase 2 (Culqi sandbox): a webhook event accepted by the API.
+ * Only its id travels: the worker re-reads the event from Culqi's API.
+ */
+export interface CulqiEventJob {
+  type: "CULQI_EVENT";
+  eventId: string;
+}
+
+/**
+ * Re-reads one Culqi subscription and applies its state (confirmation without
+ * a webhook, e.g. sandbox without a public URL). Retried with backoff while
+ * Culqi has not charged it yet.
+ */
+export interface CulqiReconcileJob {
+  type: "CULQI_RECONCILE";
+  billingSubscriptionId: string;
+}
+
+/**
+ * Periodic Culqi reconciliation (worker scheduler, only when Culqi is configured):
+ *  - ACTIVE / PAST_DUE subscriptions near the end of their period are re-read
+ *    (renewal charges are applied even if no webhook mentions them);
+ *  - PENDING checkouts that never got a verified charge are closed
+ *    (confirmation_timeout) so they do not block the organization.
+ */
+export interface CulqiReconcileDueJob {
+  type: "CULQI_RECONCILE_DUE";
+}
+
+export const CULQI_RECONCILE_DUE_SCHEDULER_ID = "culqi-reconcile-due";
+export const CULQI_RECONCILE_DUE_INTERVAL_MS = 60 * 60_000;
+
+export function culqiEventJobId(eventId: string): string {
+  return `culqi-evt-${eventId}`;
+}
+
+export function culqiReconcileJobId(billingSubscriptionId: string): string {
+  return `culqi-sync-${billingSubscriptionId}`;
+}
+
+/** Reconciliation after a checkout: first look after 20 s, then exponential backoff for about two hours. */
+export const CULQI_RECONCILE_JOB_OPTIONS = {
+  delay: 20_000,
+  attempts: 10,
+  backoff: { type: "exponential", delay: 15_000 },
+  removeOnComplete: true,
+  removeOnFail: { age: 7 * 24 * 3600 }
+} as const;
+
 export type EmailEventJob =
+  | CulqiEventJob
+  | CulqiReconcileJob
+  | CulqiReconcileDueJob
   | GmailNotificationJob
   | MicrosoftNotificationJob
   | MicrosoftLifecycleJob

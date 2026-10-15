@@ -1,6 +1,9 @@
 import { resolve } from "node:path";
 import { config as loadDotenv } from "dotenv";
 import {
+  createCulqiClient,
+  CULQI_RECONCILE_DUE_INTERVAL_MS,
+  CULQI_RECONCILE_DUE_SCHEDULER_ID,
   encryptionKeyFingerprint,
   EXPIRE_SUBSCRIPTIONS_INTERVAL_MS,
   EXPIRE_SUBSCRIPTIONS_SCHEDULER_ID,
@@ -39,7 +42,8 @@ import {
   createAuditRecorder,
   createEmailStore,
   createRoutingStore,
-  createSubscriptionMaintenance
+  createSubscriptionMaintenance,
+  createBillingStore
 } from "./infrastructure/supabase-stores.js";
 import type { HandleEventDeps } from "./pipeline/handle-email-event.js";
 import { deliverNotification } from "./pipeline/notify.js";
@@ -165,7 +169,12 @@ const eventDeps: Omit<HandleEventDeps, "logger"> = {
   subscriptions: createSubscriptionMaintenance(supabase),
   imapSyncEnabled: config.imapSyncEnabled,
   // IMAP A2: IMAP runs never take every events slot (at least one stays for Gmail / Microsoft).
-  ...(config.imapSyncEnabled ? { imapSlots: createImapSyncSlots(imapSyncSlotCount(config.eventsConcurrency, config.imapSyncConcurrency)) } : {})
+  ...(config.imapSyncEnabled ? { imapSlots: createImapSyncSlots(imapSyncSlotCount(config.eventsConcurrency, config.imapSyncConcurrency)) } : {}),
+  // Commercial V1 phase 2: Culqi SANDBOX only (live keys are refused by the configuration).
+  billing: {
+    store: createBillingStore(supabase),
+    culqi: config.culqi ? createCulqiClient({ secretKey: config.culqi.secretKey, fetch: providerFetch, baseUrl: config.culqi.apiUrl }) : null
+  }
 };
 
 // Processors (job-processors.ts): failure mapping, Sentry, and the IMAP A2 / A2.1 "slots busy" delay.
@@ -282,6 +291,17 @@ try {
     { every: EXPIRE_SUBSCRIPTIONS_INTERVAL_MS },
     { name: "EXPIRE_SUBSCRIPTIONS", data: { type: "EXPIRE_SUBSCRIPTIONS" }, opts: { removeOnComplete: true, removeOnFail: 100 } }
   );
+
+  // Commercial V1 phase 2 (Culqi sandbox): renewals and stale checkouts are reconciled with Culqi every hour.
+  if (config.culqi) {
+    await queues.emailEvents.upsertJobScheduler(
+      CULQI_RECONCILE_DUE_SCHEDULER_ID,
+      { every: CULQI_RECONCILE_DUE_INTERVAL_MS },
+      { name: "CULQI_RECONCILE_DUE", data: { type: "CULQI_RECONCILE_DUE" }, opts: { removeOnComplete: true, removeOnFail: 100 } }
+    );
+  } else {
+    await queues.emailEvents.removeJobScheduler(CULQI_RECONCILE_DUE_SCHEDULER_ID);
+  }
 
   // Resumes emails left RECEIVED / PROCESSING by jobs that exhausted their retries (migration 9).
   await queues.emailEvents.upsertJobScheduler(

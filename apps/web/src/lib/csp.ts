@@ -14,7 +14,15 @@
  *    policy only loads remote images after the user opts in.
  *  - connect-src lists the API (https + wss for Socket.IO /realtime) and
  *    Supabase (Auth over https) explicitly; nothing else.
+ *  - Culqi Custom Checkout (Commercial V1 phase 2, card payments): its script
+ *    (https://js.culqi.com/checkout-js, Culqi's documentation) and the iframe
+ *    it mounts (https://checkoutview.culqi.com, the only origin in that
+ *    script). The card is typed and tokenized inside Culqi's iframe; this page
+ *    never sees card data. Exact origins only, no wildcard.
  */
+
+export const CULQI_CHECKOUT_SCRIPT_ORIGIN = "https://js.culqi.com";
+export const CULQI_CHECKOUT_FRAME_ORIGIN = "https://checkoutview.culqi.com";
 
 export interface CspOrigins {
   apiUrl: string;
@@ -37,7 +45,8 @@ export function buildContentSecurityPolicy({ apiUrl, supabaseUrl }: CspOrigins):
 
   const directives: Array<[string, string[]]> = [
     ["default-src", ["'self'"]],
-    ["script-src", ["'self'"]],
+    ["script-src", ["'self'", CULQI_CHECKOUT_SCRIPT_ORIGIN]],
+    ["frame-src", ["'self'", CULQI_CHECKOUT_FRAME_ORIGIN]],
     ["style-src", ["'self'", "'unsafe-inline'"]],
     ["img-src", ["'self'", "data:", "blob:", "https:"]],
     ["font-src", ["'self'", "data:"]],
