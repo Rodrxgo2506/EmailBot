@@ -1,4 +1,5 @@
 import { HttpTimeoutError } from "@emailbot/shared";
+import { ResponseTooLargeError } from "../infrastructure/attachment-transfer.js";
 import { RequestCancelledError } from "../infrastructure/http-cancellation.js";
 import { ProviderAuthError, ProviderCancelledError, ProviderTransientError, type ProviderContext } from "./types.js";
 
@@ -67,6 +68,8 @@ async function providerRequest(
       });
     } catch (error) {
       if (error instanceof RequestCancelledError) throw new ProviderCancelledError(`Cancelled by the worker shutdown calling ${new URL(url).host}`);
+      // F5.5: an attachment body over the size limit is not a network failure: retrying cannot help.
+      if (error instanceof ResponseTooLargeError) throw error;
       // Timeouts (HttpTimeoutError) and network failures are transient: BullMQ retries with backoff.
       const reason = error instanceof HttpTimeoutError ? "Timed out" : "Network error";
       throw new ProviderTransientError(`${reason} calling ${new URL(url).host}`, null);

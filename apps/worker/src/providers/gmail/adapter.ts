@@ -51,7 +51,8 @@ const profileSchema = z.object({ historyId });
 const watchSchema = z.object({ historyId, expiration: z.union([z.string(), z.number()]).transform(Number) });
 const attachmentSchema = z.object({ data: z.string() });
 
-export function createGmailAdapter(fetchImpl: typeof fetch = fetch): ProviderAdapter {
+/** `attachmentFetch`: attachment downloads (F5.5: streamed, with their own limits); every other call uses `fetchImpl`. */
+export function createGmailAdapter(fetchImpl: typeof fetch = fetch, attachmentFetch: typeof fetch = fetchImpl): ProviderAdapter {
   async function currentHistoryId(context: ProviderContext): Promise<string> {
     return profileSchema.parse(await providerGet(context, `${API}/profile`, fetchImpl)).historyId;
   }
@@ -149,7 +150,7 @@ export function createGmailAdapter(fetchImpl: typeof fetch = fetch): ProviderAda
         await providerGet(
           context,
           `${API}/messages/${encodeURIComponent(providerMessageId)}/attachments/${encodeURIComponent(providerAttachmentId)}`,
-          fetchImpl
+          attachmentFetch
         )
       );
       return decodeBase64Url(body.data);

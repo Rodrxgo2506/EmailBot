@@ -58,6 +58,11 @@ const envSchema = z.object({
   WORKER_WATCH_RENEW_INTERVAL_MINUTES: z.coerce.number().int().min(5).max(1440).default(60),
   /** Attachments larger than this are recorded (metadata) but not stored. */
   WORKER_MAX_ATTACHMENT_BYTES: z.coerce.number().int().min(0).default(25 * 1024 * 1024),
+  /**
+   * F5.5: total limit of one attachment download or Storage upload that keeps progressing (a download with no byte
+   * for PROVIDER_HTTP_TIMEOUT_MS still fails then). See infrastructure/attachment-transfer.ts.
+   */
+  WORKER_ATTACHMENT_TIMEOUT_MS: z.coerce.number().int().min(10_000).max(600_000).default(120_000),
 
   /** Timeout of every call to Google / Microsoft (OAuth token refresh, Gmail, Graph, attachment downloads). */
   PROVIDER_HTTP_TIMEOUT_MS: z.coerce.number().int().min(1000).max(120_000).default(20_000),
@@ -87,6 +92,11 @@ const envSchema = z.object({
   SENTRY_DSN: optionalEnv(z.url())
 }).superRefine((env, ctx) => {
   const issue = (path: string, message: string) => ctx.addIssue({ code: "custom", path: [path], message });
+
+  // F5.5: an attachment transfer may not have a shorter limit than any other provider request.
+  if (env.WORKER_ATTACHMENT_TIMEOUT_MS < env.PROVIDER_HTTP_TIMEOUT_MS) {
+    issue("WORKER_ATTACHMENT_TIMEOUT_MS", "must be at least PROVIDER_HTTP_TIMEOUT_MS");
+  }
 
   // Every environment: subscriptions are created with the Microsoft account's delegated token.
   if (env.MICROSOFT_GRAPH_NOTIFICATION_URL !== undefined && !(env.MICROSOFT_CLIENT_ID && env.MICROSOFT_CLIENT_SECRET && env.MICROSOFT_REDIRECT_URI)) {
@@ -145,6 +155,8 @@ export interface WorkerConfig {
   microsoftPush: { notificationUrl: string; lifecycleNotificationUrl: string } | null;
   watchRenewIntervalMinutes: number;
   maxAttachmentBytes: number;
+  /** F5.5: total limit (ms) of one attachment download / Storage upload, see infrastructure/attachment-transfer.ts. */
+  attachmentTimeoutMs: number;
   /** F5.1: total shutdown budget (ms), see infrastructure/shutdown.ts. */
   shutdownTimeoutMs: number;
   /** F5.2: application Redis command / queue producer limit (ms), see infrastructure/app-redis.ts. */
@@ -220,6 +232,7 @@ export function loadWorkerConfig(source: NodeJS.ProcessEnv = process.env): Worke
       : null,
     watchRenewIntervalMinutes: env.WORKER_WATCH_RENEW_INTERVAL_MINUTES,
     maxAttachmentBytes: env.WORKER_MAX_ATTACHMENT_BYTES,
+    attachmentTimeoutMs: env.WORKER_ATTACHMENT_TIMEOUT_MS,
     health: (env.WORKER_HEALTH_PORT ?? env.PORT) !== undefined
       ? { port: (env.WORKER_HEALTH_PORT ?? env.PORT) as number, host: env.WORKER_HEALTH_HOST }
       : null,

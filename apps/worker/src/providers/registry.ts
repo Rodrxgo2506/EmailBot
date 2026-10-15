@@ -10,10 +10,11 @@ export type ProviderRegistry = Record<EmailProvider, ProviderAdapter>;
  * `imap`: the real IMAP adapter, passed only when IMAP synchronization is
  * enabled (index.ts). Otherwise IMAP keeps the scaffold that refuses everything.
  */
-export function createProviderRegistry(fetchImpl: typeof fetch = fetch, options: { imap?: ProviderAdapter } = {}): ProviderRegistry {
+/** `options.attachmentFetch` (F5.5): Gmail / Microsoft attachment downloads; every other call uses `fetchImpl`. */
+export function createProviderRegistry(fetchImpl: typeof fetch = fetch, options: { imap?: ProviderAdapter; attachmentFetch?: typeof fetch } = {}): ProviderRegistry {
   return {
-    GMAIL: createGmailAdapter(fetchImpl),
-    MICROSOFT: createMicrosoftAdapter(fetchImpl),
+    GMAIL: createGmailAdapter(fetchImpl, options.attachmentFetch),
+    MICROSOFT: createMicrosoftAdapter(fetchImpl, options.attachmentFetch),
     IMAP: options.imap ?? createImapAdapter()
   };
 }

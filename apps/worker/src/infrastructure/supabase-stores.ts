@@ -1,7 +1,9 @@
 import type { EmailRuleRow } from "@emailbot/rules-engine";
 import { REALTIME_REDIS_CHANNEL } from "@emailbot/types";
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { HttpTimeoutError } from "@emailbot/shared";
 import type { AppRedis } from "./app-redis.js";
+import { RequestCancelledError } from "./http-cancellation.js";
 import type {
   AccountStore,
   AttachmentStorage,
@@ -569,14 +571,23 @@ export function createAuditRecorder(db: SupabaseClient): AuditRecorder {
   };
 }
 
-export function createAttachmentStorage(db: SupabaseClient): AttachmentStorage {
+/**
+ * `uploads`: the client used for uploads only (F5.5: its own limit and the shutdown cancellation, see
+ * supabase-client.ts); the existence check uses `db`. Uploads overwrite (upsert) the deterministic path, so a
+ * repeated upload never creates a second object.
+ */
+export function createAttachmentStorage(db: SupabaseClient, uploads: SupabaseClient = db): AttachmentStorage {
   return {
     async upload(bucket, path, content, contentType) {
-      const { error } = await db.storage.from(bucket).upload(path, content, {
+      const { error } = await uploads.storage.from(bucket).upload(path, content, {
         contentType: contentType ?? "application/octet-stream",
         upsert: true
       });
-      if (error) throw new Error(`Storage upload failed: ${error.message}`);
+      if (!error) return;
+      // F5.5: a timeout or a shutdown cancellation keeps its type (storage-js wraps it): the caller treats them apart.
+      const original = (error as { originalError?: unknown }).originalError;
+      if (original instanceof HttpTimeoutError || original instanceof RequestCancelledError) throw original;
+      throw new Error(`Storage upload failed: ${error.message}`);
     },
     async exists(bucket, path) {
       const { data, error } = await db.storage.from(bucket).exists(path);

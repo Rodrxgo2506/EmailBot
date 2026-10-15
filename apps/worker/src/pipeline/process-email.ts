@@ -1,10 +1,12 @@
 import { evaluateRules, parseRuleRow, type EngineRule, type RuleEvaluationResult } from "@emailbot/rules-engine";
-import { buildAttachmentPath, serializeError, type EmailProcessingJob } from "@emailbot/shared";
+import { buildAttachmentPath, HttpTimeoutError, serializeError, type EmailProcessingJob } from "@emailbot/shared";
 import type { NormalizedAttachment, NormalizedEmail } from "@emailbot/types";
+import { ResponseTooLargeError } from "../infrastructure/attachment-transfer.js";
+import { RequestCancelledError } from "../infrastructure/http-cancellation.js";
 import { imapOperationsRefused } from "../providers/imap/deadline.js";
 import { imapMessageReusableById } from "../providers/imap/message-scope.js";
 import type { ProviderRegistry } from "../providers/registry.js";
-import { ProviderAuthError, type ProviderContext, type WorkerAccount } from "../providers/types.js";
+import { ProviderAuthError, ProviderCancelledError, type ProviderContext, type WorkerAccount } from "../providers/types.js";
 import { hasCommercialAccess } from "./commercial-access.js";
 import { buildEmailRow } from "./email-row.js";
 import { routeEmail, type CustomerResolverInput } from "./resolve-customers.js";
@@ -384,6 +386,8 @@ async function completeAttachments(
       if (!(await storeContent(row, emailId, providerMessageId, account, providerContext, deps))) continue;
     } catch (error) {
       if (error instanceof ProviderAuthError) throw error;
+      // F5.4 / F5.5: cancelled by the worker shutdown: the job stops here (retried later), not "pending" content.
+      if (error instanceof ProviderCancelledError || error instanceof RequestCancelledError) throw error;
       pending += 1;
       deps.logger.warn({ err: serializeError(error), attachmentId: row.id }, "attachment content not stored yet");
     }
@@ -404,9 +408,21 @@ async function storeContent(
   const bucket = deps.attachmentsBucket;
 
   if (!(await withRetries(deps, () => deps.storage.exists(bucket, path)))) {
-    const content = await deps.providers[account.provider].downloadAttachment(context, providerMessageId, row.providerAttachmentId as string);
+    let content: Uint8Array;
+    try {
+      content = await deps.providers[account.provider].downloadAttachment(context, providerMessageId, row.providerAttachmentId as string);
+    } catch (error) {
+      // F5.5: the body exceeded the size limit while downloading (aborted early): not stored, like an oversized one.
+      if (error instanceof ResponseTooLargeError) {
+        deps.logger.warn({ attachmentId: row.id, maxBytes: deps.maxAttachmentBytes }, "attachment over the size limit; content not stored");
+        return false;
+      }
+      throw error;
+    }
     if (content.byteLength > deps.maxAttachmentBytes) return false;
-    await withRetries(deps, () => deps.storage.upload(bucket, path, content, row.contentType));
+    // F5.5: an upload that timed out is not repeated in this job (the same slow transfer would time out again); the
+    // content stays pending and a later run finds the object (if Storage completed it) or uploads it again.
+    await withRetries(deps, () => deps.storage.upload(bucket, path, content, row.contentType), (error) => !(error instanceof HttpTimeoutError || error instanceof RequestCancelledError));
   }
   await withRetries(deps, () => deps.emails.markAttachmentStored(row.id, bucket, path));
   return true;
@@ -425,14 +441,14 @@ function attachmentRow(attachment: NormalizedAttachment, emailId: string, accoun
   };
 }
 
-async function withRetries<T>(deps: ProcessEmailDeps, operation: () => Promise<T>): Promise<T> {
+async function withRetries<T>(deps: ProcessEmailDeps, operation: () => Promise<T>, retryable: (error: unknown) => boolean = () => true): Promise<T> {
   const attempts = deps.storageAttempts ?? 3;
   const delayMs = deps.storageRetryDelayMs ?? 250;
   for (let attempt = 1; ; attempt++) {
     try {
       return await operation();
     } catch (error) {
-      if (attempt >= attempts || error instanceof ProviderAuthError) throw error;
+      if (attempt >= attempts || error instanceof ProviderAuthError || !retryable(error)) throw error;
       await new Promise((resolve) => setTimeout(resolve, delayMs * attempt));
     }
   }

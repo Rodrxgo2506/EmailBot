@@ -1,5 +1,6 @@
 import { fetchWithTimeout } from "@emailbot/shared";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+import { cancellableFetch } from "./http-cancellation.js";
 
 /*
  * F5.3: the worker's SERVICE ROLE client (it processes every tenant and scopes all writes with ids read from the
@@ -18,5 +19,19 @@ export function createWorkerSupabase(url: string, serviceRoleKey: string, httpTi
     auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
     db: { retry: false },
     global: { fetch: fetchWithTimeout(fetchImpl, httpTimeoutMs) }
+  });
+}
+
+/**
+ * F5.5: the client used ONLY for attachment uploads to Storage: an upload that keeps progressing may last
+ * `timeoutMs` (WORKER_ATTACHMENT_TIMEOUT_MS; 25 MiB needed about 0.42 MiB/s under the shared 60 s limit), and the
+ * shutdown's cancel phase cancels it (F5.4 signal). Cancelling stops the local upload only: Storage may still
+ * complete it; the next attempt overwrites the same path or finds the object. PostgREST is not used through it.
+ */
+export function createWorkerUploadClient(url: string, serviceRoleKey: string, timeoutMs: number, cancelled: AbortSignal, fetchImpl: typeof fetch = globalThis.fetch): SupabaseClient {
+  return createClient(url, serviceRoleKey, {
+    auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
+    db: { retry: false },
+    global: { fetch: cancellableFetch(fetchWithTimeout(fetchImpl, timeoutMs), cancelled) }
   });
 }

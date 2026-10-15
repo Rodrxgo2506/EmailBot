@@ -210,6 +210,7 @@ Leyenda: **SECRET** = nunca en logs, repositorio ni bundle; se introduce con `sy
 | `MICROSOFT_GRAPH_NOTIFICATION_URL` | PUBLIC · WORKER ONLY | push de Microsoft (F9): URL https pública de `POST /webhooks/microsoft` de la API (`<API_PUBLIC_URL>/webhooks/microsoft`); el ciclo de vida usa `<URL>/lifecycle`. Requiere `MICROSOFT_CLIENT_*`. Sin ella, solo polling. Activarla a la vez que `MICROSOFT_GRAPH_PUSH_ENABLED=true` en la API (la API primero) |
 | `WORKER_WATCH_RENEW_INTERVAL_MINUTES` | PUBLIC · WORKER ONLY | 60 por defecto; renueva watches de Gmail y suscripciones de Microsoft; no definir |
 | `WORKER_MAX_ATTACHMENT_BYTES` | PUBLIC · WORKER ONLY | 25 MiB |
+| `WORKER_ATTACHMENT_TIMEOUT_MS` | PUBLIC · WORKER ONLY | 120000 (F5.5: límite total de una descarga de adjunto o de su subida a Storage mientras avanza; 10000 a 600000, nunca menor que `PROVIDER_HTTP_TIMEOUT_MS`). Ver *Adjuntos del worker* |
 | `WORKER_HEALTH_PORT`, `WORKER_HEALTH_HOST` | PUBLIC · WORKER ONLY | no definir en Render |
 | `WORKER_REDIS_COMMAND_TIMEOUT_MS` | PUBLIC · WORKER ONLY | 5000 (F5.2: límite de cada comando Redis de aplicación y de cada llamada de productor de colas; 500 a 30000). Ver *Redis de aplicación del worker* |
 | `WORKER_SHUTDOWN_TIMEOUT_MS` | PUBLIC · WORKER ONLY | 25000 (F5.1: presupuesto total del apagado, de la señal a la salida del proceso; mínimo 15000, máximo 600000). Debe quedar por debajo del plazo de apagado de Render: el Blueprint declara `maxShutdownDelaySeconds: 120`; el valor aplicado al servicio está sin verificar. Ver *Apagado del worker* |
@@ -241,10 +242,12 @@ de producción; en local `authenticator` tiene 8 s y `service_role` ninguno).
 
 | Petición | Proveedor | Límite | Cancelación por el apagado |
 |---|---|---|---|
-| Listado, mensajes, adjuntos, `users.watch` | Gmail API | `PROVIDER_HTTP_TIMEOUT_MS` (20 s; 1000 a 120000) | sí |
-| *Delta*, mensajes, adjuntos, suscripciones (crear, renovar, borrar) | Microsoft Graph | igual | sí |
+| Listado, mensajes, `users.watch` | Gmail API | `PROVIDER_HTTP_TIMEOUT_MS` (20 s; 1000 a 120000) | sí |
+| *Delta*, mensajes, suscripciones (crear, renovar, borrar) | Microsoft Graph | igual | sí |
 | Refresco de tokens | Google / Microsoft OAuth | igual | sí |
-| PostgREST, Storage | Supabase | `SUPABASE_HTTP_TIMEOUT_MS` (60 s) | no (F5.3) |
+| Descarga de adjuntos (F5.5) | Gmail API / Microsoft Graph | 20 s sin recibir datos; `WORKER_ATTACHMENT_TIMEOUT_MS` en total (120 s) | sí |
+| Subida de adjuntos (F5.5) | Supabase Storage | `WORKER_ATTACHMENT_TIMEOUT_MS` (120 s) | sí |
+| PostgREST, comprobación de objetos en Storage | Supabase | `SUPABASE_HTTP_TIMEOUT_MS` (60 s) | no (F5.3) |
 | Envío de eventos | Sentry (SDK) | su propio *flush* de 2 s en el apagado | no |
 
 El límite (`fetchWithTimeout`, compartido con la API, sin cambios) cubre la petición entera, cuerpo incluido, y se
@@ -259,7 +262,52 @@ Cancelar solo detiene la petición local: el proveedor puede haberla recibido y 
 emitido que no llega a guardarse, una suscripción de Graph o un *watch* de Gmail creados sin registrar). Son los
 mismos casos que un plazo vencido, ya existentes: el reintento vuelve a pedir el token o a crear la suscripción, un
 *watch* nuevo de Gmail sustituye al anterior y una suscripción de Graph sin registrar no está asociada a ninguna
-cuenta y caduca sola. El mismo límite de 20 s se aplica a las descargas de adjuntos (sus plazos son F5.5).
+cuenta y caduca sola. Los adjuntos tienen sus propios límites (ver *Adjuntos del worker*).
+
+## Adjuntos del worker (F5.5)
+
+Ciclo (`apps/worker/src/pipeline/process-email.ts`): filas de metadatos (`ON CONFLICT DO NOTHING` y relectura) →
+por cada adjunto no guardado y no mayor que `WORKER_MAX_ATTACHMENT_BYTES`: ¿existe ya el objeto en Storage? → si
+no, descarga del proveedor y subida a una ruta determinista con *upsert* → la fila se marca guardada. Un contenido
+que falla queda pendiente: el correo sigue `PROCESSING` / `ATTACHMENTS_PENDING`, el trabajo falla y se reanuda
+más tarde sin repetir lo ya hecho.
+
+Antes, la descarga tenía un único límite de 20 s para toda la respuesta: un adjunto de 25 MiB son unos 33 MiB de
+JSON en base64, así que con menos de ~1,7 MiB/s fallaba en todos los intentos; la subida tenía 60 s (25 MiB
+necesitaban ~0,42 MiB/s) y se repetía 3 veces dentro del trabajo aunque el fallo fuera un plazo vencido. Ahora
+(`apps/worker/src/infrastructure/attachment-transfer.ts`):
+
+- descarga leída por partes: falla si pasan `PROVIDER_HTTP_TIMEOUT_MS` sin recibir datos (un servidor colgado
+  falla igual de rápido que antes) o al cumplirse `WORKER_ATTACHMENT_TIMEOUT_MS`; con 120 s un adjunto de 25 MiB
+  necesita ~0,28 MiB/s de media;
+- tamaño: la lectura se corta en cuanto el cuerpo supera el tamaño codificado de `WORKER_MAX_ATTACHMENT_BYTES`
+  (más 64 KiB), aunque el proveedor declare un tamaño menor; ese contenido no se guarda, como uno demasiado grande.
+  Lo descargado nunca supera ese límite (las copias al leer y decodificar lo multiplican por unas pocas veces, como
+  antes, pero ya no dependen del tamaño real de la respuesta);
+- subida con un cliente de Storage propio (`createWorkerUploadClient`): límite `WORKER_ATTACHMENT_TIMEOUT_MS` y
+  sin repetirla dentro del trabajo tras un plazo vencido; otros errores se reintentan como antes. Si Storage guardó
+  el objeto pero la respuesta no llegó, el siguiente intento lo encuentra y no lo descarga ni lo sube otra vez;
+- el apagado (fase de cancelación, F5.4) cancela descargas y subidas en curso y no deja empezar otras: el trabajo
+  se detiene al momento como cancelado y se reintenta. Una descarga cancelada cierra su conexión al instante. Una
+  subida no: undici (Node 24) sigue enviando todo lo que ya había entregado al socket (con un adjunto en memoria,
+  normalmente el cuerpo entero), y al salir el proceso el sistema operativo entrega lo que tenga en sus búferes y
+  cierra la conexión. **Una subida cancelada puede completarse en Storage** (comprobado en local: 3 subidas de 4 MiB
+  canceladas y completadas después de la salida). Es seguro: la ruta es determinista y con *upsert*, la fila no se
+  marca en ese intento, y el siguiente encuentra el objeto y lo marca sin volver a descargarlo ni subirlo. Mientras
+  tanto esas transferencias ocupan conexiones y ancho de banda: como mucho una por trabajo en curso (15 con la
+  concurrencia por defecto: 10 de procesamiento y 5 de eventos), hasta la salida del proceso más lo que tarde el
+  sistema en vaciar sus búferes;
+
+Sin cambios: `WORKER_MAX_ATTACHMENT_BYTES`, `PROVIDER_HTTP_TIMEOUT_MS` y `SUPABASE_HTTP_TIMEOUT_MS` para el resto de
+peticiones, PostgREST (F5.3) y la API. Un trabajo con varios adjuntos lentos puede durar varias veces
+`WORKER_ATTACHMENT_TIMEOUT_MS`; el apagado lo corta en su fase de cancelación.
+
+Memoria (medida en local en un proceso hijo con la cadena real; pico de memoria residente del proceso, con mucha
+variación entre ejecuciones): un adjunto de 25 MiB lo eleva entre ~280 y ~470 MiB (cadena anterior a F5.5: ~450-500
+MiB) y tres a la vez entre ~500 y ~615 MiB (anterior: ~500-515 MiB), por las copias del cuerpo JSON, sus cadenas, la
+decodificación base64 y la subida. No es nuevo de F5.5 (F5.5 añade una copia transitoria del cuerpo al unir sus
+partes), pero con 15 trabajos a la vez y adjuntos grandes el pico puede superar la memoria de la instancia: pendiente
+de decidir (menos copias o un límite de transferencias de adjuntos simultáneas por proceso).
 
 ## Apagado del worker
 
@@ -275,7 +323,7 @@ presupuesto debe quedar por debajo.
 |---|---|---|
 | 1. Parar | 3 s (workers en paralelo) | `/readyz` pasa a *stopping*; se cancelan las operaciones IMAP en curso (sockets cerrados, no se abren nuevas) y `pause(true)` en cada worker BullMQ: no se toma ningún trabajo nuevo |
 | 2. Gracia | hasta total − 13,1 s (11,9 s) | espera a que terminen los trabajos en curso |
-| 3. Cancelación | 3 s | solo si queda alguno: se desconecta el cliente Redis del publicador *realtime* y se cancelan las peticiones HTTP a proveedores en curso (F5.4); un trabajo esperando en ellas falla y BullMQ lo reintenta |
+| 3. Cancelación | 3 s | solo si queda alguno: se desconecta el cliente Redis del publicador *realtime* y se cancelan las peticiones HTTP a proveedores y las subidas de adjuntos en curso (F5.4, F5.5); un trabajo esperando en ellas falla y BullMQ lo reintenta |
 | 4. Cierre | 3 s (workers en paralelo) | `close()`; forzado solo si aún queda un trabajo en curso |
 | 5. Liberación | 5 s cada uno, en paralelo | pool IMAP, colas, servidor de health; después se desconectan las conexiones Redis |
 | 6. Sentry | 2 s | `flush` |

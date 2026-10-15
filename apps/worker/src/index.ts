@@ -21,13 +21,14 @@ import { pino } from "pino";
 import { loadWorkerConfig } from "./config/env.js";
 import { createProviderContext } from "./credentials/token-manager.js";
 import { createAppRedis } from "./infrastructure/app-redis.js";
+import { boundedDownloadFetch, encodedAttachmentLimit } from "./infrastructure/attachment-transfer.js";
 import { closeServer, createHealthServer, listen, type WorkerHealthState } from "./infrastructure/health.js";
 import { cancellableFetch, createRequestCancellation } from "./infrastructure/http-cancellation.js";
 import { createImapSyncSlots, imapSyncSlotCount } from "./infrastructure/imap-slots.js";
 import { createJobProcessors } from "./infrastructure/job-processors.js";
 import { createWorkerQueues } from "./infrastructure/queues.js";
 import { createJobTracker, createShutdown, shutdownLimits } from "./infrastructure/shutdown.js";
-import { createWorkerSupabase } from "./infrastructure/supabase-client.js";
+import { createWorkerSupabase, createWorkerUploadClient } from "./infrastructure/supabase-client.js";
 import { captureWorkerException, flushWorkerSentry, initWorkerSentry, jobType, reportJobFailure } from "./infrastructure/sentry.js";
 import { createAppRedisSyncLock } from "./infrastructure/sync-lock.js";
 import {
@@ -68,6 +69,18 @@ const supabase = createWorkerSupabase(config.supabaseUrl, config.supabaseService
 // PROVIDER_HTTP_TIMEOUT_MS; F5.4: the shutdown's cancel phase also cancels the ones in flight (http-cancellation.ts).
 const providerRequests = createRequestCancellation();
 const providerFetch = cancellableFetch(fetchWithTimeout(globalThis.fetch, config.providerHttpTimeoutMs), providerRequests.signal);
+// F5.5: attachment downloads are streamed: no byte for PROVIDER_HTTP_TIMEOUT_MS fails as before, a transfer that keeps
+// progressing may last WORKER_ATTACHMENT_TIMEOUT_MS, and a body over the attachment size limit is cut at once.
+const attachmentFetch = cancellableFetch(
+  boundedDownloadFetch(globalThis.fetch, {
+    idleMs: config.providerHttpTimeoutMs,
+    totalMs: config.attachmentTimeoutMs,
+    maxBytes: encodedAttachmentLimit(config.maxAttachmentBytes)
+  }),
+  providerRequests.signal
+);
+// F5.5: attachment uploads to Storage only (own limit, cancelled by the shutdown); PostgREST keeps `supabase`.
+const uploadClient = createWorkerUploadClient(config.supabaseUrl, config.supabaseServiceRoleKey, config.attachmentTimeoutMs, providerRequests.signal);
 
 // BullMQ workers require maxRetriesPerRequest = null (BullMQ workers and queues only).
 const connection = new Redis(config.redisUrl, { maxRetriesPerRequest: null });
@@ -106,7 +119,7 @@ const emails = createEmailStore(supabase);
 const realtime = createAppRealtimePublisher(publisherRedis);
 // IMAP: the pool and the real adapter exist only when IMAP synchronization is enabled (fixed false today).
 const imapPool = config.imapSyncEnabled ? new ImapConnectionPool<ImapClient>() : null;
-const providers = createProviderRegistry(providerFetch, imapPool ? { imap: createImapSyncAdapter({ pool: imapPool }) } : {});
+const providers = createProviderRegistry(providerFetch, { ...(imapPool ? { imap: createImapSyncAdapter({ pool: imapPool }) } : {}), attachmentFetch });
 const secretBox = SecretBox.fromBase64(config.tokenEncryptionKey);
 
 const createContext = (account: WorkerAccount) =>
@@ -119,7 +132,7 @@ const processDeps: Omit<ProcessEmailDeps, "logger"> = {
   emails,
   routing: createRoutingStore(supabase),
   audit: auditRecorder,
-  storage: createAttachmentStorage(supabase),
+  storage: createAttachmentStorage(supabase, uploadClient),
   realtime,
   producer: queues.producer,
   providers,
