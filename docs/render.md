@@ -210,6 +210,8 @@ Leyenda: **SECRET** = nunca en logs, repositorio ni bundle; se introduce con `sy
 | `MICROSOFT_GRAPH_NOTIFICATION_URL` | PUBLIC · WORKER ONLY | push de Microsoft (F9): URL https pública de `POST /webhooks/microsoft` de la API (`<API_PUBLIC_URL>/webhooks/microsoft`); el ciclo de vida usa `<URL>/lifecycle`. Requiere `MICROSOFT_CLIENT_*`. Sin ella, solo polling. Activarla a la vez que `MICROSOFT_GRAPH_PUSH_ENABLED=true` en la API (la API primero) |
 | `WORKER_WATCH_RENEW_INTERVAL_MINUTES` | PUBLIC · WORKER ONLY | 60 por defecto; renueva watches de Gmail y suscripciones de Microsoft; no definir |
 | `WORKER_MAX_ATTACHMENT_BYTES` | PUBLIC · WORKER ONLY | 25 MiB |
+| `WORKER_ATTACHMENT_TRANSFER_CONCURRENCY` | PUBLIC · WORKER ONLY | 1 (F5.6, k: transferencias de adjuntos a la vez en cada proceso del worker, no entre instancias; 1 a 16; un valor inválido impide arrancar). Subirlo sube también el valor por defecto de `WORKER_ATTACHMENT_CONTENT_CONCURRENCY` y puede elevar mucho la memoria: cada transferencia tiene su propio pico de copias temporales. Ver *Adjuntos del worker* |
+| `WORKER_ATTACHMENT_CONTENT_CONCURRENCY` | PUBLIC · WORKER ONLY | sin definir = k + 1 (2 con el valor por defecto de k). F5.6, m: contenidos de adjuntos decodificados que el pipeline retiene a la vez en cada proceso, esperas entre reintentos incluidas; 1 a 32 y nunca menor que `WORKER_ATTACHMENT_TRANSFER_CONCURRENCY`; un valor inválido impide arrancar. No limita la memoria residente del proceso (ver *Adjuntos del worker*) |
 | `WORKER_ATTACHMENT_TIMEOUT_MS` | PUBLIC · WORKER ONLY | 120000 (F5.5: límite total de una descarga de adjunto o de su subida a Storage mientras avanza; 10000 a 600000, nunca menor que `PROVIDER_HTTP_TIMEOUT_MS`). Ver *Adjuntos del worker* |
 | `WORKER_HEALTH_PORT`, `WORKER_HEALTH_HOST` | PUBLIC · WORKER ONLY | no definir en Render |
 | `WORKER_REDIS_COMMAND_TIMEOUT_MS` | PUBLIC · WORKER ONLY | 5000 (F5.2: límite de cada comando Redis de aplicación y de cada llamada de productor de colas; 500 a 30000). Ver *Redis de aplicación del worker* |
@@ -294,9 +296,9 @@ necesitaban ~0,42 MiB/s) y se repetía 3 veces dentro del trabajo aunque el fall
   cierra la conexión. **Una subida cancelada puede completarse en Storage** (comprobado en local: 3 subidas de 4 MiB
   canceladas y completadas después de la salida). Es seguro: la ruta es determinista y con *upsert*, la fila no se
   marca en ese intento, y el siguiente encuentra el objeto y lo marca sin volver a descargarlo ni subirlo. Mientras
-  tanto esas transferencias ocupan conexiones y ancho de banda: como mucho una por trabajo en curso (15 con la
-  concurrencia por defecto: 10 de procesamiento y 5 de eventos), hasta la salida del proceso más lo que tarde el
-  sistema en vaciar sus búferes;
+  tanto esas transferencias ocupan conexiones y ancho de banda: como mucho una por tarea de adjuntos en curso (25
+  con la concurrencia por defecto: 10 trabajos de procesamiento más 5 de eventos con hasta 3 mensajes cada uno),
+  hasta la salida del proceso más lo que tarde el sistema en vaciar sus búferes;
 
 Sin cambios: `WORKER_MAX_ATTACHMENT_BYTES`, `PROVIDER_HTTP_TIMEOUT_MS` y `SUPABASE_HTTP_TIMEOUT_MS` para el resto de
 peticiones, PostgREST (F5.3) y la API. Un trabajo con varios adjuntos lentos puede durar varias veces
@@ -308,6 +310,53 @@ MiB) y tres a la vez entre ~500 y ~615 MiB (anterior: ~500-515 MiB), por las cop
 decodificación base64 y la subida. No es nuevo de F5.5 (F5.5 añade una copia transitoria del cuerpo al unir sus
 partes), pero con 15 trabajos a la vez y adjuntos grandes el pico puede superar la memoria de la instancia: pendiente
 de decidir (menos copias o un límite de transferencias de adjuntos simultáneas por proceso).
+
+Límite de transferencias (F5.6, fase 1; `apps/worker/src/infrastructure/attachment-transfers.ts`): cada proceso
+del worker hace como mucho `WORKER_ATTACHMENT_TRANSFER_CONCURRENCY` transferencias a la vez (1 por defecto; cada
+instancia tiene el suyo). Una transferencia es la descarga de un adjunto (con su decodificación) y su subida; la
+comprobación de existencia, la actualización de la fila y las esperas entre reintentos de subida van sin permiso.
+Los demás trabajan en orden de llegada (FIFO); un trabajo sin adjuntos que guardar no espera nunca. Los límites de
+F5.5 (tamaño, inactividad, total) solo cuentan desde que la transferencia empieza. La fase de cancelación del apagado
+rechaza al momento a quienes esperan (cancelados, se reintentan) y no concede más permisos; quien ya transfiere
+mantiene la cancelación de F5.4 / F5.5. Con 1, solo un adjunto a la vez pasa por la parte costosa (descarga,
+decodificación y subida). Los trabajos con adjuntos tardan más cuando coinciden.
+
+Contenidos retenidos (`WORKER_ATTACHMENT_CONTENT_CONCURRENCY`, m; transferencias: k): un adjunto toma un permiso de
+contenido antes de descargarse y lo conserva hasta guardarse o darse por pendiente, esperas entre reintentos incluidas
+(el permiso de transferencia se devuelve en esas esperas). Orden fijo (contenido y después transferencia; nunca se
+espera contenido con un permiso de transferencia): sin interbloqueos. La fase de cancelación del apagado rechaza
+también a quienes esperan contenido. Sin definir, m = k + 1 (2 con k = 1): el valor mínimo con el que una
+transferencia sigue avanzando mientras otro contenido espera su reintento (con m = k un permiso de transferencia
+devuelto no serviría a nadie). Subir k sube también ese valor por defecto de m y puede elevar mucho la memoria: cada
+una de las k transferencias simultáneas tiene su propio pico de copias temporales.
+
+Qué limita m: el número de contenidos decodificados que **gestiona el pipeline** a la vez en cada proceso (cada uno de
+hasta `WORKER_MAX_ATTACHMENT_BYTES`), de los que como mucho k están en plena transferencia. Sin este límite podían
+ser hasta 25 tareas de adjuntos a la vez (unos 625 MiB solo de contenidos con adjuntos de 25 MiB).
+
+Qué no limita m: **la memoria residente real del proceso**, que además incluye:
+
+- la base del proceso (código, dependencias, clientes, colas);
+- las copias temporales de cada transferencia en curso: el cuerpo JSON, sus cadenas, la decodificación base64 y las
+  copias internas de undici al subir;
+- los mensajes completos que procesa cada trabajo y el resto de su memoria, que no pasan por estos permisos;
+- los cuerpos de subidas abortadas (vencidas o canceladas por el apagado): undici rechaza la petición al momento pero
+  conserva lo que ya había entregado al socket hasta terminar de enviarlo o cerrar la conexión, después de que se
+  hayan liberado los dos permisos. Ante un Storage lento, varios de esos cuerpos pueden convivir fuera de cualquier
+  límite (comprobado para la cancelación; para el plazo vencido es el mismo mecanismo de `AbortSignal`, no probado
+  por separado).
+
+Estimación orientativa por proceso con los valores por defecto (mediciones locales en Windows con Node 24, no de
+Render ni de producción): la base del proceso, un pico de transferencia (+281 a +470 MiB de memoria residente con un
+adjunto de 25 MiB) y otro contenido retenido (25 MiB), más lo que haya de la lista anterior. Memoria real de la
+instancia en Render: sin verificar.
+
+Riesgos aparte, fuera de los permisos de adjuntos:
+
+- Gmail: una parte con su contenido en línea (`body.data` sin `attachmentId`) no se guarda como adjunto, pero ese
+  contenido viaja dentro del JSON del mensaje que descarga `fetchMessage` y ocupa memoria mientras se procesa.
+- IMAP (desactivado): la copia del mensaje que se conserva durante el trabajo (`providers/imap/message-scope.ts`, hasta
+  10 MiB) no pasa por estos permisos; revisarlo antes de activar IMAP.
 
 ## Apagado del worker
 

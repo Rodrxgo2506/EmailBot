@@ -2,6 +2,14 @@ import { encryptionKeyEnv, EnvValidationError, graphLifecycleUrl, optionalEnv, p
 import { productionUrlProblem, PUBLIC_URL, REDIS_URL } from "@emailbot/validation";
 import { z } from "zod";
 import { DEFAULT_REDIS_COMMAND_TIMEOUT_MS, MAX_REDIS_COMMAND_TIMEOUT_MS, MIN_REDIS_COMMAND_TIMEOUT_MS } from "../infrastructure/app-redis.js";
+import {
+  DEFAULT_ATTACHMENT_TRANSFER_CONCURRENCY,
+  defaultAttachmentContentConcurrency,
+  MAX_ATTACHMENT_CONTENT_CONCURRENCY,
+  MAX_ATTACHMENT_TRANSFER_CONCURRENCY,
+  MIN_ATTACHMENT_CONTENT_CONCURRENCY,
+  MIN_ATTACHMENT_TRANSFER_CONCURRENCY
+} from "../infrastructure/attachment-transfers.js";
 import { DEFAULT_SHUTDOWN_TIMEOUT_MS, MIN_SHUTDOWN_TIMEOUT_MS } from "../infrastructure/shutdown.js";
 
 const envSchema = z.object({
@@ -63,6 +71,21 @@ const envSchema = z.object({
    * for PROVIDER_HTTP_TIMEOUT_MS still fails then). See infrastructure/attachment-transfer.ts.
    */
   WORKER_ATTACHMENT_TIMEOUT_MS: z.coerce.number().int().min(10_000).max(600_000).default(120_000),
+  /**
+   * F5.6: attachment transfers (download + decoding + upload) at once in ONE worker process (not across instances).
+   * 1 to 16 (up to 25 attachment tasks may run at once with the default concurrency); invalid values stop the worker.
+   */
+  WORKER_ATTACHMENT_TRANSFER_CONCURRENCY: z.coerce
+    .number()
+    .int()
+    .min(MIN_ATTACHMENT_TRANSFER_CONCURRENCY)
+    .max(MAX_ATTACHMENT_TRANSFER_CONCURRENCY)
+    .default(DEFAULT_ATTACHMENT_TRANSFER_CONCURRENCY),
+  /**
+   * F5.6: decoded attachment contents held at once in ONE worker process (retry waits included). 1 to 32, at least
+   * WORKER_ATTACHMENT_TRANSFER_CONCURRENCY; unset: that value + 1. Invalid values stop the worker.
+   */
+  WORKER_ATTACHMENT_CONTENT_CONCURRENCY: optionalEnv(z.coerce.number().int().min(MIN_ATTACHMENT_CONTENT_CONCURRENCY).max(MAX_ATTACHMENT_CONTENT_CONCURRENCY)),
 
   /** Timeout of every call to Google / Microsoft (OAuth token refresh, Gmail, Graph, attachment downloads). */
   PROVIDER_HTTP_TIMEOUT_MS: z.coerce.number().int().min(1000).max(120_000).default(20_000),
@@ -92,6 +115,11 @@ const envSchema = z.object({
   SENTRY_DSN: optionalEnv(z.url())
 }).superRefine((env, ctx) => {
   const issue = (path: string, message: string) => ctx.addIssue({ code: "custom", path: [path], message });
+
+  // F5.6: every transfer holds a content permit, so fewer contents than transfers would leave transfer permits unused.
+  if (env.WORKER_ATTACHMENT_CONTENT_CONCURRENCY !== undefined && env.WORKER_ATTACHMENT_CONTENT_CONCURRENCY < env.WORKER_ATTACHMENT_TRANSFER_CONCURRENCY) {
+    issue("WORKER_ATTACHMENT_CONTENT_CONCURRENCY", "must be at least WORKER_ATTACHMENT_TRANSFER_CONCURRENCY");
+  }
 
   // F5.5: an attachment transfer may not have a shorter limit than any other provider request.
   if (env.WORKER_ATTACHMENT_TIMEOUT_MS < env.PROVIDER_HTTP_TIMEOUT_MS) {
@@ -157,6 +185,10 @@ export interface WorkerConfig {
   maxAttachmentBytes: number;
   /** F5.5: total limit (ms) of one attachment download / Storage upload, see infrastructure/attachment-transfer.ts. */
   attachmentTimeoutMs: number;
+  /** F5.6: attachment transfers at once in this process, see infrastructure/attachment-transfers.ts. */
+  attachmentTransferConcurrency: number;
+  /** F5.6: decoded attachment contents held at once in this process, see infrastructure/attachment-transfers.ts. */
+  attachmentContentConcurrency: number;
   /** F5.1: total shutdown budget (ms), see infrastructure/shutdown.ts. */
   shutdownTimeoutMs: number;
   /** F5.2: application Redis command / queue producer limit (ms), see infrastructure/app-redis.ts. */
@@ -233,6 +265,8 @@ export function loadWorkerConfig(source: NodeJS.ProcessEnv = process.env): Worke
     watchRenewIntervalMinutes: env.WORKER_WATCH_RENEW_INTERVAL_MINUTES,
     maxAttachmentBytes: env.WORKER_MAX_ATTACHMENT_BYTES,
     attachmentTimeoutMs: env.WORKER_ATTACHMENT_TIMEOUT_MS,
+    attachmentTransferConcurrency: env.WORKER_ATTACHMENT_TRANSFER_CONCURRENCY,
+    attachmentContentConcurrency: env.WORKER_ATTACHMENT_CONTENT_CONCURRENCY ?? defaultAttachmentContentConcurrency(env.WORKER_ATTACHMENT_TRANSFER_CONCURRENCY),
     health: (env.WORKER_HEALTH_PORT ?? env.PORT) !== undefined
       ? { port: (env.WORKER_HEALTH_PORT ?? env.PORT) as number, host: env.WORKER_HEALTH_HOST }
       : null,

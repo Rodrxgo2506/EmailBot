@@ -22,6 +22,7 @@ import { loadWorkerConfig } from "./config/env.js";
 import { createProviderContext } from "./credentials/token-manager.js";
 import { createAppRedis } from "./infrastructure/app-redis.js";
 import { boundedDownloadFetch, encodedAttachmentLimit } from "./infrastructure/attachment-transfer.js";
+import { createAttachmentContents, createAttachmentTransfers } from "./infrastructure/attachment-transfers.js";
 import { closeServer, createHealthServer, listen, type WorkerHealthState } from "./infrastructure/health.js";
 import { cancellableFetch, createRequestCancellation } from "./infrastructure/http-cancellation.js";
 import { createImapSyncSlots, imapSyncSlotCount } from "./infrastructure/imap-slots.js";
@@ -81,6 +82,10 @@ const attachmentFetch = cancellableFetch(
 );
 // F5.5: attachment uploads to Storage only (own limit, cancelled by the shutdown); PostgREST keeps `supabase`.
 const uploadClient = createWorkerUploadClient(config.supabaseUrl, config.supabaseServiceRoleKey, config.attachmentTimeoutMs, providerRequests.signal);
+// F5.6: attachment transfers at once in this process (memory); waiting tasks are refused by the shutdown's cancel phase.
+const attachmentTransfers = createAttachmentTransfers(config.attachmentTransferConcurrency, providerRequests.signal);
+// F5.6: decoded attachment contents held at once in this process (retry waits included); same shutdown cancellation.
+const attachmentContents = createAttachmentContents(config.attachmentContentConcurrency, providerRequests.signal);
 
 // BullMQ workers require maxRetriesPerRequest = null (BullMQ workers and queues only).
 const connection = new Redis(config.redisUrl, { maxRetriesPerRequest: null });
@@ -139,6 +144,8 @@ const processDeps: Omit<ProcessEmailDeps, "logger"> = {
   createContext,
   attachmentsBucket: config.attachmentsBucket,
   maxAttachmentBytes: config.maxAttachmentBytes,
+  attachmentTransfers,
+  attachmentContents,
   imapSyncEnabled: config.imapSyncEnabled
 };
 

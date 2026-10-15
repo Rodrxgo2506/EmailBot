@@ -2,6 +2,7 @@ import { evaluateRules, parseRuleRow, type EngineRule, type RuleEvaluationResult
 import { buildAttachmentPath, HttpTimeoutError, serializeError, type EmailProcessingJob } from "@emailbot/shared";
 import type { NormalizedAttachment, NormalizedEmail } from "@emailbot/types";
 import { ResponseTooLargeError } from "../infrastructure/attachment-transfer.js";
+import type { AttachmentContents, AttachmentTransfers } from "../infrastructure/attachment-transfers.js";
 import { RequestCancelledError } from "../infrastructure/http-cancellation.js";
 import { imapOperationsRefused } from "../providers/imap/deadline.js";
 import { imapMessageReusableById } from "../providers/imap/message-scope.js";
@@ -40,6 +41,16 @@ export interface ProcessEmailDeps {
   logger: Logger;
   /** In-job retries of Storage / attachment-row writes (default 3 attempts, 250 ms apart). */
   storageAttempts?: number;
+  /**
+   * F5.6: per-process limit of attachment transfers (download + decoding + upload) at once, shared by every job of
+   * the process. Absent: no limit (as before).
+   */
+  attachmentTransfers?: AttachmentTransfers;
+  /**
+   * F5.6: per-process limit of decoded attachment contents held at once (from before the download until the attachment
+   * is stored or given up, retry waits included). Absent: no limit (as before).
+   */
+  attachmentContents?: AttachmentContents;
   storageRetryDelayMs?: number;
   /** IMAP synchronization (worker config, fixed false until IMAP is launched). Absent / false: IMAP mail is never fetched. */
   imapSyncEnabled?: boolean;
@@ -408,6 +419,35 @@ async function storeContent(
   const bucket = deps.attachmentsBucket;
 
   if (!(await withRetries(deps, () => deps.storage.exists(bucket, path)))) {
+    // F5.6: a content permit first (held while the decoded content lives, retry waits included), then the transfer
+    // permit (transferContent). Never the other way round (no deadlock). The existence check above and the row update
+    // below run without either.
+    const retained = deps.attachmentContents ? await deps.attachmentContents.acquire() : null;
+    try {
+      if (!(await transferContent(row, path, providerMessageId, account, context, deps))) return false;
+    } finally {
+      retained?.release();
+    }
+  }
+  await withRetries(deps, () => deps.emails.markAttachmentStored(row.id, bucket, path));
+  return true;
+}
+
+/**
+ * F5.6: downloads (with the adapter's decoding) and uploads one content under a transfer permit, given back during
+ * the waits between in-job upload retries. Returns false when the content is intentionally not stored (over the size
+ * limit).
+ */
+async function transferContent(
+  row: StoredAttachment,
+  path: string,
+  providerMessageId: string,
+  account: WorkerAccount,
+  context: ProviderContext,
+  deps: ProcessEmailDeps
+): Promise<boolean> {
+  const slot = await transferSlot(deps.attachmentTransfers);
+  try {
     let content: Uint8Array;
     try {
       content = await deps.providers[account.provider].downloadAttachment(context, providerMessageId, row.providerAttachmentId as string);
@@ -422,10 +462,16 @@ async function storeContent(
     if (content.byteLength > deps.maxAttachmentBytes) return false;
     // F5.5: an upload that timed out is not repeated in this job (the same slow transfer would time out again); the
     // content stays pending and a later run finds the object (if Storage completed it) or uploads it again.
-    await withRetries(deps, () => deps.storage.upload(bucket, path, content, row.contentType), (error) => !(error instanceof HttpTimeoutError || error instanceof RequestCancelledError));
+    await withRetries(
+      deps,
+      () => deps.storage.upload(deps.attachmentsBucket, path, content, row.contentType),
+      (error) => !(error instanceof HttpTimeoutError || error instanceof RequestCancelledError),
+      (wait) => slot.pause(wait)
+    );
+    return true;
+  } finally {
+    slot.release();
   }
-  await withRetries(deps, () => deps.emails.markAttachmentStored(row.id, bucket, path));
-  return true;
 }
 
 function attachmentRow(attachment: NormalizedAttachment, emailId: string, account: WorkerAccount) {
@@ -441,7 +487,13 @@ function attachmentRow(attachment: NormalizedAttachment, emailId: string, accoun
   };
 }
 
-async function withRetries<T>(deps: ProcessEmailDeps, operation: () => Promise<T>, retryable: (error: unknown) => boolean = () => true): Promise<T> {
+/** `aroundWait` (F5.6): runs the wait between two attempts (the transfer slot is released meanwhile). */
+async function withRetries<T>(
+  deps: ProcessEmailDeps,
+  operation: () => Promise<T>,
+  retryable: (error: unknown) => boolean = () => true,
+  aroundWait: (wait: () => Promise<void>) => Promise<void> = (wait) => wait()
+): Promise<T> {
   const attempts = deps.storageAttempts ?? 3;
   const delayMs = deps.storageRetryDelayMs ?? 250;
   for (let attempt = 1; ; attempt++) {
@@ -449,7 +501,28 @@ async function withRetries<T>(deps: ProcessEmailDeps, operation: () => Promise<T
       return await operation();
     } catch (error) {
       if (attempt >= attempts || error instanceof ProviderAuthError || !retryable(error)) throw error;
-      await new Promise((resolve) => setTimeout(resolve, delayMs * attempt));
+      await aroundWait(() => new Promise<void>((resolve) => setTimeout(resolve, delayMs * attempt)));
     }
   }
+}
+
+/**
+ * F5.6: the permit of one attachment transfer. `pause` gives it back for a wait that transfers nothing (a retry
+ * delay) and queues again (FIFO) for the next attempt; `release` is final and idempotent. Without a limiter
+ * (`transfers` absent) both are no-ops.
+ */
+async function transferSlot(transfers: AttachmentTransfers | undefined) {
+  let permit = transfers ? await transfers.acquire() : null;
+  return {
+    release() {
+      permit?.release();
+      permit = null;
+    },
+    async pause(wait: () => Promise<void>) {
+      permit?.release();
+      permit = null;
+      await wait();
+      if (transfers) permit = await transfers.acquire();
+    }
+  };
 }
