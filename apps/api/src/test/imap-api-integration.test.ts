@@ -12,6 +12,7 @@ import {
 } from "@emailbot/shared";
 import type { EmailAccount } from "@emailbot/types";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { FakeRedis } from "./fake-redis.js";
 import { authHeaders, createTestApp, makeUser, ORG_A } from "./helpers.js";
 
 /*
@@ -89,7 +90,7 @@ const resolver: ImapResolver = vi.fn(async () => [{ address: TEST_IP, family: 4 
 const realOpen: ImapProbeOpen = (options, login, onClient) => openImapClient(options, login, { onClient });
 
 async function setup() {
-  ctx = await createTestApp({ users: [owner], config: { imapAccountsEnabled: true }, imapResolver: resolver, imapProbeOpen: realOpen });
+  ctx = await createTestApp({ users: [owner], config: { imapAccountsEnabled: true }, imapResolver: resolver, imapProbeOpen: realOpen, rateLimitRedis: new FakeRedis() });
   ctx.repos.emailAccounts.list.mockResolvedValue([]);
   return ctx;
 }

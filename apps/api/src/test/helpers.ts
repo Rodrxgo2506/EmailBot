@@ -45,6 +45,8 @@ export function testConfig(overrides: Partial<ApiConfig> = {}): ApiConfig {
     gmailPubSubOidc: null,
     microsoftGraphPushEnabled: false,
     imapAccountsEnabled: false,
+    // A random IMAP limit key per test app (production: IMAP_RATE_LIMIT_SECRET; absent = IMAP refuses).
+    imapRateLimitSecret: randomBytes(32).toString("base64"),
     transactionalEmail: null,
     syncHealthStaleMinutes: 20,
     sentryDsn: null,

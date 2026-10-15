@@ -2,6 +2,7 @@ import { imapCredentialContext, type ImapProbeOpen, type ImapResolver } from "@e
 import type { EmailAccount } from "@emailbot/types";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { authHeaders, createTestApp, makeUser, ORG_A } from "./helpers.js";
+import { FakeRedis } from "./fake-redis.js";
 import { entitlementsFor } from "./plan-fixtures.js";
 
 /*
@@ -68,7 +69,7 @@ const fakeImapOpen = (): ImapProbeOpen =>
   });
 
 async function setup(resolver: ImapResolver = publicResolver()) {
-  ctx = await createTestApp({ users: [owner, admin, viewer], config: { imapAccountsEnabled: true }, imapResolver: resolver, imapProbeOpen: fakeImapOpen() });
+  ctx = await createTestApp({ users: [owner, admin, viewer], config: { imapAccountsEnabled: true }, imapResolver: resolver, imapProbeOpen: fakeImapOpen(), rateLimitRedis: new FakeRedis() });
   ctx.repos.emailAccounts.list.mockResolvedValue([]);
   return { ...ctx, resolver };
 }

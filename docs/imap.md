@@ -9,7 +9,8 @@ se conecta en producción hasta que un cambio de código lo active.
 | E1 | Permisos de `email_accounts`, función atómica `connect_imap_email_account`, entitlement `IMAP` (PRO, BUSINESS), protección SSRF (`@emailbot/shared` `imap-destination.ts`), TLS obligatorio, `SecretBox` v2 | hecho |
 | E2 | Adaptador IMAP del worker (este documento) | hecho, desactivado |
 | E3 | Transporte compartido (`@emailbot/shared` `imap-client.ts`), prueba de conexión y alta con conexión previa en la API | hecho, desactivado |
-| E4 | Formulario web | pendiente |
+| E4 | Endurecimiento de límites de abuso: claves HMAC, límites compartidos solo en Redis (503 si falla), límite global por buzón, 503 antes de leer el cuerpo | hecho, desactivado |
+| E5 | Formulario web | pendiente |
 
 ## Transporte compartido (E3)
 
@@ -31,7 +32,7 @@ por el worker y por la API:
 
 ## API (E3)
 
-Ambas rutas, detrás del mismo 503 `IMAP_NOT_AVAILABLE` (antes de leer el cuerpo y la contraseña):
+Ambas rutas, detrás del mismo 503 `IMAP_NOT_AVAILABLE`:
 
 - `POST /api/email-accounts/imap/test` — `{ emailAddress, host, port, security, username, password }` →
   `{ ok: true }`. No guarda nada, no encola nada, no importa nada.
@@ -40,46 +41,114 @@ Ambas rutas, detrás del mismo 503 `IMAP_NOT_AVAILABLE` (antes de leer el cuerpo
   `connect_imap_email_account` (E1: bloqueo de la organización, plan, límite, duplicados y reconexión en una
   transacción; si falla no queda cuenta ni secreto). La cuenta queda PAUSED y no se encola nada.
 
-Orden de comprobaciones: autenticación → organización → `email-accounts:manage` (OWNER / ADMIN) → límite por
-IP de la ruta → 503 → validación estricta (solo 993/TLS o 143/STARTTLS, nombre DNS público, sin IP literal,
-tamaños acotados, sin campos extra) → plan `IMAP` (PRO, BUSINESS) y hueco en `EMAIL_ACCOUNTS` salvo reconexión
-del mismo buzón IMAP, y el mismo buzón no conectado por Gmail / Microsoft (solo en la propia organización) →
-intentos por usuario / organización → bloqueo por logins rechazados → destino SSRF con sus códigos
-(`IMAP_ADDRESS_FORBIDDEN`, `IMAP_DNS_FAILED`…) → concurrencia → prueba. Ninguna consulta DNS ni conexión
-ocurre antes de contar el intento.
+### Ruta desactivada y cuerpo de la petición (E4, B2)
 
-Límites de abuso (`apps/api/src/modules/email-accounts/imap-connection.ts`, sobre la infraestructura existente):
+Ciclo de Fastify de las dos rutas IMAP: `onRequest` (límite por IP de la ruta, como todas) → `preParsing`
+(autenticación → organización → `email-accounts:manage` → comprobación "IMAP desactivado") → lectura y
+análisis del cuerpo → handler. Mientras IMAP está desactivado la respuesta 503 sale **antes de leer el
+cuerpo**: un JSON válido, malformado, de más de 1 MB o `text/plain` reciben el mismo 503, y no se consulta DNS,
+no se abre un socket, no se cifra ni descifra, no se persiste ni se encola nada. Anónimo → 401, sin permiso
+o de otra organización → 403 (sin cambios). El resto de rutas conserva su orden (`preHandler`).
 
-- por IP: `RATE_LIMITS.imapTest` / `imapCreate` (10 cada 10 min);
-- por usuario 10 y por organización 20 intentos cada 10 min (almacén de rate limit: Redis, contadores por
-  instancia si falla) → 429 `IMAP_TEST_RATE_LIMITED`. Cuenta toda petición que llega a ese punto, sea cual
-  sea su resultado (destino rechazado, DNS, TLS, timeout);
-- bloqueo por logins rechazados (solo `IMAP_AUTH_FAILED`; nunca DNS, TLS, timeout ni validación), con
-  `login-throttle.ts` y la política `IMAP_LOGIN_LOCKOUT`: 10 en 15 min por buzón y 30 en 15 min por
-  organización, bloqueo de 15 min → 429 `IMAP_LOGIN_LOCKED` sin contactar al servidor. El buzón es
-  (organización, servidor, usuario): el usuario se compara sin distinguir mayúsculas y el puerto no forma
-  parte de la clave (993 y 143 llegan a la misma cuenta). Solo es la clave: el usuario enviado al servidor no
-  cambia. Claves con hash o ids, nunca host ni usuario. El portal conserva su política (`LOGIN_LOCKOUT`);
-- concurrencia por instancia: 1 prueba por organización, 4 en total → 429 `IMAP_TEST_BUSY`;
-- duración máxima de 30 s y cierre forzado.
+### Orden de comprobaciones (IMAP activado)
+
+Límite por IP → autenticación → organización → permiso → validación estricta (solo 993/TLS o 143/STARTTLS,
+nombre DNS público, sin IP literal, tamaños acotados, sin campos extra) → plan `IMAP` (PRO, BUSINESS) y hueco
+en `EMAIL_ACCOUNTS` salvo reconexión del mismo buzón IMAP, y el mismo buzón no conectado por Gmail / Microsoft
+(solo en la propia organización) → secreto de límites configurado → intentos por usuario / organización →
+bloqueo por logins rechazados → destino SSRF con sus códigos (`IMAP_ADDRESS_FORBIDDEN`, `IMAP_DNS_FAILED`…) →
+concurrencia → límite global por buzón → prueba. Ninguna consulta DNS ni conexión ocurre antes de contar el
+intento.
+
+### Límites de abuso
+
+`apps/api/src/modules/email-accounts/imap-connection.ts` (`IMAP_CONNECTION_LIMITS`, `IMAP_LOGIN_LOCKOUT`):
+
+| Límite | Valor | Respuesta |
+|---|---|---|
+| Por IP (ruta) | 10 / 10 min (`RATE_LIMITS.imapTest`, `imapCreate`) | 429 `RATE_LIMITED` |
+| Intentos por usuario | 10 / 10 min (todo intento que llega a ese punto, sea cual sea su resultado) | 429 `IMAP_TEST_RATE_LIMITED` |
+| Intentos por organización | 20 / 10 min | 429 `IMAP_TEST_RATE_LIMITED` |
+| Logins rechazados por buzón (organización, servidor, usuario) | 10 / 15 min → bloqueo de 15 min | 429 `IMAP_LOGIN_LOCKED` |
+| Logins rechazados por organización | 30 / 15 min → bloqueo de 15 min | 429 `IMAP_LOGIN_LOCKED` |
+| **Logins rechazados por buzón externo, todas las organizaciones** (M2) | 30 / ventana fija de 15 min | 429 `IMAP_TEST_RATE_LIMITED` |
+| Concurrencia por organización (compartida) | 1, con *lease* de 90 s | 429 `IMAP_TEST_BUSY` |
+| Concurrencia por instancia de la API (recurso local) | 4 | 429 `IMAP_TEST_BUSY` |
+| Duración de una prueba | 30 s y cierre forzado | 422 `IMAP_TIMEOUT` |
+
+Solo los logins rechazados (`IMAP_AUTH_FAILED`) alimentan los bloqueos y el límite global; los errores de DNS,
+TLS, timeout o validación nunca cuentan como contraseña incorrecta. El buzón se compara sin distinguir
+mayúsculas en servidor y usuario y sin el puerto (993 y 143 llegan a la misma cuenta); es solo la clave: el
+usuario enviado al servidor no cambia. El portal conserva su propia política (`LOGIN_LOCKOUT`).
+
+**Límite global por buzón (E4, M2).** Clave: HMAC de (servidor, usuario), sin organización ni puerto. Antes de
+conectar se reserva una unidad con un script Lua atómico (`RESERVE_SCRIPT`: INCR + PEXPIRE de la ventana +
+tope); un login correcto o un fallo que no sea de contraseña la devuelve (`RELEASE_SCRIPT`), así que en la
+ventana solo quedan los logins rechazados (y las pruebas en curso). Por qué 30 / 15 min:
+
+- una organización aporta como máximo 10 logins rechazados a un buzón en 15 min (su bloqueo por buzón salta en
+  el décimo, también si cambia mayúsculas o puerto), así que llenar el cupo exige **al menos 3 organizaciones**,
+  cada una con plan PRO o BUSINESS de pago y con OWNER / ADMIN; ninguna organización puede, sola, impedir a otra
+  conectar ese buzón;
+- no es un bloqueo: caduca con su ventana (como mucho 15 min) y no se prolonga; solo afecta a pruebas y altas
+  nuevas de ese buzón (la sincronización del worker no lo usa);
+- protege al tercero: como mucho 30 contraseñas probadas cada 15 min contra un buzón, entre todas las
+  organizaciones (antes, 10 por organización sin límite común);
+- la respuesta es la genérica `IMAP_TEST_RATE_LIMITED` de los otros límites de intentos, sin decir si otras
+  organizaciones usan el buzón (un rechazo sin fallos propios sí indica actividad ajena: inevitable en
+  cualquier límite compartido).
+
+### Claves HMAC (E4, B6)
+
+Las claves de Redis de un buzón (`mailbox:<hmac>` por organización, `target:<hmac>` global) son
+HMAC-SHA-256 con `IMAP_RATE_LIMIT_SECRET`, con separación de dominio por propósito
+(`emailbot-imap-limit:v1:<propósito>`); quien lea Redis no puede probar usuarios candidatos sin el secreto. Las
+claves de usuario y organización solo llevan sus UUID internos.
+
+- Formato: base64 estándar de al menos 32 bytes aleatorios (`node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"`).
+  La API no arranca con un valor inválido (corto, no base64, todos los bytes iguales) ni si coincide con
+  `TOKEN_ENCRYPTION_KEY` u `OAUTH_STATE_SECRET`; el error nunca muestra el valor.
+- Opcional mientras IMAP esté desactivado. Sin él, la prueba y el alta responden 503 `PROVIDER_NOT_CONFIGURED`
+  antes de Redis, DNS o cualquier conexión: **nunca** se usa un hash sin clave.
+- Todas las instancias de la API deben compartir el mismo valor (si no, cada una calcula otras claves y los
+  límites por buzón dejan de compartirse).
+- Rotación: **no es transparente**. Con un secreto nuevo las claves cambian, así que los contadores, bloqueos
+  por buzón y el cupo global anteriores dejan de aplicarse (caducan solos en ≤ 15 min). Los límites por
+  usuario y organización (UUID) no se ven afectados. Rotar solo si el secreto se expone y aceptar ese reinicio.
+
+### Si Redis falla (E4, B4)
+
+Los límites compartidos de IMAP (intentos por usuario y organización, bloqueos, concurrencia por
+organización, límite global) viven **solo en Redis**, con scripts atómicos y un plazo de 2 s por operación
+(`storeTimeoutMs`). Sin Redis, con error o sin respuesta a tiempo, la prueba y el alta responden **503
+`SERVICE_UNAVAILABLE`** antes de cualquier consulta DNS o socket: nunca un contador por instancia que
+multiplicaría los límites por N instancias, y nunca una respuesta que parezca una contraseña incorrecta. El
+log registra `imap.limits_unavailable` (sin secretos). Si Redis falla **después** de conectar (anotar el
+fallo, devolver la reserva, liberar el hueco), la respuesta de la prueba no cambia y se registra
+`imap.limits_bookkeeping_failed`; el *lease* de 90 s y las ventanas acotan el efecto.
+
+El login del portal y el límite global por IP conservan su comportamiento (respaldo por instancia). El límite
+por IP no tiene plazo propio: en producción lo acota el `commandTimeout` de 5 s de la conexión de Redis.
 
 Errores públicos (422, mensaje fijo): `IMAP_AUTH_FAILED`, `IMAP_TLS_FAILED`, `IMAP_STARTTLS_UNAVAILABLE`,
 `IMAP_HOST_FORBIDDEN`, `IMAP_DNS_FAILED`, `IMAP_TIMEOUT`, `IMAP_UNREACHABLE`, `IMAP_FAILED`,
 `IMAP_INBOX_UNAVAILABLE`. El log solo registra `imap.connection_test` con el código, el puerto y la duración.
 
-Riesgos pendientes, a revisar **antes de activar IMAP** (auditoría E3):
+### Riesgos pendientes antes de activar IMAP
 
-- **M2** — sin límite común entre organizaciones para un mismo buzón externo: cada organización tiene sus
-  propios 10 intentos (mitigado por el plan de pago y los límites por IP / usuario / organización).
-  Propuesta: contador global de ritmo por `hash(host, usuario)` (no un bloqueo global, que permitiría
-  bloquear a terceros).
-- **B4** — con Redis caído, cada instancia cuenta por su cuenta y no respeta un bloqueo guardado en Redis
-  (límites × N instancias durante la caída; mismo diseño que el login del portal).
-- **B6** — las claves de Redis usan SHA-256 sin sal; quien lea Redis podría probar usuarios candidatos.
-  Propuesta: HMAC con un secreto del servidor.
-- **B2** — Fastify lee y analiza el cuerpo JSON (hasta 1 MB) antes del 503 (JSON malformado → 400, cuerpo
-  grande → 413); no llega a la respuesta ni a los logs. Propuesta: el 503 en un hook `onRequest`.
-- La concurrencia (1 prueba por organización) se cuenta por instancia de la API.
+- **Redis / Valkey real: verificado en local (E4.1), no en el Redis de producción.** Las pruebas unitarias usan
+  `FakeRedis`; la suite opt-in `imap-valkey-integration.test.ts` (ver "Integration tests (Valkey local)") se
+  ejecutó contra Valkey 8.1.10 desechable: scripts, TTL, atomicidad, dos procesos de API, pausa y caída. El
+  Redis gestionado de producción puede ser otra versión: repetir la suite contra una instancia equivalente y
+  desechable antes de activar IMAP.
+- `IMAP_RATE_LIMIT_SECRET` debe configurarse (igual en todas las instancias) antes de activar IMAP; hoy no está
+  definido en ningún entorno remoto.
+- Señal lateral inevitable del límite global: una organización sin fallos propios que recibe
+  `IMAP_TEST_RATE_LIMITED` sabe que hubo actividad reciente contra ese buzón.
+- El límite por IP y el login del portal siguen con respaldo por instancia si Redis cae (comportamiento
+  previo, fuera de IMAP).
+- La concurrencia de 4 por instancia es un límite de recurso local, no compartido.
+- Revisión de umbrales con datos reales tras la activación (no hay tráfico IMAP todavía).
 
 Cursor inicial: `imap:v1:<UIDVALIDITY>:<UIDNEXT − 1>` del `EXAMINE` de la prueba. Todo mensaje que llegue
 después recibe un UID ≥ UIDNEXT (RFC 3501 2.3.1.1), así que el worker importa lo recibido tras la prueba y
@@ -148,6 +217,36 @@ Comportamiento:
   IMAP no tienen token OAuth (`getAccessToken()` las rechaza).
 - Solo cuentas ACTIVE de organizaciones ACTIVE con acceso comercial; PAUSED / DISCONNECTED / ERROR nunca
   abren conexión.
+
+## Integration tests (Valkey local)
+
+`apps/api/src/test/imap-valkey-integration.test.ts` es **opt-in** (sin `IMAP_VALKEY_URL` todo queda *skipped*;
+la CI no lo define) y **solo** debe apuntar a un Valkey / Redis desechable (el test rechaza cualquier host que no
+sea `127.0.0.1`, `localhost` o `[::1]`): lee y escribe sus claves (incluido
+`KEYS`). Lanza dos procesos de API independientes (`imap-valkey-process.ts`, `node --import tsx`) con el
+limitador real y el cliente de producción (`createRedisConnection`), que solo comparten ese servidor; DNS e IMAP
+son simulados (ningún socket hacia servidores de correo).
+
+- `IMAP_VALKEY_PHASE=up` (por defecto): scripts Lua contra el servidor real (valores, TTL, caducidad, errores),
+  atomicidad con 200 / 100 / 50 / 25 llamadas simultáneas, claves HMAC compartidas entre procesos, rotación,
+  presupuesto global y hueco por organización con concurrencia entre procesos, contadores compartidos,
+  distinción de fallos, caducidad (acortando el TTL de una clave **en ese servidor desechable**), `CLIENT PAUSE`
+  (503 en el plazo de 2 s, sin DNS ni sockets), clave corrupta (503), logs sin secretos, y las rutas con el
+  cliente real (desactivadas: 503 `IMAP_NOT_AVAILABLE` sin escribir claves; activadas solo en la configuración
+  de test).
+- `IMAP_VALKEY_PHASE=down` con el servidor detenido: 503 inmediato en dos procesos y en la ruta, sin DNS,
+  sockets, cifrado, persistencia ni colas.
+
+Ejemplo (Docker en WSL; publicado solo en `127.0.0.1`, sin persistencia, contraseña aleatoria de prueba):
+
+```bash
+docker network create --label emailbot-e41=1 -o com.docker.network.bridge.host_binding_ipv4=127.0.0.1 emailbot-e41-valkey-net
+docker run -d --name emailbot-e41-valkey --label emailbot-e41=1 --network emailbot-e41-valkey-net -p 127.0.0.1:56379:6379 --tmpfs /data valkey/valkey:8 valkey-server --requirepass "$VALKEY_TEST_PASSWORD" --save "" --appendonly no
+IMAP_VALKEY_URL="redis://:$VALKEY_TEST_PASSWORD@127.0.0.1:56379" pnpm --filter @emailbot/api exec vitest run src/test/imap-valkey-integration.test.ts
+docker stop emailbot-e41-valkey
+IMAP_VALKEY_URL="redis://:$VALKEY_TEST_PASSWORD@127.0.0.1:56379" IMAP_VALKEY_PHASE=down pnpm --filter @emailbot/api exec vitest run src/test/imap-valkey-integration.test.ts
+docker rm emailbot-e41-valkey && docker network rm emailbot-e41-valkey-net
+```
 
 ## Integration tests (Dovecot local)
 

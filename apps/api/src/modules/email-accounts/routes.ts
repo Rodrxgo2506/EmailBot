@@ -79,8 +79,24 @@ export function emailAccountRoutes(deps: AppDeps) {
 
     const oauthStartGuards = { ...manage, config: { rateLimit: RATE_LIMITS.oauthStart } };
     const oauthCallbackOptions = { config: { rateLimit: RATE_LIMITS.oauthCallback } };
-    const imapGuards = { ...manage, config: { rateLimit: RATE_LIMITS.imapCreate } };
-    const imapTestGuards = { ...manage, config: { rateLimit: RATE_LIMITS.imapTest } };
+    /*
+     * IMAP routes (E4, B2): the per-IP limit runs in onRequest like every route; then
+     * authentication, organization, permission and the "IMAP disabled" check run in
+     * preParsing, i.e. BEFORE the body (and its password) is read or parsed. Anonymous
+     * and unauthorized callers keep their 401 / 403; while IMAP is disabled every other
+     * caller gets 503 whatever the body (malformed, oversized, another content type).
+     */
+    const imapAvailable = async () => {
+      if (!providerAvailability(deps.config).IMAP) throw serviceUnavailable("IMAP accounts are not available yet", "IMAP_NOT_AVAILABLE");
+    };
+    const beforeBody = (hook: (request: FastifyRequest, reply: FastifyReply) => Promise<unknown>) =>
+      async (request: FastifyRequest, reply: FastifyReply, payload: unknown) => {
+        await hook(request, reply);
+        return payload;
+      };
+    const imapPreParsing = [app.authenticate, app.requireOrganization, requirePermission("email-accounts:manage"), imapAvailable].map(beforeBody);
+    const imapGuards = { preParsing: imapPreParsing, config: { rateLimit: RATE_LIMITS.imapCreate } };
+    const imapTestGuards = { preParsing: imapPreParsing, config: { rateLimit: RATE_LIMITS.imapTest } };
     const imap = createImapConnectionTester(deps, app.log);
 
     /**

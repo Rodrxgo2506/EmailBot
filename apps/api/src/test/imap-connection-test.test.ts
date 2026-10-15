@@ -1,9 +1,11 @@
+import { randomBytes } from "node:crypto";
 import { imapCredentialContext, type ImapProbeClient, type ImapProbeOpen, type ImapResolver } from "@emailbot/shared";
 import type { EmailAccount } from "@emailbot/types";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildApp } from "../app.js";
 import { createLoginThrottle, LOGIN_LOCKOUT } from "../infrastructure/login-throttle.js";
 import { IMAP_CONNECTION_LIMITS, IMAP_LOGIN_LOCKOUT, imapMailboxLockKey } from "../modules/email-accounts/imap-connection.js";
+import { FakeRedis } from "./fake-redis.js";
 import { authHeaders, createTestApp, makeUser, ORG_A, ORG_B } from "./helpers.js";
 import { entitlementsFor, noAccess } from "./plan-fixtures.js";
 
@@ -85,14 +87,15 @@ afterEach(async () => {
   ctx = undefined;
 });
 
-async function setup(options: { server?: FakeServer; resolver?: ImapResolver; enabled?: boolean } = {}) {
+async function setup(options: { server?: FakeServer; resolver?: ImapResolver; enabled?: boolean; redis?: FakeRedis } = {}) {
   const server = options.server ?? fakeServer();
   const resolver = options.resolver ?? publicResolver();
   ctx = await createTestApp({
     users: [owner, admin, viewer, outsider],
     config: { imapAccountsEnabled: options.enabled ?? true },
     imapResolver: resolver,
-    imapProbeOpen: server.open
+    imapProbeOpen: server.open,
+    rateLimitRedis: options.redis ?? new FakeRedis()
   });
   ctx.repos.emailAccounts.list.mockResolvedValue([]);
   return { ...ctx, server, resolver };
@@ -340,7 +343,7 @@ describe("abuse limits", () => {
   it("per organization (several users): 429 IMAP_TEST_RATE_LIMITED", async () => {
     const extra = makeUser({ [ORG_A]: "ADMIN" });
     const server = fakeServer();
-    ctx = await createTestApp({ users: [owner, admin, extra], config: { imapAccountsEnabled: true }, imapResolver: publicResolver(), imapProbeOpen: server.open });
+    ctx = await createTestApp({ users: [owner, admin, extra], config: { imapAccountsEnabled: true }, imapResolver: publicResolver(), imapProbeOpen: server.open, rateLimitRedis: new FakeRedis() });
     ctx.repos.emailAccounts.list.mockResolvedValue([]);
     const users = [owner, admin, extra];
     for (let attempt = 0; attempt < IMAP_CONNECTION_LIMITS.perOrganization.max; attempt += 1) {
@@ -476,7 +479,7 @@ describe("B1: every attempt counts BEFORE the destination check", () => {
     const extra = makeUser({ [ORG_A]: "ADMIN" });
     const resolver: ImapResolver = vi.fn(async () => Promise.reject(new Error("ENOTFOUND")));
     const server = fakeServer();
-    ctx = await createTestApp({ users: [owner, admin, extra], config: { imapAccountsEnabled: true }, imapResolver: resolver, imapProbeOpen: server.open });
+    ctx = await createTestApp({ users: [owner, admin, extra], config: { imapAccountsEnabled: true }, imapResolver: resolver, imapProbeOpen: server.open, rateLimitRedis: new FakeRedis() });
     ctx.repos.emailAccounts.list.mockResolvedValue([]);
     const users = [owner, admin, extra];
     for (let attempt = 0; attempt < IMAP_CONNECTION_LIMITS.perOrganization.max; attempt += 1) {
@@ -491,7 +494,7 @@ describe("B1: every attempt counts BEFORE the destination check", () => {
   it("DNS, refused destination, TLS and timeout failures are NOT counted as refused logins (no lockout)", async () => {
     const extra = makeUser({ [ORG_A]: "ADMIN" });
     const server = fakeServer();
-    ctx = await createTestApp({ users: [owner, admin, extra], config: { imapAccountsEnabled: true }, imapResolver: publicResolver(), imapProbeOpen: server.open });
+    ctx = await createTestApp({ users: [owner, admin, extra], config: { imapAccountsEnabled: true }, imapResolver: publicResolver(), imapProbeOpen: server.open, rateLimitRedis: new FakeRedis() });
     ctx.repos.emailAccounts.list.mockResolvedValue([]);
     const failures: Array<[ImapResolver, ImapProbeOpen, string]> = [
       [vi.fn(async () => Promise.reject(new Error("ENOTFOUND"))), server.open, "IMAP_DNS_FAILED"],
@@ -539,11 +542,12 @@ describe("B3: one lockout key per external mailbox (case and port do not open ne
   });
 
   it("imapMailboxLockKey: same key for case / spacing variants, distinct for another user, server or organization, never in clear", () => {
-    const key = imapMailboxLockKey(ORG_A, "imap.hostinger.com", "ventas@empresa-correo.com");
-    expect(imapMailboxLockKey(ORG_A, "IMAP.Hostinger.com", " Ventas@Empresa-Correo.COM ")).toBe(key);
-    expect(imapMailboxLockKey(ORG_A, "imap.hostinger.com", "soporte@empresa-correo.com")).not.toBe(key);
-    expect(imapMailboxLockKey(ORG_A, "imap.zoho.com", "ventas@empresa-correo.com")).not.toBe(key);
-    expect(imapMailboxLockKey(ORG_B, "imap.hostinger.com", "ventas@empresa-correo.com")).not.toBe(key);
+    const secret = randomBytes(32);
+    const key = imapMailboxLockKey(secret, ORG_A, "imap.hostinger.com", "ventas@empresa-correo.com");
+    expect(imapMailboxLockKey(secret, ORG_A, "IMAP.Hostinger.com", " Ventas@Empresa-Correo.COM ")).toBe(key);
+    expect(imapMailboxLockKey(secret, ORG_A, "imap.hostinger.com", "soporte@empresa-correo.com")).not.toBe(key);
+    expect(imapMailboxLockKey(secret, ORG_A, "imap.zoho.com", "ventas@empresa-correo.com")).not.toBe(key);
+    expect(imapMailboxLockKey(secret, ORG_B, "imap.hostinger.com", "ventas@empresa-correo.com")).not.toBe(key);
     expect(key).toMatch(/^mailbox:[0-9a-f]{64}$/);
   });
 });
@@ -556,7 +560,7 @@ describe("M1: lockout thresholds (mailbox 10, organization 30, 15 min; portal un
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(new Date("2026-10-15T00:00:00Z"));
     const server = fakeServer({ failure: { authenticationFailed: true } });
-    ctx = await createTestApp({ users, config: { imapAccountsEnabled: true }, imapResolver: publicResolver(), imapProbeOpen: server.open });
+    ctx = await createTestApp({ users, config: { imapAccountsEnabled: true }, imapResolver: publicResolver(), imapProbeOpen: server.open, rateLimitRedis: new FakeRedis() });
     ctx.repos.emailAccounts.list.mockResolvedValue([]);
     return { server, users };
   }

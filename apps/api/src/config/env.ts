@@ -3,6 +3,16 @@ import { COMPLAINTS_BOOK_PROVIDER } from "@emailbot/types";
 import { normalizeOrigin, productionUrlProblem, PUBLIC_URL, REDIS_URL } from "@emailbot/validation";
 import { z } from "zod";
 
+/** Strict base64 of at least 32 bytes that are not all the same (a placeholder such as "AAAA..."). */
+function strongBase64SecretProblem(value: string): string | null {
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(value) || value.length % 4 !== 0) return "must be standard base64";
+  const bytes = Buffer.from(value, "base64");
+  if (bytes.toString("base64") !== value) return "must be standard base64";
+  if (bytes.length < 32) return "must encode at least 32 bytes (openssl rand -base64 32)";
+  if (bytes.every((byte) => byte === bytes[0])) return "must be random";
+  return null;
+}
+
 /*
  * API configuration, validated with Zod at startup. The process refuses to
  * start with an invalid configuration. Error messages never echo values.
@@ -52,6 +62,20 @@ const envSchema = z
     TOKEN_ENCRYPTION_KEY: encryptionKeyEnv,
     /** HMAC secret for the OAuth state parameter. */
     OAUTH_STATE_SECRET: z.string().min(32, "must contain at least 32 characters"),
+    /**
+     * IMAP E4: HMAC-SHA-256 key of the IMAP abuse-limit keys in Redis (mailbox lockout,
+     * global per-mailbox rate). Its own random value (base64, >= 32 bytes), never another
+     * secret. Optional while IMAP is disabled: without it the IMAP routes refuse (503).
+     */
+    IMAP_RATE_LIMIT_SECRET: optionalEnv(
+      z
+        .string()
+        .max(512)
+        .superRefine((value, ctx) => {
+          const problem = strongBase64SecretProblem(value);
+          if (problem) ctx.addIssue({ code: "custom", message: problem });
+        })
+    ),
 
     GOOGLE_CLIENT_ID: optionalEnv(z.string().min(1)),
     GOOGLE_CLIENT_SECRET: optionalEnv(z.string().min(1)),
@@ -116,6 +140,11 @@ const envSchema = z
     for (const origin of env.CORS_ORIGINS) {
       const result = normalizeOrigin(origin);
       if (!result.ok) issue("CORS_ORIGINS", `every origin ${result.problem}`);
+    }
+
+    // Every environment: a key has one purpose; the IMAP limit key never reuses another secret.
+    if (env.IMAP_RATE_LIMIT_SECRET !== undefined && (env.IMAP_RATE_LIMIT_SECRET === env.TOKEN_ENCRYPTION_KEY || env.IMAP_RATE_LIMIT_SECRET === env.OAUTH_STATE_SECRET)) {
+      issue("IMAP_RATE_LIMIT_SECRET", "must be its own secret, not TOKEN_ENCRYPTION_KEY or OAUTH_STATE_SECRET");
     }
 
     // Every environment: a half-configured push authentication would silently be disabled.
@@ -219,6 +248,11 @@ export interface ApiConfig {
    * changes together with a working adapter, in code.
    */
   imapAccountsEnabled: boolean;
+  /**
+   * IMAP_RATE_LIMIT_SECRET (base64): HMAC key of the IMAP abuse-limit keys. null = not
+   * configured: the IMAP connection test and creation refuse (503), never an unkeyed hash.
+   */
+  imapRateLimitSecret: string | null;
   /** Transactional e-mail through Resend; null = not configured. Replies go to the support mailbox. */
   transactionalEmail: { resendApiKey: string; from: string; replyTo: string } | null;
   /** GET /health/sync stale threshold (SYNC_HEALTH_STALE_MINUTES). */
@@ -301,6 +335,7 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): ApiConfig {
         : null,
     microsoftGraphPushEnabled: env.MICROSOFT_GRAPH_PUSH_ENABLED,
     imapAccountsEnabled: false,
+    imapRateLimitSecret: env.IMAP_RATE_LIMIT_SECRET ?? null,
     transactionalEmail:
       env.RESEND_API_KEY && env.TRANSACTIONAL_EMAIL_FROM
         ? { resendApiKey: env.RESEND_API_KEY, from: env.TRANSACTIONAL_EMAIL_FROM, replyTo: COMPLAINTS_BOOK_PROVIDER.supportEmail }
