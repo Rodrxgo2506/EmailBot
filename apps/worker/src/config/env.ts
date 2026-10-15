@@ -1,6 +1,7 @@
 import { encryptionKeyEnv, EnvValidationError, graphLifecycleUrl, optionalEnv, parseEnv, type OAuthClientConfig } from "@emailbot/shared";
 import { productionUrlProblem, PUBLIC_URL, REDIS_URL } from "@emailbot/validation";
 import { z } from "zod";
+import { DEFAULT_SHUTDOWN_TIMEOUT_MS, MIN_SHUTDOWN_TIMEOUT_MS } from "../infrastructure/shutdown.js";
 
 const envSchema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
@@ -69,6 +70,12 @@ const envSchema = z.object({
   WORKER_HEALTH_PORT: optionalEnv(z.coerce.number().int().min(1).max(65_535)),
   PORT: optionalEnv(z.coerce.number().int().min(1).max(65_535)),
   WORKER_HEALTH_HOST: z.string().min(1).default("0.0.0.0"),
+  /**
+   * F5.1: total shutdown budget (SIGTERM / SIGINT to process exit). The worker exits within it whatever is still
+   * pending; keep it below the platform's own grace period (Render: maxShutdownDelaySeconds, 120 s in
+   * deploy/render/render.yaml; the value applied to the service is not verified).
+   */
+  WORKER_SHUTDOWN_TIMEOUT_MS: z.coerce.number().int().min(MIN_SHUTDOWN_TIMEOUT_MS).max(600_000).default(DEFAULT_SHUTDOWN_TIMEOUT_MS),
   SENTRY_DSN: optionalEnv(z.url())
 }).superRefine((env, ctx) => {
   const issue = (path: string, message: string) => ctx.addIssue({ code: "custom", path: [path], message });
@@ -130,6 +137,8 @@ export interface WorkerConfig {
   microsoftPush: { notificationUrl: string; lifecycleNotificationUrl: string } | null;
   watchRenewIntervalMinutes: number;
   maxAttachmentBytes: number;
+  /** F5.1: total shutdown budget (ms), see infrastructure/shutdown.ts. */
+  shutdownTimeoutMs: number;
   /** null = health endpoint disabled. */
   health: { port: number; host: string } | null;
   sentryDsn: string | null;
@@ -205,6 +214,7 @@ export function loadWorkerConfig(source: NodeJS.ProcessEnv = process.env): Worke
       ? { port: (env.WORKER_HEALTH_PORT ?? env.PORT) as number, host: env.WORKER_HEALTH_HOST }
       : null,
     sentryDsn: env.SENTRY_DSN ?? null,
+    shutdownTimeoutMs: env.WORKER_SHUTDOWN_TIMEOUT_MS,
     // Not read from the environment on purpose (see WorkerConfig.imapSyncEnabled).
     imapSyncEnabled: false
   };

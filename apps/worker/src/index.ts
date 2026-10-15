@@ -25,6 +25,7 @@ import { closeServer, createHealthServer, listen, type WorkerHealthState } from 
 import { createImapSyncSlots, imapSyncSlotCount } from "./infrastructure/imap-slots.js";
 import { createJobProcessors } from "./infrastructure/job-processors.js";
 import { createWorkerQueues } from "./infrastructure/queues.js";
+import { createJobTracker, createShutdown, shutdownLimits } from "./infrastructure/shutdown.js";
 import { captureWorkerException, flushWorkerSentry, initWorkerSentry, jobType, reportJobFailure } from "./infrastructure/sentry.js";
 import { createRedisSyncLock } from "./infrastructure/sync-lock.js";
 import {
@@ -155,52 +156,62 @@ const processors = createJobProcessors({
     : {})
 });
 
-const eventsWorker = new Worker<EmailEventJob>(QUEUE_NAMES.emailEvents, processors.events, { connection, concurrency: config.eventsConcurrency });
+// F5.1: every processor is counted while it runs, so the shutdown knows when the jobs in flight are done.
+const jobs = createJobTracker();
 
-const processingWorker = new Worker<EmailProcessingJob>(QUEUE_NAMES.emailProcessing, processors.processing, {
+const eventsWorker = new Worker<EmailEventJob>(QUEUE_NAMES.emailEvents, jobs.wrap(processors.events), { connection, concurrency: config.eventsConcurrency });
+
+const processingWorker = new Worker<EmailProcessingJob>(QUEUE_NAMES.emailProcessing, jobs.wrap(processors.processing), {
   connection,
   concurrency: config.processingConcurrency
 });
 
 const notificationsWorker = new Worker<NotificationJob>(
   QUEUE_NAMES.notifications,
-  async (job: Job<NotificationJob>) => {
+  jobs.wrap(async (job: Job<NotificationJob>) => {
     const jobLogger = logger.child({ queue: QUEUE_NAMES.notifications, jobId: job.id, organizationId: job.data.organizationId });
     return deliverNotification(job.data, { emails, realtime, accounts, logger: jobLogger });
-  },
+  }),
   { connection, concurrency: 5 }
 );
 
 const workers = [eventsWorker, processingWorker, notificationsWorker];
-let shuttingDown = false;
-async function shutdown(signal: string) {
-  if (shuttingDown) return;
-  shuttingDown = true;
-  health.stopping = true;
-  logger.info({ signal }, "shutting down worker");
-  try {
-    // IMAP A2: running IMAP operations are closed now (transient: their jobs are retried later, no cursor moves past
-    // unprocessed mail), so worker.close() never waits for a slow IMAP server.
-    abortImapOperations();
-    await Promise.all(workers.map((worker) => worker.close()));
-    // After the workers stopped: no job holds an IMAP connection any more.
-    await imapPool?.closeAll();
-    await queues.close();
-    connection.disconnect();
-    publisherConnection.disconnect();
-    if (healthServer) await closeServer(healthServer);
-    await flushWorkerSentry();
-    process.exit(0);
-  } catch (error) {
-    logger.error({ err: serializeError(error) }, "error during shutdown");
-    process.exit(1);
-  }
-}
+// F5.1: bounded, phased shutdown (infrastructure/shutdown.ts): stop fetching jobs and IMAP operations, a grace
+// period for the jobs in flight, then the realtime publisher is interrupted, the workers closed (forced only if a job
+// is still running: it stays active in Redis and is retried once its lock expires), everything released, and the
+// process exits within WORKER_SHUTDOWN_TIMEOUT_MS whatever is still pending.
+const shutdown = createShutdown(
+  {
+    logger,
+    workers,
+    tracker: jobs,
+    markStopping: () => {
+      health.stopping = true;
+    },
+    // IMAP A2: running IMAP operations are closed (transient: retried later, no cursor moves past unprocessed mail).
+    abortImap: abortImapOperations,
+    // Used only by realtime publishing: a job waiting on it fails and is retried (never marked completed).
+    interruptBlockedClients: () => publisherConnection.disconnect(),
+    release: [
+      // After the workers stopped: no job holds an IMAP connection any more.
+      ...(imapPool ? [{ name: "imap pool", run: () => imapPool.closeAll() }] : []),
+      { name: "queues", run: () => queues.close() },
+      ...(healthServer ? [{ name: "health server", run: () => closeServer(healthServer) }] : [])
+    ],
+    disconnect: () => {
+      connection.disconnect();
+      publisherConnection.disconnect();
+    },
+    flush: flushWorkerSentry,
+    exit: (code) => process.exit(code)
+  },
+  shutdownLimits(config.shutdownTimeoutMs)
+);
 
 // Registered before the (possibly slow) initialization below, so a platform
 // can always stop the worker cleanly.
-process.on("SIGINT", () => void shutdown("SIGINT"));
-process.on("SIGTERM", () => void shutdown("SIGTERM"));
+process.on("SIGINT", () => shutdown.onSignal("SIGINT"));
+process.on("SIGTERM", () => shutdown.onSignal("SIGTERM"));
 
 for (const worker of workers) {
   worker.on("failed", (job, error) => {

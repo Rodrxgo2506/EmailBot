@@ -174,6 +174,48 @@ Leyenda: **SECRET** = nunca en logs, repositorio ni bundle; se introduce con `sy
 | `WORKER_WATCH_RENEW_INTERVAL_MINUTES` | PUBLIC · WORKER ONLY | 60 por defecto; renueva watches de Gmail y suscripciones de Microsoft; no definir |
 | `WORKER_MAX_ATTACHMENT_BYTES` | PUBLIC · WORKER ONLY | 25 MiB |
 | `WORKER_HEALTH_PORT`, `WORKER_HEALTH_HOST` | PUBLIC · WORKER ONLY | no definir en Render |
+| `WORKER_SHUTDOWN_TIMEOUT_MS` | PUBLIC · WORKER ONLY | 25000 (F5.1: presupuesto total del apagado, de la señal a la salida del proceso; mínimo 15000, máximo 600000). Debe quedar por debajo del plazo de apagado de Render: el Blueprint declara `maxShutdownDelaySeconds: 120`; el valor aplicado al servicio está sin verificar. Ver *Apagado del worker* |
+
+## Apagado del worker
+
+F5.1 (`apps/worker/src/infrastructure/shutdown.ts`). Con `SIGTERM` o `SIGINT` el worker se apaga por fases dentro
+de un presupuesto total, `WORKER_SHUTDOWN_TIMEOUT_MS` (25 s por defecto). Cada fase está limitada por su propio
+límite y además por lo que el presupuesto deja a las fases siguientes, así que la secuencia termina sola al menos
+100 ms antes del total aunque todos los pasos se cuelguen. Al cumplirse el total hay además una salida de
+emergencia (código 1) como último recurso, p. ej. si el *event loop* queda bloqueado. Render envía `SIGKILL` al
+cumplirse `maxShutdownDelaySeconds` (120 s en el Blueprint, valor aplicado al servicio sin verificar): el
+presupuesto debe quedar por debajo.
+
+| Fase | Límite (por defecto) | Qué hace |
+|---|---|---|
+| 1. Parar | 3 s (workers en paralelo) | `/readyz` pasa a *stopping*; se cancelan las operaciones IMAP en curso (sockets cerrados, no se abren nuevas) y `pause(true)` en cada worker BullMQ: no se toma ningún trabajo nuevo |
+| 2. Gracia | hasta total − 13,1 s (11,9 s) | espera a que terminen los trabajos en curso |
+| 3. Cancelación | 3 s | solo si queda alguno: se desconecta el cliente Redis del publicador *realtime*; un trabajo esperando un `PUBLISH` falla y BullMQ lo reintenta |
+| 4. Cierre | 3 s (workers en paralelo) | `close()`; forzado solo si aún queda un trabajo en curso |
+| 5. Liberación | 5 s cada uno, en paralelo | pool IMAP, colas, servidor de health; después se desconectan las conexiones Redis |
+| 6. Sentry | 2 s | `flush` |
+| Salida | antes del total | 0 si todo terminó solo; 1 si hubo que interrumpir o forzar algo, o un paso (también el `flush`) agotó su límite |
+
+- Una segunda señal salta el resto de la gracia y acorta la cancelación a 1 s (también si llega durante ella); una
+  tercera sale al instante con código 1. Señales simultáneas no inician dos secuencias.
+- Ningún trabajo se marca como completado sin haber terminado y no se borra ninguno de Redis. Un trabajo que
+  sigue en curso al cerrar forzado queda *active*; cuando su bloqueo expira (`lockDuration`, 30 s) el control de
+  trabajos atascados de otra instancia o del worker reiniciado lo devuelve a la cola y se vuelve a ejecutar
+  (observado en local: unos 60 s tras el reinicio). El procesamiento es idempotente: el reintento no duplica
+  correos, adjuntos ni notificaciones (probado).
+- Esperar con límite solo deja de esperar, y ni el código 1 ni la salida de emergencia significan que algo se
+  cancelara: una escritura HTTP o SQL ya enviada (Supabase, proveedores) puede haberse confirmado igualmente en
+  el servidor.
+- ioredis: `disconnect()` cierra el socket y, si el servidor no responde, lo destruye tras `disconnectTimeout`
+  (2 s por defecto); solo entonces se rechazan los comandos pendientes. Por eso la fase de cancelación dura 3 s.
+- Límites que dependen de fases posteriores:
+  - F5.2: la conexión Redis compartida de BullMQ (`maxRetriesPerRequest: null`, cola *offline*) puede dejar
+    comandos esperando sin límite; no se interrumpe antes de la fase 5 porque la usan todos los workers y las
+    colas. Si Redis deja de responder, el cierre agota sus límites y el proceso sale con código 1 dentro del
+    presupuesto (probado en un subproceso con Redis pausado).
+  - F5.3: una lectura de PostgREST puede reintentarse hasta 3 veces (1 + 2 + 4 s); un trabajo en ese punto no
+    se cancela, agota la gracia y se cierra forzado.
+  - F5.4: las peticiones HTTP (Supabase, Gmail, Microsoft Graph) no reciben una señal de cancelación.
 
 ## Web: cabeceras
 
@@ -209,3 +251,5 @@ Sin comprobar todavía en los servicios reales (no hay acceso a Render desde el 
 - Número real de saltos para `TRUST_PROXY`.
 - Versión de pnpm que usa Render en el build del Static Site (`packageManager: pnpm@12.8.1`).
 - `Cache-Control` real de `index.html` en el Static Site.
+- Plazo real entre `SIGTERM` y `SIGKILL` del Background Worker (el Blueprint declara `maxShutdownDelaySeconds:
+  120`): `WORKER_SHUTDOWN_TIMEOUT_MS` debe quedar por debajo.
