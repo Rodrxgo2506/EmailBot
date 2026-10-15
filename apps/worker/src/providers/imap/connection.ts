@@ -54,10 +54,13 @@ export function imapPoolKey(account: Pick<WorkerAccount, "id" | "accessTokenEncr
   return `${account.id}:${fingerprint}`;
 }
 
-/** ImapFlow for already-checked options (shared transport). Connected and logged in, or throws a worker error. */
+/**
+ * ImapFlow for already-checked options (shared transport). Connected and logged in, or throws a worker error.
+ * Protocol size limits: the synchronization profile (one message up to IMAP_MAX_MESSAGE_BYTES, E6.1).
+ */
 export async function openImapClient(options: ImapConnectionOptions, credentials: ImapCredentials): Promise<ImapClient> {
   try {
-    return await openSharedImapClient(options, credentials);
+    return await openSharedImapClient(options, credentials, { profile: "sync" });
   } catch (error) {
     throw classifyImapError(error);
   }

@@ -251,12 +251,14 @@ describe("connection test (fake protocol after every E1 check)", () => {
     ["STARTTLS not offered", Object.assign(new Error("Server does not support STARTTLS"), { tlsFailed: true }), "IMAP_STARTTLS_UNAVAILABLE"],
     ["connection timeout", Object.assign(new Error("timeout"), { code: "CONNECT_TIMEOUT" }), "IMAP_TIMEOUT"],
     ["greeting timeout", Object.assign(new Error("timeout"), { code: "GREETING_TIMEOUT" }), "IMAP_TIMEOUT"],
-    ["connection refused", Object.assign(new Error("connect ECONNREFUSED 93.184.216.34:993"), { code: "ECONNREFUSED" }), "IMAP_UNREACHABLE"]
+    ["connection refused", Object.assign(new Error("connect ECONNREFUSED 93.184.216.34:993"), { code: "ECONNREFUSED" }), "IMAP_UNREACHABLE"],
+    // E6.1: an answer above the protocol limits (ImapFlow LineTooLarge / LiteralTooLarge / ResponseTooLarge).
+    ["oversized server answer", Object.assign(new Error("Literal size 12582912 exceeds maximum allowed size of 262144 bytes"), { code: "LiteralTooLarge" }), "IMAP_RESPONSE_TOO_LARGE"]
   ])("%s: 422 %s with a fixed message; the connection is closed; nothing stored", async (_label, failure, code) => {
     const { server, privileged } = await setup({ server: fakeServer({ failure }) });
     const response = await testConnection();
     expect([response.statusCode, codeOf(response)]).toEqual([422, code]);
-    expect(response.body).not.toMatch(/93\.184|self signed|altnames|ECONNREFUSED|STARTTLS\b.*support/);
+    expect(response.body).not.toMatch(/93\.184|self signed|altnames|ECONNREFUSED|STARTTLS\b.*support|12582912/);
     expect(response.body).not.toContain(PASSWORD);
     expect(server.clients.every((client) => client.closed > 0)).toBe(true);
     expect(privileged.connectImapEmailAccount).not.toHaveBeenCalled();

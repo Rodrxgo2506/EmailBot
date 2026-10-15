@@ -178,7 +178,8 @@ const PUBLIC_FAILURES: Record<string, string> = {
   IMAP_TIMEOUT: "The IMAP server did not answer in time",
   IMAP_UNREACHABLE: "The IMAP server could not be reached",
   IMAP_FAILED: "The connection to the IMAP server failed",
-  IMAP_INBOX_UNAVAILABLE: "The IMAP INBOX could not be opened read-only"
+  IMAP_INBOX_UNAVAILABLE: "The IMAP INBOX could not be opened read-only",
+  IMAP_RESPONSE_TOO_LARGE: "The IMAP server sent an answer larger than allowed"
 };
 
 export interface ImapConnectionTester {

@@ -1,3 +1,4 @@
+import { imapProtocolLimitFailure } from "@emailbot/shared";
 import type { NormalizedAttachment, NormalizedEmail } from "@emailbot/types";
 import { ProviderHttpError } from "../http.js";
 import {
@@ -145,22 +146,28 @@ export function createImapSyncAdapter(deps: ImapAdapterDeps): ProviderAdapter {
         key,
         () => connect(endpoint, credentials),
         async (client) => {
-          // A pooled connection may still have INBOX selected by an earlier operation: ImapFlow
-          // would not EXAMINE it again, leaving UIDNEXT / UIDVALIDITY stale. Leave it first. CLOSE
-          // on a mailbox opened read-only never expunges (RFC 3501 6.4.2); a read-write one is
-          // never opened by this adapter and is refused rather than closed.
-          const open = client.mailbox;
-          if (open) {
-            if (open.readOnly !== true) throw new Error("Unexpected read-write mailbox on an IMAP sync connection");
-            await client.mailboxClose();
-          }
-          const lock = await client.getMailboxLock("INBOX", { readOnly: true });
           try {
-            const mailbox = client.mailbox;
-            if (!mailbox) throw new Error("INBOX is not open");
-            return await fn(client, { uidValidity: Number(mailbox.uidValidity), uidNext: Number(mailbox.uidNext) });
-          } finally {
-            lock.release();
+            // A pooled connection may still have INBOX selected by an earlier operation: ImapFlow
+            // would not EXAMINE it again, leaving UIDNEXT / UIDVALIDITY stale. Leave it first. CLOSE
+            // on a mailbox opened read-only never expunges (RFC 3501 6.4.2); a read-write one is
+            // never opened by this adapter and is refused rather than closed.
+            const open = client.mailbox;
+            if (open) {
+              if (open.readOnly !== true) throw new Error("Unexpected read-write mailbox on an IMAP sync connection");
+              await client.mailboxClose();
+            }
+            const lock = await client.getMailboxLock("INBOX", { readOnly: true });
+            try {
+              const mailbox = client.mailbox;
+              if (!mailbox) throw new Error("INBOX is not open");
+              return await fn(client, { uidValidity: Number(mailbox.uidValidity), uidNext: Number(mailbox.uidNext) });
+            } finally {
+              lock.release();
+            }
+          } catch (error) {
+            // E6.1: an answer above the protocol limits closed the connection, and the pending command
+            // only saw "connection not available". Report the real cause (security: never retried).
+            throw imapProtocolLimitFailure(client) ?? error;
           }
         }
       );

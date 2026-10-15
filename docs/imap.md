@@ -132,7 +132,15 @@ por IP no tiene plazo propio: en producción lo acota el `commandTimeout` de 5 s
 
 Errores públicos (422, mensaje fijo): `IMAP_AUTH_FAILED`, `IMAP_TLS_FAILED`, `IMAP_STARTTLS_UNAVAILABLE`,
 `IMAP_HOST_FORBIDDEN`, `IMAP_DNS_FAILED`, `IMAP_TIMEOUT`, `IMAP_UNREACHABLE`, `IMAP_FAILED`,
-`IMAP_INBOX_UNAVAILABLE`. El log solo registra `imap.connection_test` con el código, el puerto y la duración.
+`IMAP_INBOX_UNAVAILABLE`, `IMAP_RESPONSE_TOO_LARGE`. El log solo registra `imap.connection_test` con el código, el
+puerto y la duración.
+
+Límites del protocolo (E6.1): cada cliente ImapFlow recibe `maxLineLength`, `maxLiteralSize` y `maxResponseSize`
+explícitos (`IMAP_PROTOCOL_LIMITS` en `packages/shared/src/imap-client.ts`; nunca los valores por defecto de ImapFlow,
+1 GiB / 1 GiB / 2 GiB). Prueba de conexión de la API: 256 KiB / 256 KiB / 1 MiB. Sincronización del worker: 2 MiB /
+11 MiB / 14 MiB (un mensaje de hasta 10 MiB con margen; los mayores se leen en trozos de 64 KiB). ImapFlow los aplica
+mientras analiza, antes de guardar los bytes: un literal se rechaza al leer su `{tamaño}`. Superarlos cierra la
+conexión con `IMAP_RESPONSE_TOO_LARGE` (SECURITY: en el worker, cuenta en ERROR y sin reintentos).
 
 ### Riesgos pendientes antes de activar IMAP
 

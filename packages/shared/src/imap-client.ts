@@ -1,5 +1,5 @@
 import type { ImapEndpoint } from "@emailbot/types";
-import { ImapFlow } from "imapflow";
+import { ImapFlow, type ImapFlowOptions } from "imapflow";
 import { formatImapCursor } from "./imap-cursor.js";
 import {
   assertSafeImapConnectionOptions,
@@ -40,6 +40,49 @@ export const IMAP_TIMEOUTS = { connectionTimeout: 15_000, greetingTimeout: 10_00
 /** Validated addresses tried per connection when the previous one is unreachable (never after a TLS / login failure). */
 export const IMAP_MAX_ADDRESS_ATTEMPTS = 2;
 
+const MiB = 1024 * 1024;
+
+/**
+ * Protocol size limits passed to ImapFlow (E6.1, A1). Without them ImapFlow 2.1.2
+ * accepts 1 GiB per line or literal and 2 GiB per response, so a hostile server
+ * could make the process buffer hundreds of MiB before the login. ImapStream
+ * enforces the three limits while parsing, BEFORE the bytes are stored:
+ *
+ *   maxLineLength    one protocol line (the in-progress line is measured as it arrives);
+ *   maxLiteralSize   one literal, refused when its "{size}" marker is read (no byte of it is kept);
+ *   maxResponseSize  one whole response: every line and DECLARED literal size added up, so
+ *                    many literals that are each allowed cannot add up to more than this.
+ *
+ * Exceeding one destroys the parser and closes the connection (IMAP_RESPONSE_TOO_LARGE).
+ * These are protocol limits, not the message size policy (the worker's IMAP_MAX_MESSAGE_BYTES).
+ */
+export interface ImapProtocolLimits {
+  readonly maxLineLength: number;
+  readonly maxLiteralSize: number;
+  readonly maxResponseSize: number;
+}
+
+export type ImapProtocolProfile = "probe" | "sync";
+
+export const IMAP_PROTOCOL_LIMITS: Readonly<Record<ImapProtocolProfile, ImapProtocolLimits>> = Object.freeze({
+  /**
+   * API connection test: greeting, CAPABILITY, LOGIN, EXAMINE INBOX, LOGOUT. Only short
+   * answers (a long FLAGS / PERMANENTFLAGS list of keywords is the largest legitimate one).
+   */
+  probe: Object.freeze({ maxLineLength: 256 * 1024, maxLiteralSize: 256 * 1024, maxResponseSize: 1 * MiB }),
+  /**
+   * Worker synchronization. The largest literal is one whole message (BODY[]) up to the
+   * worker's 10 MiB cap plus 1 MiB of margin for servers whose RFC822.SIZE differs slightly
+   * from the bytes they send (bigger messages are read in 64 KiB partial chunks). The line
+   * limit fits a UID SEARCH answer of ~250 000 new UIDs. The response limit is one literal
+   * plus one line plus framing.
+   */
+  sync: Object.freeze({ maxLineLength: 2 * MiB, maxLiteralSize: 11 * MiB, maxResponseSize: 14 * MiB })
+});
+
+/** ImapFlow error codes of the three protocol limits (ImapStream, imapflow 2.1.2 errors.js). */
+const PROTOCOL_LIMIT_CODES = new Set(["LineTooLarge", "LiteralTooLarge", "ResponseTooLarge"]);
+
 export interface ImapLogin {
   username: string;
   password: string;
@@ -47,7 +90,8 @@ export interface ImapLogin {
 
 /**
  *   AUTH       login refused
- *   SECURITY   forbidden destination, certificate / TLS failure, no STARTTLS
+ *   SECURITY   forbidden destination, certificate / TLS failure, no STARTTLS,
+ *              a server answer above the protocol limits (never retried: it would come back)
  *   TRANSIENT  DNS failure, timeout, reset, refused, server busy, anything unexpected
  *   MAILBOX    INBOX cannot be opened read-only (connection test only)
  */
@@ -62,7 +106,8 @@ export type ImapFailureCode =
   | "IMAP_TIMEOUT"
   | "IMAP_UNREACHABLE"
   | "IMAP_FAILED"
-  | "IMAP_INBOX_UNAVAILABLE";
+  | "IMAP_INBOX_UNAVAILABLE"
+  | "IMAP_RESPONSE_TOO_LARGE";
 
 export class ImapTransportError extends Error {
   constructor(
@@ -144,7 +189,8 @@ const MESSAGES = {
   tls: "The IMAP server's certificate or TLS connection could not be verified",
   starttls: "The IMAP server does not offer a secure (STARTTLS) connection",
   unreachable: "The IMAP server is temporarily unreachable",
-  failed: "The IMAP operation failed"
+  failed: "The IMAP operation failed",
+  tooLarge: "The IMAP server sent an answer larger than allowed"
 } as const;
 
 const transient = (code: ImapFailureCode, message: string = MESSAGES.unreachable) => new ImapTransportError("TRANSIENT", code, message);
@@ -172,6 +218,9 @@ export function classifyImapFailure(error: unknown): ImapTransportError {
   if (value.authenticationFailed === true || responseCode === "AUTHENTICATIONFAILED" || responseCode === "AUTHORIZATIONFAILED") {
     return new ImapTransportError("AUTH", "IMAP_AUTH_FAILED", MESSAGES.auth);
   }
+  // 0. A protocol size limit (also when it hits during a STARTTLS upgrade, where ImapFlow may flag
+  //    tlsFailed too): the same oversized answer would come back on a retry.
+  if (PROTOCOL_LIMIT_CODES.has(code)) return new ImapTransportError("SECURITY", "IMAP_RESPONSE_TOO_LARGE", MESSAGES.tooLarge);
   // 1. Certificate / TLS protocol codes: always a security failure (also inside a STARTTLS upgrade).
   if (TLS_CODES.has(code) || code.startsWith("ERR_TLS_") || code.startsWith("ERR_SSL_")) {
     return new ImapTransportError("SECURITY", "IMAP_TLS_FAILED", MESSAGES.tls);
@@ -193,15 +242,10 @@ export function classifyImapFailure(error: unknown): ImapTransportError {
   return transient("IMAP_FAILED", MESSAGES.failed);
 }
 
-/**
- * ImapFlow for already-checked options. Connected and logged in, or throws a
- * classified ImapTransportError. It never validates anything by itself: it is
- * called by createImapConnector after the checks (and by the local integration
- * tests, which point `host` at the test server). `onClient` receives the client
- * as soon as it exists, so a caller enforcing a deadline can close it mid-connect.
- */
-export async function openImapClient(options: ImapConnectionOptions, login: ImapLogin, hooks: { onClient?: (client: ImapFlow) => void } = {}): Promise<ImapFlow> {
-  const client = new ImapFlow({
+/** The ImapFlow constructor options of openImapClient (exported for the limits regression test). */
+export function imapFlowOptions(options: ImapConnectionOptions, login: ImapLogin, profile: ImapProtocolProfile = "probe"): ImapFlowOptions {
+  const limits = IMAP_PROTOCOL_LIMITS[profile];
+  return {
     host: options.host,
     port: options.port,
     secure: options.secure,
@@ -216,10 +260,47 @@ export async function openImapClient(options: ImapConnectionOptions, login: Imap
     qresync: false,
     connectionTimeout: IMAP_TIMEOUTS.connectionTimeout,
     greetingTimeout: IMAP_TIMEOUTS.greetingTimeout,
-    socketTimeout: IMAP_TIMEOUTS.socketTimeout
-  });
+    socketTimeout: IMAP_TIMEOUTS.socketTimeout,
+    // E6.1 (A1): never ImapFlow's defaults (1 GiB / 1 GiB / 2 GiB).
+    maxLineLength: limits.maxLineLength,
+    maxLiteralSize: limits.maxLiteralSize,
+    maxResponseSize: limits.maxResponseSize
+  };
+}
+
+/** Clients whose connection was closed because the server exceeded a protocol limit. */
+const protocolLimitFailures = new WeakMap<object, ImapTransportError>();
+
+/**
+ * After the login ImapFlow reports a protocol-limit violation as an 'error' event and
+ * rejects the pending command with a generic "connection not available". This returns
+ * the real cause (SECURITY / IMAP_RESPONSE_TOO_LARGE) for a client opened by
+ * openImapClient, or undefined.
+ */
+export function imapProtocolLimitFailure(client: object): ImapTransportError | undefined {
+  return protocolLimitFailures.get(client);
+}
+
+/**
+ * ImapFlow for already-checked options. Connected and logged in, or throws a
+ * classified ImapTransportError. It never validates anything by itself: it is
+ * called by createImapConnector after the checks (and by the local integration
+ * tests, which point `host` at the test server). `onClient` receives the client
+ * as soon as it exists, so a caller enforcing a deadline can close it mid-connect.
+ * `profile` selects the protocol size limits (default: the strict connection-test one).
+ */
+export async function openImapClient(
+  options: ImapConnectionOptions,
+  login: ImapLogin,
+  hooks: { onClient?: (client: ImapFlow) => void; profile?: ImapProtocolProfile } = {}
+): Promise<ImapFlow> {
+  const client = new ImapFlow(imapFlowOptions(options, login, hooks.profile));
   // An unhandled 'error' event would crash the process; callers see failures as rejections.
-  client.on("error", () => undefined);
+  // ImapFlow emits it before closing, so the cause is recorded before pending commands fail.
+  client.on("error", (error: unknown) => {
+    const failure = classifyImapFailure(error);
+    if (failure.code === "IMAP_RESPONSE_TOO_LARGE") protocolLimitFailures.set(client, failure);
+  });
   hooks.onClient?.(client);
   try {
     await client.connect();
@@ -315,7 +396,8 @@ export async function probeImapInbox(
 ): Promise<ImapInboxPosition> {
   const clients = new Set<ImapProbeClient>();
   const loggedOut = new Set<ImapProbeClient>();
-  const open: ImapProbeOpen = options.open ?? ((connectionOptions, credentials, onClient) => openImapClient(connectionOptions, credentials, { onClient }));
+  const open: ImapProbeOpen =
+    options.open ?? ((connectionOptions, credentials, onClient) => openImapClient(connectionOptions, credentials, { onClient, profile: "probe" }));
   const connect = createImapConnector<ImapProbeClient>({
     ...(options.resolver ? { resolver: options.resolver } : {}),
     open: (connectionOptions, credentials) => open(connectionOptions, credentials, (client) => clients.add(client))
@@ -339,6 +421,9 @@ export async function probeImapInbox(
       }
     } catch (error) {
       if (error instanceof ImapTransportError) throw error;
+      // The server exceeded a protocol limit: the connection was closed for that reason.
+      const tooLarge = imapProtocolLimitFailure(client);
+      if (tooLarge) throw tooLarge;
       // A tagged NO / BAD to EXAMINE: no INBOX for this login. Anything else (network) is classified.
       const status = (error as { responseStatus?: unknown } | null)?.responseStatus;
       if (status === "NO" || status === "BAD") throw inboxUnavailable();
