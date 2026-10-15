@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import type { CommercialPlan, Organization, OrganizationPlanOverview } from "@emailbot/types";
+import type { CommercialPlan, Organization, OrganizationPlanOverview, PaymentMethod } from "@emailbot/types";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
@@ -29,11 +29,28 @@ const { PlansPage } = await import("./plans-page");
 const ORG = "11111111-1111-4111-8111-111111111111";
 const organization: Organization = { id: ORG, name: "Acme", slug: "acme", plan: "PRO", status: "ACTIVE", createdAt: "2026-10-01T00:00:00.000Z", updatedAt: "2026-10-01T00:00:00.000Z" };
 
-function overview(plan: CommercialPlan | "FREE" | null): OrganizationPlanOverview {
+/** A plan of the organization: FREE = legacy (no subscription); a commercial plan = a subscription paid with `paidWith`. */
+function overview(plan: CommercialPlan | "FREE" | null, paidWith: PaymentMethod = "CULQI"): OrganizationPlanOverview {
   const effective = plan === "FREE" ? "BASIC" : plan;
   const entry = PLAN_CATALOG.find((item) => item.code === (effective ?? "BASIC"));
   return {
-    subscription: null,
+    subscription:
+      plan === null || plan === "FREE"
+        ? null
+        : {
+            status: "ACTIVE",
+            plan,
+            billingPeriod: "MONTHLY",
+            currency: "PEN",
+            amount: "39.90",
+            paymentMethod: paidWith,
+            startedAt: "2026-10-01T00:00:00.000Z",
+            currentPeriodStart: "2026-10-01T00:00:00.000Z",
+            currentPeriodEnd: "2099-11-01T00:00:00.000Z",
+            canceledAt: null,
+            suspendedAt: null,
+            expiredAt: null
+          },
     usage: { EMAIL_ACCOUNTS: 0, RULES: 0, BOTS: 0, MONTHLY_EMAILS: 0, MEMBERS: 1, CUSTOMERS: 0, STORAGE_BYTES: 0 },
     entitlements: {
       plan,
@@ -143,7 +160,7 @@ describe("/planes with a session", () => {
     ["BASIC", "Básico"],
     ["PRO", "Pro"],
     ["BUSINESS", "Business"]
-  ] as const)("organization on %s: its card says so and cannot be chosen", async (plan, name) => {
+  ] as const)("organization on %s paid by card: its card says so and cannot be chosen again", async (plan, name) => {
     planOverview = overview(plan);
     renderPage();
     await screen.findByRole("group", { name });
@@ -169,11 +186,37 @@ describe("/planes with a session", () => {
     expect(get.mock.calls.every(([path]) => !/culqi|checkout|payment/i.test(String(path)))).toBe(true);
   });
 
-  it("a legacy FREE organization is recognized on Básico (the plan whose limits apply)", async () => {
+  it("a legacy FREE organization is recognized on Básico and can pay it by card; higher plans stay upgrades", async () => {
     planOverview = overview("FREE");
     renderPage();
     await screen.findByRole("group", { name: "Básico" });
-    expect(within(card("Básico")).getByRole("button", { name: "Tu plan actual" })).toBeDisabled();
+    expect(within(card("Básico")).getByText("Plan actual")).toBeInTheDocument();
+    expect(within(card("Básico")).getByRole("button", { name: "Pagar Básico con tarjeta" })).toBeEnabled();
+    expect(within(card("Básico")).queryByRole("button", { name: "Tu plan actual" })).not.toBeInTheDocument();
+    expect(within(card("Pro")).getByRole("button", { name: "Mejorar a Pro" })).toBeEnabled();
+    expect(within(card("Business")).getByRole("button", { name: "Mejorar a Business" })).toBeEnabled();
+
+    fireEvent.click(within(card("Básico")).getByRole("button", { name: "Pagar Básico con tarjeta" }));
+    expect(await screen.findByRole("dialog", { name: "Contratación en línea próximamente" })).toBeInTheDocument(); // billing off in this test
+    expect(post).not.toHaveBeenCalled();
+  });
+
+  it.each(["TRANSFER", "YAPE", "CASH", "MANUAL"] as const)("Básico paid manually (%s) can move to card payments", async (method) => {
+    planOverview = overview("BASIC", method);
+    renderPage();
+    await screen.findByRole("group", { name: "Básico" });
+    expect(within(card("Básico")).getByRole("button", { name: "Pagar Básico con tarjeta" })).toBeEnabled();
+    expect(within(card("Pro")).getByRole("button", { name: "Mejorar a Pro" })).toBeEnabled();
+  });
+
+  it("Pro paid by card: Básico stays below it (\"Incluido en tu plan\"), Pro is the current plan, Business the upgrade", async () => {
+    planOverview = overview("PRO", "CULQI");
+    renderPage();
+    await screen.findByRole("group", { name: "Pro" });
+    expect(within(card("Básico")).getByRole("button", { name: "Incluido en tu plan" })).toBeDisabled();
+    expect(within(card("Pro")).getByRole("button", { name: "Tu plan actual" })).toBeDisabled();
+    expect(within(card("Business")).getByRole("button", { name: "Mejorar a Business" })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: /con tarjeta/ })).not.toBeInTheDocument();
   });
 
   it("without an active subscription every plan can be chosen (and only informs)", async () => {

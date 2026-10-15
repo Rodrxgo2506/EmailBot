@@ -33,7 +33,7 @@ export function PlanOfferCard({ plan, cta, onChoose }: { plan: PlanCatalogEntry;
   const monthly = monthlyPrice(plan);
   const yearly = yearlyPrice(plan);
   const featured = plan.badge !== null;
-  const current = cta.kind === "CURRENT";
+  const current = cta.kind === "CURRENT" || cta.kind === "PAY_BY_CARD";
   const titleId = `plan-${plan.code.toLowerCase()}-title`;
   const visual = PLAN_ICONS[plan.code];
   const Icon = visual?.icon ?? Mail;
@@ -96,8 +96,8 @@ export function PlanOfferCard({ plan, cta, onChoose }: { plan: PlanCatalogEntry;
             <Button asChild className={featured ? primaryAction : action} variant={featured ? "default" : "outline"}>
               <Link to={cta.to}>{cta.label}</Link>
             </Button>
-          ) : cta.kind === "CHOOSE" ? (
-            <Button className={featured ? primaryAction : action} variant={featured ? "default" : "outline"} onClick={() => onChoose(plan)}>
+          ) : cta.kind === "CHOOSE" || cta.kind === "PAY_BY_CARD" ? (
+            <Button className={featured || cta.kind === "PAY_BY_CARD" ? primaryAction : action} variant={featured || cta.kind === "PAY_BY_CARD" ? "default" : "outline"} onClick={() => onChoose(plan)}>
               {cta.label}
             </Button>
           ) : (
