@@ -2,7 +2,7 @@ import { fork, type ChildProcess } from "node:child_process";
 import net from "node:net";
 import { fileURLToPath } from "node:url";
 import { QUEUE_NAMES, type EmailProcessingJob } from "@emailbot/shared";
-import { Queue, Worker } from "bullmq";
+import { Queue, Worker, type Job } from "bullmq";
 import { Redis } from "ioredis";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { createImapSyncSlots } from "../infrastructure/imap-slots.js";
@@ -39,6 +39,41 @@ const LIMITS: ShutdownLimits = { totalMs: 12_000, graceMs: 1_500, cancelMs: 3_00
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const logger = { ...silentLogger, child: () => ({ ...silentLogger, child: () => silentLogger }) };
 const CHILD = fileURLToPath(new URL("./fixtures/shutdown-child.ts", import.meta.url));
+
+/**
+ * Resolves when `worker` reports job `jobId` completed. The processor writes the business row (PROCESSED) BEFORE it
+ * returns; BullMQ moves the job to "completed" in Redis afterwards (moveToFinished, a round trip later) and only then
+ * emits "completed". A state read taken right after seeing the row can land between the two (measured: the row is
+ * PROCESSED ~40-50 ms before the job is completed). Checks the state once on subscribing (in case the transition
+ * already happened), rejects at once if the job fails, and after `timeoutMs` with what was observed.
+ */
+function jobCompletion(worker: Worker<EmailProcessingJob>, jobId: string, timeoutMs: number, observe: () => Promise<string>): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    let settled = false;
+    const finish = (outcome: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      worker.off("completed", onCompleted);
+      worker.off("failed", onFailed);
+      outcome();
+    };
+    const onCompleted = (job: Job<EmailProcessingJob>) => {
+      if (job.id === jobId) finish(resolve);
+    };
+    const onFailed = (job: Job<EmailProcessingJob> | undefined, error: Error) => {
+      if (job?.id === jobId) finish(() => reject(new Error(`job ${jobId} failed: ${error.message}`)));
+    };
+    const timer = setTimeout(() => {
+      void observe().then((seen) => finish(() => reject(new Error(`job ${jobId} not reported completed within ${timeoutMs} ms (${seen})`))));
+    }, timeoutMs);
+    worker.on("completed", onCompleted);
+    worker.on("failed", onFailed);
+    void observe().then((seen) => {
+      if (seen.startsWith("state=completed")) finish(resolve);
+    });
+  });
+}
 
 describe.runIf(enabled)("F5.1: bounded shutdown with real BullMQ", () => {
   let admin: Redis;
@@ -235,9 +270,15 @@ describe.runIf(enabled)("F5.1: bounded shutdown with real BullMQ", () => {
       hang = false; // the "new process" can reach the database
       const restartedAt = Date.now();
       const restarted = await pipeline(cleanup, { realtime: makeRealtime(), emails });
-      await vi.waitFor(() => expect(emails.rows[0]?.processing_status).toBe("PROCESSED"), { timeout: 75_000, interval: 500 });
+      // BullMQ's own completion signal, not a state read right after the business row (see jobCompletion).
+      const observe = async () => {
+        const current = await restarted.queues.emailProcessing.getJob(job!.id!);
+        return `state=${current ? await current.getState() : "missing"}, row=${emails.rows[0]?.processing_status ?? "none"}`;
+      };
+      await jobCompletion(restarted.worker, job!.id!, 75_000, observe);
+      const recoveredAfterMs = Date.now() - restartedAt;
       const fresh = await restarted.queues.emailProcessing.getJob(job!.id!);
-      return { ...result, afterShutdown, recoveredAfterMs: Date.now() - restartedAt, rows: emails.rows.length, finalState: await fresh!.getState(), attemptsStarted: fresh!.attemptsStarted };
+      return { ...result, afterShutdown, recoveredAfterMs, rows: emails.rows.length, status: emails.rows[0]?.processing_status, finalState: await fresh!.getState(), attemptsStarted: fresh!.attemptsStarted, attemptsMade: fresh!.attemptsMade };
     });
     console.log("F5.1 (3b, 8):", JSON.stringify(run));
     expect(run.code).toBe(1);
@@ -245,7 +286,9 @@ describe.runIf(enabled)("F5.1: bounded shutdown with real BullMQ", () => {
     expect(run.afterShutdown).toMatchObject({ state: "active", finishedOn: null });
     expect(run.afterShutdown.steps).toEqual(["stop", "grace", "cancel", "close", "release", "exit"]);
     expect(run.rows).toBe(1);
+    expect(run.status).toBe("PROCESSED");
     expect(run.finalState).toBe("completed");
+    expect(run.attemptsMade).toBe(1); // completed by the restarted worker, once
     expect(run.recoveredAfterMs).toBeLessThan(75_000);
   }, 150_000);
 
