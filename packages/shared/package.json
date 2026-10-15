@@ -21,6 +21,7 @@
   },
   "dependencies": {
     "@emailbot/types": "workspace:*",
+    "imapflow": "2.1.2",
     "zod": "catalog:"
   },
   "devDependencies": {

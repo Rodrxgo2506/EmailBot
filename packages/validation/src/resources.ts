@@ -49,23 +49,31 @@ export const imapEndpointSchema = z
     if (problem) context.addIssue({ code: "custom", path: ["port"], message: "Use port 993 with TLS or port 143 with STARTTLS" });
   });
 
+const imapConnectionFields = {
+  emailAddress: z.email().max(320),
+  host: imapHostSchema,
+  port: z.number().int(),
+  security: z.enum(IMAP_SECURITY_MODES),
+  username: z.string().trim().min(1).max(320),
+  password: z.string().min(1).max(1000)
+};
+
+const refineImapTransport = (input: { port: number; security: (typeof IMAP_SECURITY_MODES)[number] }, context: z.RefinementCtx) => {
+  const problem = imapTransportProblem(input.port, input.security);
+  if (problem) context.addIssue({ code: "custom", path: ["port"], message: "Use port 993 with TLS or port 143 with STARTTLS" });
+};
+
 export const imapAccountCreateSchema = z
-  .object({
-    emailAddress: z.email().max(320),
-    displayName: z.string().trim().max(200).optional(),
-    host: imapHostSchema,
-    port: z.number().int(),
-    security: z.enum(IMAP_SECURITY_MODES),
-    username: z.string().trim().min(1).max(320),
-    password: z.string().min(1).max(1000)
-  })
+  .object({ ...imapConnectionFields, displayName: z.string().trim().max(200).optional() })
   .strict()
-  .superRefine((input, context) => {
-    const problem = imapTransportProblem(input.port, input.security);
-    if (problem) context.addIssue({ code: "custom", path: ["port"], message: "Use port 993 with TLS or port 143 with STARTTLS" });
-  });
+  .superRefine(refineImapTransport);
 
 export type ImapAccountCreateInput = z.infer<typeof imapAccountCreateSchema>;
+
+/** IMAP E3 connection test: the create fields without the display name (nothing is stored). */
+export const imapConnectionTestSchema = z.object(imapConnectionFields).strict().superRefine(refineImapTransport);
+
+export type ImapConnectionTestInput = z.infer<typeof imapConnectionTestSchema>;
 
 /* ---------------------------------------------------------------- *
  * Categories

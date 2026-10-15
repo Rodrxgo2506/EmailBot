@@ -9,13 +9,23 @@ import { LocalCounters, type RateLimitRedis } from "./rate-limit-store.js";
  * (shared by every API instance, atomic Lua) and, when Redis fails, the same
  * bounded per-instance LocalCounters (limits keep applying per instance).
  * Keys contain the IP only, never the submitted Access ID.
+ *
+ * The thresholds are a policy (default LOGIN_LOCKOUT, the portal's); other
+ * consumers (IMAP connection tests) pass their own.
  */
+
+/** maxFailures refused attempts within failureWindowMs lock the key for lockMs. */
+export interface LockoutPolicy {
+  readonly maxFailures: number;
+  readonly failureWindowMs: number;
+  readonly lockMs: number;
+}
 
 export const LOGIN_LOCKOUT = {
   maxFailures: 10,
   failureWindowMs: 15 * 60_000,
   lockMs: 15 * 60_000
-} as const;
+} as const satisfies LockoutPolicy;
 
 const FAIL_SCRIPT = `
 local failures = redis.call('INCR', KEYS[1])
@@ -41,9 +51,10 @@ export interface LoginThrottle {
 
 export function createLoginThrottle(
   redis: RateLimitRedis | undefined,
-  options: { prefix?: string; onFallback(error: unknown): void; now?: () => number }
+  options: { prefix?: string; onFallback(error: unknown): void; now?: () => number; policy?: LockoutPolicy }
 ): LoginThrottle {
   const prefix = options.prefix ?? "emailbot-portal-login:";
+  const policy = options.policy ?? LOGIN_LOCKOUT;
   const now = options.now ?? Date.now;
   const failures = new LocalCounters();
   const locks = new Map<string, number>();
@@ -58,12 +69,12 @@ export function createLoginThrottle(
       return until - now();
     },
     recordFailure(key: string) {
-      const { current } = failures.increment(key, LOGIN_LOCKOUT.failureWindowMs, now());
-      if (current < LOGIN_LOCKOUT.maxFailures) return 0;
+      const { current } = failures.increment(key, policy.failureWindowMs, now());
+      if (current < policy.maxFailures) return 0;
       failures.reset(key);
       if (locks.size >= 10_000) locks.delete(locks.keys().next().value as string);
-      locks.set(key, now() + LOGIN_LOCKOUT.lockMs);
-      return LOGIN_LOCKOUT.lockMs;
+      locks.set(key, now() + policy.lockMs);
+      return policy.lockMs;
     },
     recordSuccess(key: string) {
       failures.reset(key);
@@ -92,9 +103,9 @@ export function createLoginThrottle(
               2,
               `${prefix}fail:${key}`,
               `${prefix}lock:${key}`,
-              LOGIN_LOCKOUT.failureWindowMs,
-              LOGIN_LOCKOUT.maxFailures,
-              LOGIN_LOCKOUT.lockMs
+              policy.failureWindowMs,
+              policy.maxFailures,
+              policy.lockMs
             )
           ),
         () => local.recordFailure(key)

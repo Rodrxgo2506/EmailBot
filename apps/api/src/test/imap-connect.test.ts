@@ -1,4 +1,4 @@
-import { imapCredentialContext, type ImapResolver } from "@emailbot/shared";
+import { imapCredentialContext, type ImapProbeOpen, type ImapResolver } from "@emailbot/shared";
 import type { EmailAccount } from "@emailbot/types";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { authHeaders, createTestApp, makeUser, ORG_A } from "./helpers.js";
@@ -8,7 +8,8 @@ import { entitlementsFor } from "./plan-fixtures.js";
  * IMAP E1: POST /api/email-accounts/imap as it will behave once IMAP is
  * enabled. Production keeps imapAccountsEnabled = false (email-providers.test.ts
  * covers the 503); here the flag is turned on in the TEST configuration only.
- * DNS answers come from a fake resolver: no network.
+ * DNS answers come from a fake resolver and the IMAP server is a fake ImapFlow
+ * client (E3 connection test, after every E1 check): no network.
  */
 
 const owner = makeUser({ [ORG_A]: "OWNER" });
@@ -50,8 +51,25 @@ afterEach(async () => {
   ctx = undefined;
 });
 
+/** INBOX of the fake server: UIDVALIDITY 1234, UIDNEXT 57 -> initial cursor imap:v1:1234:56. */
+const fakeImapOpen = (): ImapProbeOpen =>
+  vi.fn(async (_options, _login, onClient) => {
+    const client = {
+      mailbox: false as false | { path: string; readOnly: boolean; uidValidity: bigint; uidNext: number },
+      async getMailboxLock() {
+        client.mailbox = { path: "INBOX", readOnly: true, uidValidity: 1234n, uidNext: 57 };
+        return { path: "INBOX", release: () => undefined };
+      },
+      logout: vi.fn(async () => undefined),
+      close: vi.fn(() => undefined)
+    };
+    onClient(client as never);
+    return client as never;
+  });
+
 async function setup(resolver: ImapResolver = publicResolver()) {
-  ctx = await createTestApp({ users: [owner, admin, viewer], config: { imapAccountsEnabled: true }, imapResolver: resolver });
+  ctx = await createTestApp({ users: [owner, admin, viewer], config: { imapAccountsEnabled: true }, imapResolver: resolver, imapProbeOpen: fakeImapOpen() });
+  ctx.repos.emailAccounts.list.mockResolvedValue([]);
   return { ...ctx, resolver };
 }
 
@@ -77,7 +95,8 @@ describe("IMAP connection (enabled in test configuration only)", () => {
       host: "imap.hostinger.com",
       port: 993,
       security: "TLS",
-      syncCursor: null
+      // E3: the INBOX position seen by the connection test (no history imported, nothing lost).
+      syncCursor: "imap:v1:1234:56"
     });
     const encrypted = input.passwordEncrypted as string;
     expect(encrypted.startsWith("v2.")).toBe(true);

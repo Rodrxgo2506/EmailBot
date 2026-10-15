@@ -1,5 +1,5 @@
 import { randomBytes, randomUUID } from "node:crypto";
-import { SecretBox, type ImapResolver } from "@emailbot/shared";
+import { SecretBox, type ImapProbeOpen, type ImapResolver } from "@emailbot/shared";
 import { CURRENT_LEGAL_VERSIONS, LEGAL_DOCUMENTS, type OrganizationRole, type OrganizationStatus } from "@emailbot/types";
 import { vi } from "vitest";
 import { buildApp } from "../app.js";
@@ -191,6 +191,8 @@ export async function createTestApp(
     mailer?: TransactionalMailer;
     /** DNS resolver of the IMAP destination check (tests never query DNS). */
     imapResolver?: ImapResolver;
+    /** IMAP connection (E3 connection test). Default: refuses, so no test can ever reach a real server. */
+    imapProbeOpen?: ImapProbeOpen;
   } = {}
 ) {
   const users = options.users ?? [];
@@ -250,7 +252,12 @@ export async function createTestApp(
     oauthNonces: createMemoryNonceStore(),
     ...(options.rateLimitRedis ? { rateLimitRedis: options.rateLimitRedis } : {}),
     ...(options.mailer ? { mailer: options.mailer } : {}),
-    ...(options.imapResolver ? { imapResolver: options.imapResolver } : {})
+    ...(options.imapResolver ? { imapResolver: options.imapResolver } : {}),
+    imapProbeOpen:
+      options.imapProbeOpen ??
+      (async () => {
+        throw new Error("Unexpected IMAP connection in a test without imapProbeOpen");
+      })
   };
 
   const app = await buildApp(deps, { logger: false });

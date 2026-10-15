@@ -21,7 +21,6 @@
     "@supabase/supabase-js": "^2.117.2",
     "bullmq": "^5.81.5",
     "dotenv": "^17.2.3",
-    "imapflow": "2.1.2",
     "ioredis": "^5.11.1",
     "pino": "^10.3.1",
     "postal-mime": "4.0.5",

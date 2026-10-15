@@ -378,9 +378,6 @@ importers:
       dotenv:
         specifier: ^17.2.3
         version: 17.4.2
-      imapflow:
-        specifier: 2.1.2
-        version: 2.1.2
       ioredis:
         specifier: ^5.11.1
         version: 5.11.1(supports-color@8.1.1)
@@ -446,6 +443,9 @@ importers:
       '@emailbot/types':
         specifier: workspace:*
         version: link:../types
+      imapflow:
+        specifier: 2.1.2
+        version: 2.1.2
       zod:
         specifier: 'catalog:'
         version: 4.6.5

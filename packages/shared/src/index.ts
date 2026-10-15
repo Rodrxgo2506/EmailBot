@@ -9,3 +9,5 @@ export * from "./http.js";
 export * from "./sentry.js";
 export * from "./graph-subscriptions.js";
 export * from "./imap-destination.js";
+export * from "./imap-cursor.js";
+export * from "./imap-client.js";

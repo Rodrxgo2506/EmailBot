@@ -13,6 +13,8 @@ export const RATE_LIMITS = {
   oauthStart: { max: 20, timeWindow: "10 minutes" },
   oauthCallback: { max: 30, timeWindow: "10 minutes" },
   imapCreate: { max: 10, timeWindow: "10 minutes" },
+  /** IMAP connection test (a real login against a mail server); per user / organization limits in imap-connection.ts. */
+  imapTest: { max: 10, timeWindow: "10 minutes" },
   accountSync: { max: 10, timeWindow: "1 minute" },
   loginEvent: { max: 20, timeWindow: "10 minutes" },
   /** Acceptance of the current legal versions (one per user normally). */

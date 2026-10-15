@@ -2,9 +2,7 @@ import {
   buildAuthorizationUrl,
   createOAuthState,
   exchangeAuthorizationCode,
-  ImapDestinationError,
   imapCredentialContext,
-  resolveImapDestination,
   serializeError,
   verifyOAuthState,
   type OAuthProvider,
@@ -15,13 +13,14 @@ import {
   emailAccountUpdateSchema,
   idParamsSchema,
   imapAccountCreateSchema,
+  imapConnectionTestSchema,
   oauthProviderParamsSchema
 } from "@emailbot/validation";
-import type { FastifyInstance, FastifyReply } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import type { ApiConfig, OAuthProviderConfig } from "../../config/env.js";
 import type { AppDeps } from "../../deps.js";
-import { conflict, notFound, serviceUnavailable, unprocessable } from "../../lib/errors.js";
+import { conflict, notFound, serviceUnavailable } from "../../lib/errors.js";
 import { RATE_LIMITS } from "../../lib/rate-limits.js";
 import { parseWith } from "../../lib/validation.js";
 import { getAuth } from "../../plugins/auth.js";
@@ -37,6 +36,7 @@ import {
   requestEntitlements,
   subscriptionRequired
 } from "../plans/entitlements.js";
+import { createImapConnectionTester } from "./imap-connection.js";
 import { fetchMailboxIdentity } from "./mailbox-identity.js";
 import { removeMicrosoftSubscription } from "./microsoft-subscription.js";
 
@@ -80,6 +80,29 @@ export function emailAccountRoutes(deps: AppDeps) {
     const oauthStartGuards = { ...manage, config: { rateLimit: RATE_LIMITS.oauthStart } };
     const oauthCallbackOptions = { config: { rateLimit: RATE_LIMITS.oauthCallback } };
     const imapGuards = { ...manage, config: { rateLimit: RATE_LIMITS.imapCreate } };
+    const imapTestGuards = { ...manage, config: { rateLimit: RATE_LIMITS.imapTest } };
+    const imap = createImapConnectionTester(deps, app.log);
+
+    /**
+     * Checks done before any IMAP connection (test or creation): plan feature IMAP
+     * (PRO, BUSINESS), the same mailbox not connected through Gmail / Microsoft, and
+     * room for one more mailbox unless this one already counts (a reconnection).
+     * Only this organization is looked at. The database decides again atomically.
+     */
+    async function assertImapConnectable(request: FastifyRequest, emailAddress: string) {
+      const plans = requestEntitlements(request);
+      const entitlements = await plans.assertFeatureEnabled("IMAP");
+      const address = emailAddress.trim().toLowerCase();
+      const accounts = await getAuth(request).repos.emailAccounts.list(getOrganization(request).id);
+      const sameMailbox = accounts.filter((existing) => existing.status !== "DISCONNECTED" && existing.emailAddress.trim().toLowerCase() === address);
+      if (sameMailbox.some((existing) => existing.provider !== "IMAP")) {
+        throw conflict("This mailbox is already connected with another provider", "EMAIL_ACCOUNT_ALREADY_CONNECTED");
+      }
+      if (!sameMailbox.some((existing) => existing.provider === "IMAP")) {
+        assertWithinLimit(entitlements, "EMAIL_ACCOUNTS", (await plans.usage(["EMAIL_ACCOUNTS"])).EMAIL_ACCOUNTS ?? 0);
+      }
+      return entitlements;
+    }
 
     /** Providers new accounts can be connected with (the web app only offers these). */
     app.get("/email-accounts/providers", read, async (_request, reply) => {
@@ -246,18 +269,39 @@ export function emailAccountRoutes(deps: AppDeps) {
     });
 
     /**
-     * IMAP / custom domains. Synchronization is NOT implemented (the worker
-     * adapter is a scaffold), so new IMAP accounts are refused with 503
-     * IMAP_NOT_AVAILABLE before the body (and its password) is even parsed.
-     * When enabled (IMAP E1 groundwork, still off):
-     *   - only 993/TLS or 143/STARTTLS and a public DNS name (imapAccountCreateSchema);
-     *   - plan feature IMAP (PRO, BUSINESS);
-     *   - SSRF: every address of the host must be public (resolveImapDestination;
-     *     the worker resolves and pins again before each connection);
-     *   - the password is encrypted bound to the mailbox (SecretBox v2) and the
-     *     database decides plan, limit and reconnection atomically
-     *     (connect_imap_email_account); the account stays PAUSED, nothing is queued.
-     * No connection to the IMAP server is made yet (E3: "test connection").
+     * IMAP / custom domains. Synchronization is NOT enabled, so both IMAP routes
+     * answer 503 IMAP_NOT_AVAILABLE before the body (and its password) is even
+     * parsed (config.imapAccountsEnabled: false, fixed in code). When enabled:
+     *   - OWNER / ADMIN (email-accounts:manage), per-IP route limit;
+     *   - only 993/TLS or 143/STARTTLS and a public DNS name (validation);
+     *   - plan feature IMAP (PRO, BUSINESS) and EMAIL_ACCOUNTS room (assertImapConnectable);
+     *   - imap.test(): attempts per user / organization and login lockout BEFORE any
+     *     DNS query, then SSRF (every address of the host must be public,
+     *     resolveImapDestination; checked again by the shared connector right before
+     *     it dials the validated IP), concurrency and the connection;
+     *   - connection test with the transport the worker uses: login only after TLS /
+     *     STARTTLS, EXAMINE INBOX read-only, LOGOUT, every connection closed.
+     */
+
+    /** Connection test only: nothing is stored, no password is kept, nothing is queued or imported. */
+    app.post("/email-accounts/imap/test", imapTestGuards, async (request) => {
+      if (!providerAvailability(deps.config).IMAP) {
+        throw serviceUnavailable("IMAP accounts are not available yet", "IMAP_NOT_AVAILABLE");
+      }
+      const input = parseWith(imapConnectionTestSchema, request.body);
+      await assertImapConnectable(request, input.emailAddress);
+      await imap.test({ organizationId: getOrganization(request).id, userId: getAuth(request).user.id, log: request.log }, input);
+      return { ok: true };
+    });
+
+    /**
+     * Connection, after the same checks and a successful connection test: the
+     * password is encrypted bound to the mailbox (SecretBox v2) and the database
+     * decides plan, limit, duplicates and reconnection atomically
+     * (connect_imap_email_account: one transaction, nothing stored on a refusal).
+     * The account stays PAUSED and nothing is queued. Its initial cursor is the
+     * INBOX position seen by the test ("imap:v1:<UIDVALIDITY>:<UIDNEXT - 1>"):
+     * no older message is ever imported, none received after the test is lost.
      */
     app.post("/email-accounts/imap", imapGuards, async (request, reply) => {
       if (!providerAvailability(deps.config).IMAP) {
@@ -265,16 +309,11 @@ export function emailAccountRoutes(deps: AppDeps) {
       }
       const organizationId = getOrganization(request).id;
       const input = parseWith(imapAccountCreateSchema, request.body);
-      // Early, friendly refusal; the database checks the plan again in the same transaction as the write.
-      const entitlements = await requestEntitlements(request).assertFeatureEnabled("IMAP");
+      // Early, friendly refusals; the database checks plan and limit again in the same transaction as the write.
+      const entitlements = await assertImapConnectable(request, input.emailAddress);
       const plan = entitlements.effectivePlan;
 
-      try {
-        await resolveImapDestination({ host: input.host, port: input.port, security: input.security }, deps.imapResolver ? { resolver: deps.imapResolver } : {});
-      } catch (error) {
-        if (error instanceof ImapDestinationError) throw unprocessable(error.message, error.code);
-        throw error;
-      }
+      const position = await imap.test({ organizationId, userId: getAuth(request).user.id, log: request.log }, input);
 
       const connection = await deps.privileged.connectImapEmailAccount({
         organizationId,
@@ -285,7 +324,7 @@ export function emailAccountRoutes(deps: AppDeps) {
         port: input.port,
         security: input.security,
         passwordEncrypted: deps.secretBox.encryptBound(input.password, imapCredentialContext(organizationId, input.emailAddress)),
-        syncCursor: null
+        syncCursor: position.cursor
       });
       // The plan may have changed since the early check: the database's answer wins.
       if (connection.outcome === "FEATURE_NOT_AVAILABLE") {
