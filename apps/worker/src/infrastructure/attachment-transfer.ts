@@ -49,6 +49,28 @@ function hostOf(input: Parameters<typeof fetch>[0]): string {
   }
 }
 
+/**
+ * F5.7: the body already read, handed back chunk by chunk as it arrived (no joined copy); each chunk is released once
+ * consumed. Reading it cannot time out, be cancelled or fail on the network: all of that happened before.
+ */
+function replay(chunks: Array<Uint8Array | undefined>): ReadableStream<Uint8Array> {
+  let next = 0;
+  return new ReadableStream<Uint8Array>(
+    {
+      pull(controller) {
+        const chunk = chunks[next];
+        if (next >= chunks.length || !chunk) return controller.close();
+        chunks[next++] = undefined;
+        controller.enqueue(chunk);
+      },
+      cancel() {
+        chunks.length = 0;
+      }
+    },
+    { highWaterMark: 0 }
+  );
+}
+
 /** `fetchImpl` with the download limits above; the body is handed back in memory (like fetchWithTimeout). */
 export function boundedDownloadFetch(fetchImpl: typeof fetch, limits: DownloadLimits): typeof fetch {
   return async (input, init) => {
@@ -93,7 +115,7 @@ export function boundedDownloadFetch(fetchImpl: typeof fetch, limits: DownloadLi
         chunks.push(value);
         progress();
       }
-      return new Response(Buffer.concat(chunks), { status: response.status, statusText: response.statusText, headers: response.headers });
+      return new Response(replay(chunks), { status: response.status, statusText: response.statusText, headers: response.headers });
     } catch (error) {
       // Our own limit (timeout / size) wins; a caller's abort and network errors are rethrown unchanged.
       if (failure) throw failure;

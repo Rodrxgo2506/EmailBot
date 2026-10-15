@@ -291,10 +291,12 @@ necesitaban ~0,42 MiB/s) y se repetía 3 veces dentro del trabajo aunque el fall
   el objeto pero la respuesta no llegó, el siguiente intento lo encuentra y no lo descarga ni lo sube otra vez;
 - el apagado (fase de cancelación, F5.4) cancela descargas y subidas en curso y no deja empezar otras: el trabajo
   se detiene al momento como cancelado y se reintenta. Una descarga cancelada cierra su conexión al instante. Una
-  subida no: undici (Node 24) sigue enviando todo lo que ya había entregado al socket (con un adjunto en memoria,
-  normalmente el cuerpo entero), y al salir el proceso el sistema operativo entrega lo que tenga en sus búferes y
-  cierra la conexión. **Una subida cancelada puede completarse en Storage** (comprobado en local: 3 subidas de 4 MiB
-  canceladas y completadas después de la salida). Es seguro: la ruta es determinista y con *upsert*, la fila no se
+  subida no: los bytes ya entregados al socket siguen llegando a Storage después del abort, y la conexión se cierra
+  más tarde (comprobado en local: cancelación por el apagado con Node 24, hasta la salida del proceso, cuando el
+  sistema operativo entrega lo que tenga en sus búferes; plazo vencido con Node 22 en Linux, medición F5.6 D2: Storage
+  siguió recibiendo datos durante unos segundos y la conexión se cerró con el objeto incompleto). Que esos bytes sigan
+  llegando no significa que ocupen memoria del proceso (ver «Qué no limita m»). **Una subida cancelada puede
+  completarse en Storage** (comprobado en local: 3 subidas de 4 MiB canceladas y completadas después de la salida). Es seguro: la ruta es determinista y con *upsert*, la fila no se
   marca en ese intento, y el siguiente encuentra el objeto y lo marca sin volver a descargarlo ni subirlo. Mientras
   tanto esas transferencias ocupan conexiones y ancho de banda: como mucho una por tarea de adjuntos en curso (25
   con la concurrencia por defecto: 10 trabajos de procesamiento más 5 de eventos con hasta 3 mensajes cada uno),
@@ -307,9 +309,10 @@ peticiones, PostgREST (F5.3) y la API. Un trabajo con varios adjuntos lentos pue
 Memoria (medida en local en un proceso hijo con la cadena real; pico de memoria residente del proceso, con mucha
 variación entre ejecuciones): un adjunto de 25 MiB lo eleva entre ~280 y ~470 MiB (cadena anterior a F5.5: ~450-500
 MiB) y tres a la vez entre ~500 y ~615 MiB (anterior: ~500-515 MiB), por las copias del cuerpo JSON, sus cadenas, la
-decodificación base64 y la subida. No es nuevo de F5.5 (F5.5 añade una copia transitoria del cuerpo al unir sus
-partes), pero con 15 trabajos a la vez y adjuntos grandes el pico puede superar la memoria de la instancia: pendiente
-de decidir (menos copias o un límite de transferencias de adjuntos simultáneas por proceso).
+decodificación base64 y la subida. No era nuevo de F5.5 (F5.5 añadía una copia transitoria del cuerpo al unir sus
+partes, que F5.7 quita), pero con hasta 25 tareas de adjuntos a la vez y adjuntos grandes el pico podía superar la
+memoria de la instancia: F5.6 limita las transferencias y los contenidos por proceso y F5.7 reduce las copias de
+Gmail (ver abajo).
 
 Límite de transferencias (F5.6, fase 1; `apps/worker/src/infrastructure/attachment-transfers.ts`): cada proceso
 del worker hace como mucho `WORKER_ATTACHMENT_TRANSFER_CONCURRENCY` transferencias a la vez (1 por defecto; cada
@@ -337,19 +340,58 @@ ser hasta 25 tareas de adjuntos a la vez (unos 625 MiB solo de contenidos con ad
 Qué no limita m: **la memoria residente real del proceso**, que además incluye:
 
 - la base del proceso (código, dependencias, clientes, colas);
-- las copias temporales de cada transferencia en curso: el cuerpo JSON, sus cadenas, la decodificación base64 y las
-  copias internas de undici al subir;
+- las copias temporales de cada transferencia en curso: los bytes recibidos del cuerpo y el contenido decodificado
+  (Gmail, F5.7; en Microsoft, además, el texto JSON, sus cadenas y la decodificación base64) y las copias internas de
+  undici al subir;
 - los mensajes completos que procesa cada trabajo y el resto de su memoria, que no pasan por estos permisos;
-- los cuerpos de subidas abortadas (vencidas o canceladas por el apagado): undici rechaza la petición al momento pero
-  conserva lo que ya había entregado al socket hasta terminar de enviarlo o cerrar la conexión, después de que se
-  hayan liberado los dos permisos. Ante un Storage lento, varios de esos cuerpos pueden convivir fuera de cualquier
-  límite (comprobado para la cancelación; para el plazo vencido es el mismo mecanismo de `AbortSignal`, no probado
-  por separado).
+- lo que quede de las subidas abortadas (vencidas o canceladas por el apagado) después de liberarse los dos
+  permisos. Observado en Linux con Node 22 (Docker, medición F5.6, escenario D2: plazo de subida vencido ante un
+  Storage que lee ~1 MiB/s): tras el abort y un `gc()` forzado, `arrayBuffers` y `external` volvieron a su valor base
+  aunque Storage siguió recibiendo bytes de esas conexiones durante varios segundos; en el proceso no quedó retenido
+  el cuerpo abortado. Los bytes que siguen llegando por el socket no se atribuyen a la memoria del proceso: lo más
+  probable es que estén en los búferes del socket del sistema, pero eso no se ha medido (`sock` de `memory.stat`
+  del cgroup). Sin confirmar: la cancelación por el apagado, otras versiones de Node / undici, el comportamiento sin
+  `gc()` forzado (el recolector puede tardar en liberarlos) y Render. No se da por resuelto: hasta medirlo, varios de
+  esos cuerpos podrían convivir fuera de cualquier límite.
 
-Estimación orientativa por proceso con los valores por defecto (mediciones locales en Windows con Node 24, no de
-Render ni de producción): la base del proceso, un pico de transferencia (+281 a +470 MiB de memoria residente con un
-adjunto de 25 MiB) y otro contenido retenido (25 MiB), más lo que haya de la lista anterior. Memoria real de la
-instancia en Render: sin verificar.
+Decodificación incremental de Gmail (F5.7; `apps/worker/src/providers/gmail/attachment-body.ts`): el contenido de un
+adjunto de Gmail se decodifica directamente desde los bytes de la respuesta, sin construir el texto JSON (~33 MiB con
+un adjunto de 25 MiB), el objeto con la cadena `data`, las cadenas de base64url a base64 ni otra copia del contenido.
+`boundedDownloadFetch` sigue leyendo el cuerpo entero con sus límites (inactividad, total, tamaño) y la cancelación
+de F5.4, pero lo devuelve trozo a trozo tal como llegó en lugar de unirlo en una copia. El adaptador recorre esos
+trozos dos veces: la primera valida todo el cuerpo y cuenta los bytes; la segunda los escribe en un único búfer de
+ese tamaño exacto y suelta cada trozo al terminar con él. Pico por transferencia: los bytes recibidos (~4/3 del
+adjunto) más el contenido decodificado. Sin cambios: el tamaño máximo, la clasificación de errores del proveedor, la
+ruta determinista, el marcado de la fila solo tras confirmar Storage y la ausencia de reintentos tras un plazo
+vencido o una cancelación. La decodificación es trabajo local sobre bytes ya recibidos: no se cancela a mitad (como
+antes); la subida posterior sí respeta la cancelación. En local (Windows, Node 24), decodificar 25 MiB tarda
+~70-85 ms (antes ~100-125 ms); los escapes JSON dentro de `data` cuestan tiempo lineal. Microsoft Graph no cambia
+(sigue con el JSON completo), ni la subida (sin streaming).
+
+Compatibilidad con la cadena anterior (`response.json()` de undici + `Buffer.from(..., "base64")`; comprobada con
+Node 22.23.3, el de la imagen del worker, y con Node 24: mismos resultados). Se acepta, con los mismos bytes, todo lo
+que esa cadena decodificaba correctamente: los alfabetos base64url y estándar (mezclados), con o sin relleno y con `=`
+de más tras el último grupo; espacios dentro de `data`, y saltos de línea, tabuladores y demás espacios escritos como
+escapes JSON (base64 partido en líneas); los escapes `\/` y `\u00XX`; hasta dos marcas de orden de bytes UTF-8 al
+principio del cuerpo, y un resto del cuerpo (sin `data`) de cualquier tamaño, que valida `JSON.parse` y acota el
+límite de la descarga. Se rechazan, aunque la cadena anterior los aceptaba, porque sus bytes no eran fiables:
+cualquier otro carácter dentro de `data` (lo saltaba en silencio: el resultado solo era correcto si ese carácter era
+ruido), un último grupo de un solo carácter (lo descartaba), datos después del relleno (cortaba en el primer `=` y
+perdía el resto) y un `data` repetido (`JSON.parse` se quedaba con el último; los nombres repetidos son ambiguos según
+la RFC 8259). Como antes, se rechaza un cuerpo que no es JSON, no es un objeto o no tiene un `data` de tipo cadena.
+Un cuerpo rechazado deja el contenido pendiente (el correo sigue en `ATTACHMENTS_PENDING` y se reintenta), como antes
+un JSON inválido: si Gmail enviara alguno de los formatos rechazados, ese adjunto no se guardaría. Comprobado solo con
+cuerpos sintéticos, no con respuestas reales de Gmail.
+
+Estimación orientativa por proceso con los valores por defecto. Medida en Linux con Node 22 (Docker con cgroup v2,
+sonda de memoria de F5.6: el pipeline real de `dist` contra servicios falsos, sin BullMQ; no es Render ni
+producción), con tres correos simultáneos con un adjunto de Gmail de 25 MiB cada uno, k = 1 y m = 2: pico de memoria
+residente del proceso de 433-471 MiB antes de F5.7 y de 236-246 MiB con F5.7 (medido antes del ajuste de
+compatibilidad, que no añade copias del contenido; `memory.peak` del contenedor: 390-427 y
+194-203 MiB; base de la sonda ~90-98 MiB). Con un solo adjunto: 388-395 frente a 224-235 MiB. Con k = 3 y m = 4:
+544-603 frente a 420-446 MiB. El worker real en reposo: ~100 MiB de `memory.peak` (pico residente ~145 MiB). A eso se
+suma lo que haya de la lista anterior. Las mediciones en Windows con Node 24 citadas más arriba (+281 a +470 MiB por
+adjunto) son de la cadena anterior a F5.7. Memoria real de la instancia en Render: sin verificar.
 
 Riesgos aparte, fuera de los permisos de adjuntos:
 

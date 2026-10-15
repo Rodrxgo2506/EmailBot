@@ -33,6 +33,20 @@ export async function providerGet(
   return providerRequest(context, "GET", url, undefined, fetchImpl, headers);
 }
 
+/**
+ * F5.7: authenticated GET whose successful response is handed to `read` instead of being parsed as JSON (Gmail
+ * attachment bodies, decoded from their bytes). Same authentication and error classification as providerGet; the
+ * errors of `read` itself are not reclassified (like a JSON parse error before).
+ */
+export async function providerGetResponse<T>(
+  context: ProviderContext,
+  url: string,
+  fetchImpl: typeof fetch,
+  read: (response: Response) => Promise<T>
+): Promise<T> {
+  return providerRequest(context, "GET", url, undefined, fetchImpl, {}, read);
+}
+
 /** Authenticated JSON POST (e.g. Gmail users.watch); same error classification as providerGet. */
 export async function providerPost(context: ProviderContext, url: string, body: unknown, fetchImpl: typeof fetch): Promise<unknown> {
   return providerRequest(context, "POST", url, body, fetchImpl, { "content-type": "application/json" });
@@ -48,14 +62,18 @@ export async function providerDelete(context: ProviderContext, url: string, fetc
   return providerRequest(context, "DELETE", url, undefined, fetchImpl, {});
 }
 
-async function providerRequest(
+/** No content (DELETE) resolves to null; every other success has a JSON body (GET / POST / PATCH). */
+const readJson = (response: Response): Promise<unknown> => (response.status === 204 ? Promise.resolve(null) : response.json());
+
+async function providerRequest<T = unknown>(
   context: ProviderContext,
   method: "GET" | "POST" | "PATCH" | "DELETE",
   url: string,
   body: unknown,
   fetchImpl: typeof fetch,
-  headers: Record<string, string>
-): Promise<unknown> {
+  headers: Record<string, string>,
+  read: (response: Response) => Promise<T> = readJson as (response: Response) => Promise<T>
+): Promise<T> {
   for (const forceRefresh of [false, true]) {
     const accessToken = await context.getAccessToken({ forceRefresh });
 
@@ -85,9 +103,7 @@ async function providerRequest(
     if (!response.ok) {
       throw new ProviderHttpError(`Provider returned HTTP ${response.status}`, response.status);
     }
-    // No content (DELETE); every other success has a JSON body (GET / POST / PATCH unchanged).
-    if (response.status === 204) return null;
-    return response.json();
+    return read(response);
   }
 
   throw new ProviderAuthError("Provider authentication failed", "PROVIDER_UNAUTHORIZED");
