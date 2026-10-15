@@ -111,7 +111,7 @@ export function culqiPlanMismatch(
 /** Culqi subscription status codes (GET /v2/recurrent/subscriptions: 1 Creada, 2 Periodo de prueba, 3 Activa, 4 Cancelada, 5 En cola, 6 Vencida). */
 export const CULQI_SUBSCRIPTION_STATUS = { CREATED: 1, TRIAL: 2, ACTIVE: 3, CANCELED: 4, QUEUED: 5, EXPIRED: 6 } as const;
 
-export type BillingStatus = "PENDING" | "ACTIVE" | "PAST_DUE" | "CANCELED" | "EXPIRED" | "FAILED";
+export type BillingStatus = "PENDING" | "ACTIVE" | "PAST_DUE" | "CANCELED" | "EXPIRED" | "FAILED" | "REVIEW_REQUIRED";
 
 /**
  * Culqi status -> EmailBot provider-side status. Never copied verbatim:
@@ -251,17 +251,23 @@ export interface CulqiSubscription {
 }
 
 /**
- * Culqi charge (GET /v2/charges/{id}, "Objeto Cargo"): the documented proof of a
- * payment. `outcome.code` is "succesfull_charge" (sic, Culqi's spelling) or
- * "card_declined"; `paid` / `capture` are booleans; amounts in céntimos.
+ * Culqi charge (GET /v2/charges/{id}, "Objeto Cargo"): the proof of a payment; amounts in céntimos.
+ * The specification's success code ("succesfull_charge") and its description of `paid` do not match what the
+ * sandbox returns: an approved, captured subscription charge came back with `paid: false` and
+ * outcome { type: "venta_exitosa", code: "AUT0000" }. `paid` is therefore never used to decide (see the worker's
+ * verifyCulqiCharge); what it means for Culqi is not documented.
  */
 export interface CulqiCharge {
   id: string;
   amount?: number | null;
   current_amount?: number | null;
+  amount_refunded?: number | null;
   currency_code?: string | null;
   paid?: boolean | null;
   capture?: boolean | null;
+  authorization_code?: string | null;
+  reference_code?: string | null;
+  dispute?: boolean | null;
   creation_date?: number | string | null;
   outcome?: { type?: string | null; code?: string | null; decline_code?: string | null; merchant_message?: string | null } | null;
   /** The card or token used ({ object: "card" | "token", id, customer_id? ... }). */
@@ -269,8 +275,40 @@ export interface CulqiCharge {
   metadata?: Record<string, unknown> | null;
 }
 
-/** Culqi's documented outcome code of an approved charge (spelling as in the API). */
-export const CULQI_CHARGE_SUCCESS_CODE = "succesfull_charge";
+/**
+ * Outcome of an approved sale, as returned by the Culqi sandbox for a captured subscription charge (verified with a
+ * real charge). Only this exact pair counts as a confirmed success; other codes are not assumed to be successes.
+ */
+export const CULQI_CHARGE_SUCCESS_OUTCOME = { type: "venta_exitosa", code: "AUT0000" } as const;
+
+/** Culqi's documented outcome code of a declined charge. */
+export const CULQI_CHARGE_DECLINED_CODE = "card_declined";
+
+/**
+ * Bank declines seen in the sandbox, as outcome { type: "operacion_denegada", code }. Only codes observed in a real
+ * charge are listed (DNGE0015: first charge of a subscription with the "insufficient_funds" test card; Culqi's
+ * documentation uses DNGE0015 as its insufficient_funds example). Other DNGE codes are not assumed.
+ */
+export const CULQI_DENIED_OPERATION_TYPE = "operacion_denegada";
+export const CULQI_CONFIRMED_DECLINE_CODES: readonly string[] = ["DNGE0015"];
+
+/**
+ * A charge Culqi confirms as declined: the documented "card_declined" code, or an observed bank decline
+ * (operacion_denegada + a listed code) without any evidence of success (no authorization code, not a sale).
+ * `paid` and `capture` are never used: the sandbox returned capture: true on a declined charge.
+ */
+export function isConfirmedCulqiDecline(charge: CulqiCharge): boolean {
+  const outcome = charge.outcome ?? null;
+  if (!outcome) return false;
+  if (outcome.code === CULQI_CHARGE_DECLINED_CODE) return true;
+  const authorized = typeof charge.authorization_code === "string" && charge.authorization_code.trim() !== "";
+  return (
+    outcome.type === CULQI_DENIED_OPERATION_TYPE &&
+    typeof outcome.code === "string" &&
+    CULQI_CONFIRMED_DECLINE_CODES.includes(outcome.code) &&
+    !authorized
+  );
+}
 
 export interface CulqiEvent {
   id: string;

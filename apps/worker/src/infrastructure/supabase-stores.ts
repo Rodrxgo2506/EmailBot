@@ -252,7 +252,7 @@ export function createSubscriptionMaintenance(db: SupabaseClient): SubscriptionM
 
 const BILLING_COLUMNS =
   "id,organization_id,status,environment,external_subscription_id,external_plan_id,external_customer_id,external_card_id,cancel_reason,created_at," +
-  "price:plan_prices(billing_period,amount_cents,currency)";
+  "review_required_at,last_reconciled_at,price:plan_prices(billing_period,amount_cents,currency,plan:plan_catalog(code))";
 
 function toBillingRow(row: Row): BillingSubscriptionRow {
   const price = Array.isArray(row.price) ? row.price[0] : row.price;
@@ -270,7 +270,10 @@ function toBillingRow(row: Row): BillingSubscriptionRow {
     amountCents: Number.isFinite(Number(price?.amount_cents)) ? Number(price.amount_cents) : -1,
     currency: typeof price?.currency === "string" ? price.currency : "",
     cancelReason: row.cancel_reason ?? null,
-    createdAt: row.created_at
+    createdAt: row.created_at,
+    planCode: (Array.isArray(price?.plan) ? price.plan[0]?.code : price?.plan?.code) ?? null,
+    reviewRequiredAt: row.review_required_at ?? null,
+    lastReconciledAt: row.last_reconciled_at ?? null
   };
 }
 
@@ -422,6 +425,46 @@ export function createBillingStore(db: SupabaseClient): BillingStore {
           .limit(limit)
       ]);
       return [...(check(withSubscription, "listStalePending") as Row[]), ...(check(withoutSubscription, "listStalePending") as Row[])].map(toBillingRow);
+    },
+
+    async listReviewRequired({ createdAfter, reconciledBefore, limit }) {
+      const rows = check(
+        await db
+          .from("billing_subscriptions")
+          .select(BILLING_COLUMNS)
+          .eq("provider", provider)
+          .eq("status", "REVIEW_REQUIRED")
+          .gte("created_at", createdAfter)
+          .or(`last_reconciled_at.is.null,last_reconciled_at.lte.${reconciledBefore}`)
+          .order("last_reconciled_at", { ascending: true, nullsFirst: true })
+          .limit(limit),
+        "listReviewRequired"
+      ) as Row[];
+      return rows.map(toBillingRow);
+    },
+
+    async recordReconciliation(id, { at, charge }) {
+      const patch: Record<string, unknown> = { last_reconciled_at: at };
+      if (charge) {
+        patch.last_charge_id = charge.chargeId;
+        patch.last_outcome_type = charge.outcomeType?.slice(0, 100) ?? null;
+        patch.last_outcome_code = charge.outcomeCode?.slice(0, 100) ?? null;
+        patch.last_decline_code = charge.declineCode?.slice(0, 100) ?? null;
+      }
+      check(await db.from("billing_subscriptions").update(patch).eq("id", id).in("status", ["PENDING", "REVIEW_REQUIRED"]), "recordReconciliation");
+    },
+
+    async markReviewRequired(input) {
+      return String(
+        check(
+          await db.rpc("billing_mark_culqi_review_required", {
+            p_billing_subscription_id: input.billingSubscriptionId,
+            p_review_code: input.reviewCode,
+            p_request_id: input.requestId
+          }),
+          "markCulqiReviewRequired"
+        )
+      );
     }
   };
 }

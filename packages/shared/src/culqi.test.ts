@@ -1,9 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   collectCulqiIds,
+  CULQI_CHARGE_DECLINED_CODE,
+  CULQI_CHARGE_SUCCESS_OUTCOME,
   createCulqiClient,
   CulqiApiError,
   culqiEnvironment,
+  isConfirmedCulqiDecline,
   CULQI_PLAN_INTERVAL_COUNT,
   culqiAmountToCents,
   culqiKeyProblem,
@@ -69,6 +72,27 @@ describe("status mapper (Culqi codes are never copied verbatim)", () => {
     expect(isHandledCulqiEvent("subscription.charge.failed")).toBe(true);
     expect(isHandledCulqiEvent("order.status.changed")).toBe(false);
     expect(isHandledCulqiEvent("subscription.payment.ok")).toBe(false);
+  });
+});
+
+describe("isConfirmedCulqiDecline (explicit decline evidence only; paid / capture never decide)", () => {
+  const base = { id: "chr_test_X", amount: 3990, currency_code: "PEN", amount_refunded: 0, dispute: false };
+  it("the real sandbox decline (operacion_denegada / DNGE0015, capture true, paid false, no authorization) is a confirmed decline", () => {
+    expect(isConfirmedCulqiDecline({ ...base, capture: true, paid: false, authorization_code: null, outcome: { type: "operacion_denegada", code: "DNGE0015" } })).toBe(true);
+    expect(isConfirmedCulqiDecline({ ...base, capture: false, paid: true, outcome: { type: "operacion_denegada", code: "DNGE0015" } })).toBe(true);
+  });
+  it("Culqi's documented card_declined stays a confirmed decline", () => {
+    expect(isConfirmedCulqiDecline({ ...base, outcome: { code: "card_declined", decline_code: "insufficient_funds" } })).toBe(true);
+  });
+  it.each([
+    ["an approved sale", { capture: true, authorization_code: "000001", outcome: { type: "venta_exitosa", code: "AUT0000" } }],
+    ["another DNGE code (not observed)", { outcome: { type: "operacion_denegada", code: "DNGE9999" } }],
+    ["DNGE0015 with an authorization code", { authorization_code: "000001", outcome: { type: "operacion_denegada", code: "DNGE0015" } }],
+    ["DNGE0015 under another outcome type", { outcome: { type: "venta_exitosa", code: "DNGE0015" } }],
+    ["no outcome", { outcome: null }],
+    ["paid: false alone", { paid: false, outcome: {} }]
+  ])("%s is not a confirmed decline", (_label, extra) => {
+    expect(isConfirmedCulqiDecline({ ...base, ...extra })).toBe(false);
   });
 });
 
@@ -229,11 +253,13 @@ describe("Culqi client (official v2 endpoints)", () => {
 
   it("charges: GET /v2/charges/{id} (the documented proof of payment); unknown -> null", async () => {
     const { fetch, calls } = fakeFetch([
-      { status: 200, body: { object: "charge", id: "chr_test_C1", amount: 3990, currency_code: "PEN", paid: true, outcome: { code: "succesfull_charge" } } },
+      { status: 200, body: { object: "charge", id: "chr_test_C1", amount: 3990, amount_refunded: 0, currency_code: "PEN", capture: true, authorization_code: "000001", dispute: false, paid: false, outcome: { type: "venta_exitosa", code: "AUT0000" } } },
       { status: 404, body: { object: "error" } }
     ]);
     const client = createCulqiClient({ secretKey: SECRET, fetch });
-    expect(await client.getCharge("chr_test_C1")).toMatchObject({ paid: true, outcome: { code: "succesfull_charge" } });
+    expect(await client.getCharge("chr_test_C1")).toMatchObject({ capture: true, authorization_code: "000001", outcome: CULQI_CHARGE_SUCCESS_OUTCOME });
+    expect(CULQI_CHARGE_SUCCESS_OUTCOME).toEqual({ type: "venta_exitosa", code: "AUT0000" }); // as returned by the sandbox
+    expect(CULQI_CHARGE_DECLINED_CODE).toBe("card_declined");
     expect(await client.getCharge("chr_test_missing")).toBeNull();
     expect(calls.map((call) => `${call.method} ${call.url}`)).toEqual(["GET https://api.culqi.com/v2/charges/chr_test_C1", "GET https://api.culqi.com/v2/charges/chr_test_missing"]);
   });

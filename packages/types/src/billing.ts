@@ -7,7 +7,7 @@ import type { BillingPeriod, CommercialPlan } from "./plans.js";
  */
 
 /** Mirrors public.billing_subscription_status (provider side of a Culqi subscription). */
-export const BILLING_SUBSCRIPTION_STATUSES = ["PENDING", "ACTIVE", "PAST_DUE", "CANCELED", "EXPIRED", "FAILED"] as const;
+export const BILLING_SUBSCRIPTION_STATUSES = ["PENDING", "ACTIVE", "PAST_DUE", "CANCELED", "EXPIRED", "FAILED", "REVIEW_REQUIRED"] as const;
 export type BillingSubscriptionStatus = (typeof BILLING_SUBSCRIPTION_STATUSES)[number];
 
 export type BillingEnvironment = "test" | "live";

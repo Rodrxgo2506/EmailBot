@@ -389,6 +389,133 @@ describe("declined charges and provider-side states (access unchanged)", () => {
   });
 });
 
+describe("REVIEW_REQUIRED: a checkout whose charge stayed unconfirmed (20261007150100)", () => {
+  const markReview = (billingId: string, code = "CULQI_UNCONFIRMED_REVIEW") =>
+    t.asService((tx) => one<{ result: string }>(tx, "select public.billing_mark_culqi_review_required($1, $2, 'req-review') as result", [billingId, code])).then((row) => row.result);
+  /** What the worker records on every unconfirmed reconciliation (direct update, service_role). */
+  const noteUnconfirmed = (billingId: string, charge: string) =>
+    t.asService((tx) =>
+      tx.query(
+        "update public.billing_subscriptions set last_reconciled_at = now(), last_charge_id = $2, last_outcome_type = 'tipo_desconocido', last_outcome_code = 'X0001', last_decline_code = null where id = $1",
+        [billingId, charge]
+      )
+    );
+  const review = (id: string) =>
+    t.asAdmin((tx) =>
+      one<{ status: string; failure_code: string | null; review_required_at: string | null; last_charge_id: string | null; last_outcome_code: string | null; canceled_at: string | null; cancel_reason: string | null }>(
+        tx,
+        "select status, failure_code, review_required_at, last_charge_id, last_outcome_code, canceled_at, cancel_reason from public.billing_subscriptions where id = $1",
+        [id]
+      )
+    );
+
+  it("A/B/C: PENDING blocks a new checkout; REVIEW_REQUIRED and FAILED do not", async () => {
+    const org = await newOrganization();
+    const pending = await checkout(org, "PRO");
+    await expect(checkout(org, "PRO")).rejects.toThrow(/billing_subscriptions_one_pending/);
+    expect(await markReview(pending.id)).toBe("CHANGED");
+    const second = await checkout(org, "PRO"); // REVIEW_REQUIRED no longer blocks
+    expect(await failCharge(second.id, "chr_test_rvblockfail")).toBe("RECORDED");
+    await checkout(org, "PRO"); // FAILED does not block either
+  });
+
+  it("PENDING -> REVIEW_REQUIRED keeps every trace; only through its function; idempotent; never from another status", async () => {
+    const org = await newOrganization();
+    const id = await checkout(org, "PRO");
+    await noteUnconfirmed(id.id, "chr_test_rvtrace");
+    await expect(setStatus(id.id, "REVIEW_REQUIRED")).rejects.toThrow(/billing_mark_culqi_review_required/);
+    expect(await markReview(id.id)).toBe("CHANGED");
+    expect(await review(id.id)).toMatchObject({ status: "REVIEW_REQUIRED", failure_code: "CULQI_UNCONFIRMED_REVIEW", last_charge_id: "chr_test_rvtrace", last_outcome_code: "X0001", canceled_at: null });
+    expect((await review(id.id)).review_required_at).not.toBeNull();
+    expect(await markReview(id.id)).toBe("UNCHANGED");
+    const audit = await t.asAdmin((tx) =>
+      one<{ metadata: Record<string, unknown> }>(tx, "select metadata from public.platform_audit_logs where action = 'billing.subscription.review_required' and target_id = $1", [id.id])
+    );
+    expect(audit.metadata).toMatchObject({ previousStatus: "PENDING", reviewCode: "CULQI_UNCONFIRMED_REVIEW", lastChargeId: "chr_test_rvtrace" });
+    const failed = await checkout(org, "PRO");
+    expect(await failCharge(failed.id, "chr_test_rvnotpending")).toBe("RECORDED");
+    expect(await markReview(failed.id)).toBe("IGNORED");
+    await expect(markReview(failed.id, "bad code")).rejects.toThrow(/review code/);
+    await expect(
+      t.asService((tx) => tx.query("update public.billing_subscriptions set last_charge_id = 'chr_live_X' where id = $1", [id.id]))
+    ).rejects.toThrow(/billing_subscriptions_last_charge_id/);
+  });
+
+  it("J/L: a later verified charge activates a REVIEW_REQUIRED checkout when nothing changed since it began; once", async () => {
+    const org = await newOrganization();
+    const id = await checkout(org, "PRO");
+    expect(await markReview(id.id)).toBe("CHANGED");
+    expect((await confirm(id.id, { charge: "chr_test_rvpaid" })).outcome).toBe("ACTIVATED");
+    expect(await review(id.id)).toMatchObject({ status: "ACTIVE", failure_code: null });
+    expect((await review(id.id)).review_required_at).not.toBeNull(); // kept for audit
+    expect((await access(org)).effective_plan).toBe("PRO");
+    expect((await confirm(id.id, { charge: "chr_test_rvpaid" })).outcome).toBe("DUPLICATE");
+    expect(await payments(org)).toBe(1);
+  });
+
+  it("J: an upgrade under review (BÁSICO active before it began) is applied as an upgrade", async () => {
+    const org = await newOrganization();
+    const basic = await checkout(org, "BASIC");
+    expect((await confirm(basic.id, { charge: "chr_test_rvbasic" })).outcome).toBe("ACTIVATED");
+    const pro = await checkout(org, "PRO");
+    expect(await markReview(pro.id)).toBe("CHANGED");
+    expect((await confirm(pro.id, { charge: "chr_test_rvupgrade" })).outcome).toBe("PLAN_CHANGED");
+    expect((await access(org)).effective_plan).toBe("PRO");
+  });
+
+  it("K/L: a later confirmed decline ends a REVIEW_REQUIRED checkout FAILED, recorded once", async () => {
+    const org = await newOrganization();
+    const id = await checkout(org, "PRO");
+    expect(await markReview(id.id)).toBe("CHANGED");
+    expect(await failCharge(id.id, "chr_test_rvdeclined")).toBe("RECORDED");
+    expect(await review(id.id)).toMatchObject({ status: "FAILED", failure_code: "card_declined" });
+    expect(await failCharge(id.id, "chr_test_rvdeclined")).toBe("DUPLICATE");
+    expect(await payments(org)).toBe(1);
+    expect(await access(org)).toMatchObject({ access: "NONE" });
+  });
+
+  it("M/N/O/P: a new checkout coexists with the old review (own row, own Culqi subscription); once it is ACTIVE the old charge cannot overwrite the plan (CONFLICT)", async () => {
+    const org = await newOrganization();
+    const basic = await checkout(org, "BASIC");
+    expect((await confirm(basic.id, { charge: "chr_test_rvpbasic" })).outcome).toBe("ACTIVATED");
+    const old = await checkout(org, "PRO");
+    expect(await markReview(old.id)).toBe("CHANGED");
+    const fresh = await checkout(org, "BUSINESS");
+    const ids = await t.asAdmin((tx) =>
+      tx.query<{ id: string; external_subscription_id: string }>("select id, external_subscription_id from public.billing_subscriptions where id = any($1)", [[old.id, fresh.id]])
+    );
+    expect(new Set(ids.rows.map((item) => item.external_subscription_id)).size).toBe(2);
+
+    expect((await confirm(fresh.id, { charge: "chr_test_rvpnew" })).outcome).toBe("PLAN_CHANGED");
+    expect(await review(old.id)).toMatchObject({ status: "REVIEW_REQUIRED", canceled_at: null, cancel_reason: null }); // not superseded / cancelled
+    expect(await review(basic.id)).toMatchObject({ status: "CANCELED", cancel_reason: "UPGRADED" }); // the normal upgrade rule
+
+    const before = await payments(org);
+    expect((await confirm(old.id, { charge: "chr_test_rvplate" })).outcome).toBe("CONFLICT");
+    expect(await review(old.id)).toMatchObject({ status: "REVIEW_REQUIRED" });
+    expect((await access(org)).effective_plan).toBe("BUSINESS");
+    expect(await payments(org)).toBe(before);
+  });
+
+  it("O: the organization's subscription changed after the review began (e.g. a manual payment): CONFLICT, nothing applied", async () => {
+    const org = await newOrganization();
+    const basic = await checkout(org, "BASIC");
+    expect((await confirm(basic.id, { charge: "chr_test_rvmbasic" })).outcome).toBe("ACTIVATED");
+    const pro = await checkout(org, "PRO");
+    expect(await markReview(pro.id)).toBe("CHANGED");
+    await t.asAdmin((tx) => tx.query("update public.subscriptions set updated_at = now() + interval '1 second' where organization_id = $1 and status = 'ACTIVE'", [org]));
+    expect((await confirm(pro.id, { charge: "chr_test_rvmlate" })).outcome).toBe("CONFLICT");
+    expect((await access(org)).effective_plan).toBe("BASIC");
+  });
+
+  it("REVIEW_REQUIRED can still end CANCELED / EXPIRED by Culqi (provider side), and is terminal there", async () => {
+    const id = await checkout(await newOrganization(), "PRO");
+    expect(await markReview(id.id)).toBe("CHANGED");
+    expect(await setStatus(id.id, "CANCELED", "PROVIDER")).toBe("CHANGED");
+    expect((await confirm(id.id, { charge: "chr_test_rvcanceled" })).outcome).toBe("IGNORED");
+  });
+});
+
 describe("regression: catalog and entitlements unchanged", () => {
   it("prices and email account limits", async () => {
     const prices = await t.asAdmin((tx) =>

@@ -87,7 +87,7 @@ export interface SubscriptionMaintenance {
 
 /* Commercial V1 phase 2 (Culqi sandbox): provider side of the subscriptions (billing_* tables). */
 
-export type BillingSubscriptionStatus = "PENDING" | "ACTIVE" | "PAST_DUE" | "CANCELED" | "EXPIRED" | "FAILED";
+export type BillingSubscriptionStatus = "PENDING" | "ACTIVE" | "PAST_DUE" | "CANCELED" | "EXPIRED" | "FAILED" | "REVIEW_REQUIRED";
 
 export interface BillingSubscriptionRow {
   id: string;
@@ -105,6 +105,20 @@ export interface BillingSubscriptionRow {
   currency: string;
   cancelReason: "USER" | "PROVIDER" | "UPGRADED" | null;
   createdAt: string;
+  /** EmailBot plan code of the price (BASIC / PRO / BUSINESS); null if unreadable. */
+  planCode: string | null;
+  /** When the checkout became REVIEW_REQUIRED (null otherwise). */
+  reviewRequiredAt: string | null;
+  /** Last reconciliation that found a charge neither confirmed nor declined. */
+  lastReconciledAt: string | null;
+}
+
+/** The last Culqi charge of a checkout that could not be confirmed nor declined (traceability). */
+export interface UnconfirmedChargeTrace {
+  chargeId: string;
+  outcomeType: string | null;
+  outcomeCode: string | null;
+  declineCode: string | null;
 }
 
 export interface WebhookEventRow {
@@ -154,7 +168,7 @@ export interface BillingStore {
   /** public.billing_set_culqi_status: CHANGED, UNCHANGED or IGNORED. */
   setStatus(input: {
     billingSubscriptionId: string;
-    status: Exclude<BillingSubscriptionStatus, "PENDING" | "ACTIVE">;
+    status: Exclude<BillingSubscriptionStatus, "PENDING" | "ACTIVE" | "REVIEW_REQUIRED">;
     providerStatus: number | null;
     cancelReason: "USER" | "PROVIDER" | "UPGRADED" | null;
     failureCode: string | null;
@@ -166,8 +180,14 @@ export interface BillingStore {
   markProviderCanceled(id: string): Promise<void>;
   /** F3: ACTIVE / PAST_DUE subscriptions whose period ends between the two instants (renewal window). */
   listDueForReconciliation(input: { endBefore: string; endAfter: string; limit: number }): Promise<BillingSubscriptionRow[]>;
-  /** F4: PENDING checkouts older than the timeouts (with / without a Culqi subscription id). */
+  /** PENDING checkouts older than the thresholds (with a Culqi subscription id: periodic reconciliation; without: incomplete). */
   listStalePending(input: { withSubscriptionCreatedBefore: string; withoutSubscriptionCreatedBefore: string; limit: number }): Promise<BillingSubscriptionRow[]>;
+  /** REVIEW_REQUIRED checkouts created after `createdAfter` and not reconciled since `reconciledBefore`. */
+  listReviewRequired(input: { createdAfter: string; reconciledBefore: string; limit: number }): Promise<BillingSubscriptionRow[]>;
+  /** Records a reconciliation of a PENDING / REVIEW_REQUIRED checkout (and its last unconfirmed charge, when known). */
+  recordReconciliation(id: string, input: { at: string; charge: UnconfirmedChargeTrace | null }): Promise<void>;
+  /** public.billing_mark_culqi_review_required: CHANGED, UNCHANGED or IGNORED (no longer PENDING). */
+  markReviewRequired(input: { billingSubscriptionId: string; reviewCode: string; requestId: string }): Promise<string>;
 }
 
 export interface OrganizationProcessingSettings {

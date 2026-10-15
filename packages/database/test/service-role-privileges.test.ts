@@ -211,7 +211,8 @@ describe.each<DefaultPrivilegesProfile>(["production", "local"])("AFTER migratio
         "public.submit_complaint_book_entry(p_submission_id uuid, p_kind text, p_first_names text, p_last_names text, p_document_type text, p_document_number text, p_email text, p_phone text, p_address text, p_is_minor boolean, p_guardian_name text, p_good_type text, p_good_description text, p_claimed_amount_cents bigint, p_detail text, p_consumer_request text, p_request_id text)",
         "public.billing_activate_culqi_subscription(p_billing_subscription_id uuid, p_activation_key text, p_event_type text, p_period_start timestamp with time zone, p_period_end timestamp with time zone, p_current_period integer, p_external_charge_id text, p_provider_status smallint, p_request_id text)",
         "public.billing_record_culqi_charge_failure(p_billing_subscription_id uuid, p_external_event_id text, p_event_type text, p_external_charge_id text, p_failure_code text, p_failure_message text, p_provider_status smallint, p_request_id text)",
-        "public.billing_set_culqi_status(p_billing_subscription_id uuid, p_status billing_subscription_status, p_provider_status smallint, p_cancel_reason text, p_failure_code text, p_failure_message text, p_request_id text)"
+        "public.billing_set_culqi_status(p_billing_subscription_id uuid, p_status billing_subscription_status, p_provider_status smallint, p_cancel_reason text, p_failure_code text, p_failure_message text, p_request_id text)",
+        "public.billing_mark_culqi_review_required(p_billing_subscription_id uuid, p_review_code text, p_request_id text)"
       ].sort()
     );
   });
