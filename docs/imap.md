@@ -144,11 +144,26 @@ conexión con `IMAP_RESPONSE_TOO_LARGE` (SECURITY: en el worker, cuenta en ERROR
 
 ### Riesgos pendientes antes de activar IMAP
 
-- **Redis / Valkey real: verificado en local (E4.1), no en el Redis de producción.** Las pruebas unitarias usan
-  `FakeRedis`; la suite opt-in `imap-valkey-integration.test.ts` (ver "Integration tests (Valkey local)") se
-  ejecutó contra Valkey 8.1.10 desechable: scripts, TTL, atomicidad, dos procesos de API, pausa y caída. El
-  Redis gestionado de producción puede ser otra versión: repetir la suite contra una instancia equivalente y
-  desechable antes de activar IMAP.
+Versión objetivo de Redis / Valkey, matriz de compatibilidad de los scripts, gestión de `IMAP_RATE_LIMIT_SECRET` y
+lista de activación / reversión: [`docs/imap-production-readiness.md`](imap-production-readiness.md). La instancia de
+Render se consultó en modo solo lectura el 2026-10-15: Valkey 8.1.10, 256 MiB, `noeviction`, AOF activo y `ok`,
+`cluster_enabled:0` (fecha UTC; sin probar: durabilidad tras reinicio, réplicas / *failover*, permisos de los
+scripts). La suite opt-in se repitió con esa versión exacta en una instancia desechable (E5.3: 19/19 y 2/2, sin
+fallos; resultados en la sección 7 de ese documento). `IMAP_RATE_LIMIT_SECRET` **no está configurado en
+producción**; configurarlo requiere autorización específica. Mientras falte cualquier condición,
+las rutas siguen en 503 (estado por defecto del código).
+
+- **Redis / Valkey real: verificado en local (E4.1, E4.4, E5.3), no en el Redis de producción.** Las pruebas
+  unitarias usan `FakeRedis`; la suite opt-in `imap-valkey-integration.test.ts` (ver "Integration tests (Valkey
+  local)") se ejecutó contra Valkey 8.1.10 desechable, la misma versión observada en Render: scripts, TTL,
+  atomicidad, dos procesos de API, pausa y caída. No prueba permisos de comandos, durabilidad tras reinicio ni
+  *failover* en Render; repetirla si cambia la versión de Render o el código de los límites.
+- **Auditoría previa a la publicación (E5.5)**: ver la sección 8 de
+  [`docs/imap-production-readiness.md`](imap-production-readiness.md). A1 (respuestas IMAP sin límite de tamaño:
+  límites del protocolo, arriba) y E6.3 (texto de los mensajes grandes de una sola parte) están en commits **locales**
+  de la rama `feat/imap-e4-abuse-hardening` (`578cec5` y `6f8c7c3`), sin publicar ni desplegar. Antes de activar
+  IMAP hay que corregir M1 (la activación necesita un cambio de código y una migración, no solo
+  `imapAccountsEnabled` / `imapSyncEnabled`); A2 (sin plazo total por operación en el worker) es recomendable.
 - `IMAP_RATE_LIMIT_SECRET` debe configurarse (igual en todas las instancias) antes de activar IMAP; hoy no está
   definido en ningún entorno remoto.
 - Señal lateral inevitable del límite global: una organización sin fallos propios que recibe
@@ -219,7 +234,11 @@ Comportamiento:
     (INTERNALDATE) que uno ya guardado se considera el mismo correo renumerado y se omite. Dos correos
     distintos con el mismo Message-ID (remitentes que lo reutilizan) se guardan ambos. Gmail y Microsoft
     no cambian (sus trabajos nunca llevan la marca de recuperación).
-- Mensajes > 10 MB: cabeceras y partes de texto acotadas; los adjuntos se listan sin descarga.
+- Mensajes > 10 MB: cabeceras y partes de texto acotadas; los adjuntos se listan sin descarga. El texto se lee
+  en trozos parciales de 64 KiB (`BODY.PEEK`, nunca el mensaje completo) hasta 4 MB y se recorta a 1 000 000
+  caracteres. En un mensaje de una sola parte (`text/plain` o `text/html`) la raíz no tiene número de parte en
+  ImapFlow: se pide como parte `1`, que ImapFlow lee como `TEXT` (E6.3). Si todo el mensaje es un adjunto, se lista
+  igualmente sin descarga.
 - Credenciales: `getImapCredentials()` descifra con `SecretBox.decryptBound` y el contexto
   (organización, dirección). Un valor v1 antiguo o ajeno falla con `CREDENTIALS_UNREADABLE`. Las cuentas
   IMAP no tienen token OAuth (`getAccessToken()` las rechaza).

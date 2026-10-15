@@ -46,7 +46,7 @@ ningún `ARG` secreto, así que no se usan ni quedan en la imagen (comprobado co
 
 | Ajuste | Valor | Por qué |
 |---|---|---|
-| Versión | Valkey 8 (instancias nuevas de Render) | BullMQ 5.81.5 detecta Valkey; mínimo Redis 5.0, recomendado 6.2 (Valkey 8 reporta `redis_version 7.2.4`) |
+| Versión | Valkey 8 (instancias nuevas de Render); **observado 8.1.10** el 2026-10-15 | BullMQ 5.81.5 detecta Valkey; mínimo Redis 5.0, recomendado 6.2 (Valkey 8 reporta `redis_version 7.2.4`) |
 | `maxmemoryPolicy` | **`noeviction`** | el valor por defecto de Render es `allkeys-lru`: podría expulsar claves de colas, locks o schedulers. BullMQ avisa `IMPORTANT! Eviction policy is allkeys-lru. It should be "noeviction"` (comprobado en local) |
 | Persistencia | `journal-snapshot` (por defecto en planes de pago) | trabajos retrasados, reintentos y schedulers solo existen en Redis. **El plan `free` no tiene persistencia: no usarlo** |
 | Plan | decisión de coste (por defecto `256mb`) | uso medido en las pruebas: < 2 MB; el volumen real depende de la retención (completados 24 h / 10 000, fallidos 7 días) |
@@ -61,7 +61,13 @@ Desde el *shell* de la API o del worker (red privada), sin imprimir la URL:
 node -e "const R=require('ioredis');const r=new R(process.env.REDIS_URL);Promise.all([r.info('server'),r.info('memory'),r.info('persistence')]).then(a=>{console.log(a.join('\n').split('\n').filter(l=>/^(valkey_version|redis_version|maxmemory_policy|aof_enabled|rdb_last_bgsave_status)/.test(l)).join('\n'));r.disconnect()})"
 ```
 
-Esperado: `maxmemory_policy:noeviction`. Además, en los logs del worker **no** debe aparecer
+Esperado: `maxmemory_policy:noeviction`. Este comando no muestra `maxmemory`, la topología (`cluster_enabled`) ni la
+salud de AOF / RDB; la versión ampliada (solo lectura) está en
+[`docs/imap-production-readiness.md`](imap-production-readiness.md), sección 1. **Consulta real del 2026-10-15**
+(ejecutada por el usuario con esa versión ampliada desde el *shell* de `emailbot-api`): Valkey 8.1.10
+(`redis_version 7.2.4`), `maxmemory` 256 MiB, `maxmemory_policy:noeviction`, AOF activo con últimos estados `ok`,
+último RDB `ok`, `cluster_enabled:0` (detalle, interpretación y límites en ese documento). Además, en los logs del
+worker **no** debe aparecer
 `Eviction policy is … It should be "noeviction"`. Pendiente de comprobar en Render (no verificable en local):
 que `CLIENT SETNAME` e `INFO` estén permitidos (BullMQ los usa; si `INFO` falla, BullMQ no puede comprobar la
 versión).
@@ -72,6 +78,8 @@ versión).
 |---|---|---|
 | Nonces OAuth | `SET key 1 EX ttl NX` | `apps/api/src/infrastructure/nonces.ts` |
 | Rate limit | `EVAL` (Lua: `INCR`, `PTTL`, `PEXPIRE`) | `apps/api/src/infrastructure/rate-limit-store.ts` |
+| Bloqueo de login (portal; IMAP) | `EVAL` (Lua: `INCR`, `PEXPIRE`, `SET … PX`, `DEL`, `PTTL`; un script usa 2 claves: instancia única, no Cluster) | `apps/api/src/infrastructure/login-throttle.ts` |
+| Límites IMAP (desactivado) | `EVAL` (Lua: `INCR`, `DECR`, `GET`, `PTTL`, `PEXPIRE`) | `apps/api/src/modules/email-accounts/imap-connection.ts`; ver `docs/imap-production-readiness.md` |
 | Realtime | `PUBLISH` (worker) / `SUBSCRIBE` (API), canal `emailbot:realtime` | `supabase-stores.ts`, `realtime.ts` |
 | Readiness | `PING` | `server.ts`, worker `index.ts` |
 | BullMQ 5.81.5 | `EVALSHA`/`EVAL` (scripts Lua: listas, sets, zsets, hashes, streams `XADD`/`XTRIM`), `BZPOPMIN`, `XREAD`, `CLIENT SETNAME`/`LIST`, `INFO`, `SCAN`, `MULTI` | interno |
@@ -191,9 +199,11 @@ email del *workspace* para despliegues fallidos y caídas de servicio (Dashboard
 
 Sin comprobar todavía en los servicios reales (no hay acceso a Render desde el repositorio):
 
-- `maxmemory_policy:noeviction` en la instancia real (comando de la sección Redis).
-- Persistencia real de Key Value (`journal-snapshot`).
-- Permisos de `CLIENT SETNAME` e `INFO` en Render.
+- Observado el 2026-10-15 (consulta de solo lectura; repetir antes de activar IMAP): Valkey 8.1.10, `maxmemory`
+  256 MiB, `noeviction`, AOF activo y `ok`, último RDB `ok`, `cluster_enabled:0`, `INFO` permitido. Sigue sin
+  comprobarse: durabilidad tras un reinicio, réplicas / *failover* gestionado (los scripts de bloqueo usan dos claves
+  y fallarían con `CROSSSLOT` si algún día hubiera Redis Cluster) y el campo `redis_mode` (no apareció).
+- Permisos de `CLIENT SETNAME` y de los comandos de los scripts Lua (`EVAL`) comprobados directamente en Render.
 - Número real de saltos para `TRUST_PROXY`.
 - Versión de pnpm que usa Render en el build del Static Site (`packageManager: pnpm@12.8.1`).
 - `Cache-Control` real de `index.html` en el Static Site.
