@@ -416,6 +416,86 @@ ${pdf}
     expect(routing.deliveries).toHaveLength(3);
     await pool.closeAll();
   });
+
+  it("15. M1: paused mid-batch keeps the cursor; the resume imports the rest exactly once; mail older than 7 days is not imported", async () => {
+    const user = uniqueUser("m1");
+    const setup = await setupClient(user);
+    const pool = new ImapConnectionPool<ImapClient>();
+    const adapter = createImapSyncAdapter({ pool, connect: createImapConnector({ resolver: answer(TEST_IP) }) });
+    const account = accountFor(user, { syncCursor: null });
+    const position = await adapter.listNewMessageIds(contextFor(account, user));
+    account.syncCursor = position.nextCursor;
+    const start = account.syncCursor;
+    // Real INTERNALDATE through APPEND: two messages received 10 days ago, interleaved with six new ones.
+    const appendAt = setup.append as unknown as (path: string, content: Buffer, flags: string[], date: Date) => Promise<unknown>;
+    const old = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000);
+    await appendAt.call(setup, "INBOX", simple(100), [], old);
+    for (let n = 1; n <= 6; n++) await setup.append("INBOX", simple(n));
+    await appendAt.call(setup, "INBOX", simple(101), [], old);
+    await setup.logout();
+
+    const emails = new MemoryEmailStore();
+    emails.rules = [makeRuleRow()];
+    const accounts = makeAccountStore([account]);
+    const providers = { GMAIL: makeAdapter(), MICROSOFT: makeAdapter(), IMAP: adapter };
+    const processDeps: ProcessEmailDeps = {
+      accounts,
+      emails,
+      routing: new MemoryRoutingStore(emails),
+      audit: makeAudit(),
+      storage: { upload: vi.fn(async () => undefined), exists: vi.fn(async () => false) },
+      realtime: makeRealtime(),
+      producer: makeProducer(),
+      providers,
+      createContext: (acc) => contextFor(acc, user),
+      attachmentsBucket: "email-attachments",
+      maxAttachmentBytes: 1000,
+      logger: silentLogger,
+      storageRetryDelayMs: 0,
+      imapSyncEnabled: true
+    };
+    let stored = 0;
+    const deps: HandleEventDeps = {
+      accounts,
+      emails,
+      producer: makeProducer(),
+      providers,
+      createContext: (acc) => contextFor(acc, user),
+      enqueueSync: vi.fn(async () => undefined),
+      processMessage: async (job: EmailProcessingJob) => {
+        const outcome = await processEmail(job, processDeps);
+        // The user pauses the mailbox while the batch runs (after the 2nd stored message).
+        if (outcome.status === "processed" && ++stored === 2) account.status = "PAUSED";
+        return outcome;
+      },
+      lock: { acquire: vi.fn(async () => "token"), release: vi.fn(async () => undefined) },
+      audit: makeAudit(),
+      logger: silentLogger,
+      imapSyncEnabled: true
+    };
+
+    const first = await syncAccount(account, deps, "POLL");
+    expect(first.cursorAdvanced).toBe(false);
+    expect(account.syncCursor).toBe(start); // nothing pending was skipped
+    expect(emails.rows.length).toBeLessThan(6);
+
+    account.status = "ACTIVE";
+    const second = await syncAccount(account, deps, "POLL");
+    expect(second.cursorAdvanced).toBe(true);
+    const subjects = emails.rows.map((row) => String(row.subject)).sort();
+    expect(subjects).toEqual([1, 2, 3, 4, 5, 6].map((n) => `Tu código temporal ${n}`).sort());
+    expect(new Set(emails.rows.map((row) => row.provider_message_id)).size).toBe(6); // no duplicates
+
+    // BODY.PEEK / EXAMINE only: nothing marked \Seen on the real server.
+    const check = await setupClient(user);
+    const lock = await check.getMailboxLock("INBOX", { readOnly: true });
+    const flags = await check.fetchAll("1:*", { uid: true, flags: true });
+    lock.release();
+    await check.logout();
+    expect(flags).toHaveLength(8);
+    expect(flags.every((message) => !message.flags.has("\\Seen"))).toBe(true);
+    await pool.closeAll();
+  });
 });
 
 /* ================================================================ *

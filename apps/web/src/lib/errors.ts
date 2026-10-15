@@ -15,6 +15,7 @@ const MESSAGES: Record<string, string> = {
   ACCOUNT_NOT_DISCONNECTED: "Desconecta la cuenta antes de eliminarla.",
   ACCOUNT_NOT_ACTIVE: "Solo se pueden sincronizar cuentas activas.",
   IMAP_SYNC_NOT_IMPLEMENTED: "La sincronización IMAP todavía no está disponible.",
+  IMAP_RECONNECT_REQUIRED: "Hay que reconectar el buzón IMAP para validar nuevamente la conexión: vuelve a agregarlo con la misma dirección.",
   CANNOT_MODIFY_OWNER: "El rol OWNER solo cambia mediante transferencia de propiedad.",
   CANNOT_REMOVE_OWNER: "El OWNER no puede ser eliminado. Transfiere la propiedad primero.",
   CANNOT_CHANGE_OWN_ROLE: "No puedes cambiar tu propio rol.",

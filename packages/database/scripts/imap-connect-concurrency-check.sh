@@ -56,7 +56,9 @@ done
 echo "PostgreSQL $(psql_db -c 'show server_version'): migrations applied to $DB"
 
 # Control: only the function body, renamed and without the organization lock (only in this throwaway database).
-awk '/^create or replace function public\.connect_imap_email_account\(/,/^\$\$;$/' "$MIGRATION" \
+# tr: a Windows checkout may hold the migration with CRLF; the anchored patterns need LF (the file is only read).
+tr -d '\r' < "$MIGRATION" \
+  | awk '/^create or replace function public\.connect_imap_email_account\(/,/^\$\$;$/' \
   | sed -e 's/public\.connect_imap_email_account/public.connect_imap_nolock/g' -e 's/^  for no key update;$/  ;/' | psql_db >/dev/null || exit 2
 psql_db -c "grant execute on function public.connect_imap_nolock(uuid, text, text, text, text, integer, text, text, text) to service_role" >/dev/null || exit 2
 [ "$(psql_db -c "select position('for no key update' in prosrc) > 0 from pg_proc where proname = 'connect_imap_nolock'")" = "f" ] || { echo "control still locks"; exit 2; }

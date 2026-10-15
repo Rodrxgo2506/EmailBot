@@ -356,10 +356,13 @@ export const SUBSCRIBED: CommercialAccess = { allowed: true, access: "SUBSCRIPTI
  */
 export function makeAccountStore(
   accounts: WorkerAccount[],
-  access: Map<string, CommercialAccess> = new Map()
+  access: Map<string, CommercialAccess> = new Map(),
+  /** IMAP M1: organizations WITHOUT the plan feature IMAP (default: every organization has it). */
+  imapNotEntitled: Set<string> = new Set()
 ): AccountStore & Record<string, ReturnType<typeof vi.fn>> {
   return {
     commercialAccess: vi.fn(async (ids: string[]) => new Map(ids.map((id) => [id, access.get(id) ?? SUBSCRIBED]))),
+    imapEntitled: vi.fn(async (organizationId: string) => !imapNotEntitled.has(organizationId)),
     getAccount: vi.fn(async (id: string) => accounts.find((account) => account.id === id) ?? null),
     findActiveAccountsByAddress: vi.fn(async (provider: string, address: string) =>
       accounts.filter((a) => a.provider === provider && a.emailAddress === address && a.status === "ACTIVE")
@@ -374,9 +377,11 @@ export function makeAccountStore(
     ),
     updateSyncState: vi.fn(async () => undefined),
     // Compare-and-set on the in-memory account (the database does the same with .eq(sync_cursor)).
-    advanceSyncCursor: vi.fn(async (id: string, state: { from: string | null; to: string | null; lastSyncedAt: string }) => {
+    advanceSyncCursor: vi.fn(async (id: string, state: { from: string | null; to: string | null; lastSyncedAt: string; requireActive?: boolean }) => {
       const account = accounts.find((candidate) => candidate.id === id);
       if (!account || account.syncCursor !== state.from) return false;
+      // IMAP M1 D1: the database adds .eq(status, ACTIVE) to the same UPDATE.
+      if (state.requireActive && account.status !== "ACTIVE") return false;
       account.syncCursor = state.to;
       account.lastSyncedAt = state.lastSyncedAt;
       return true;

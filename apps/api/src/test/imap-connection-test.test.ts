@@ -37,7 +37,7 @@ const account = (overrides: Partial<EmailAccount> = {}): EmailAccount => ({
   emailAddress: "ventas@empresa-correo.com",
   displayName: null,
   lastSyncedAt: null,
-  lastErrorCode: "IMAP_SYNC_NOT_IMPLEMENTED",
+  lastErrorCode: "IMAP_ACTIVATION_PENDING",
   lastErrorMessage: null,
   createdAt: "2026-10-14T00:00:00.000Z",
   updatedAt: "2026-10-14T00:00:00.000Z",

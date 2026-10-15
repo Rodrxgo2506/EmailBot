@@ -1,0 +1,2 @@
+# Run by bash (also inside WSL from a Windows checkout): never CRLF.
+*.sh text eol=lf

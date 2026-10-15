@@ -107,6 +107,25 @@ export const RECOVERY_MAX_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 export const RECOVERY_DEFAULT_WINDOW_MS = 24 * 60 * 60 * 1000;
 /** Messages processed concurrently inside one sync run. */
 export const MESSAGE_CONCURRENCY = 3;
+/**
+ * IMAP M1 (decision B): every IMAP run lists at most this many new messages (the rest continue in a
+ * CONTINUATION run from the last one processed) and ignores messages received more than
+ * RECOVERY_MAX_WINDOW_MS ago (counted and reported, never imported).
+ */
+export const IMAP_MAX_MESSAGES_PER_SYNC = MAX_RECOVERY_MESSAGES;
+/**
+ * IMAP M1 (D1): skip reasons meaning "this mailbox must not be processed now" (paused, disconnected, organization
+ * suspended, no commercial access, IMAP no longer in the plan, IMAP disabled). The IMAP run stops at once and keeps
+ * its cursor, so those messages are processed after a resume. Gmail / Microsoft keep counting them as skipped.
+ */
+const IMAP_HALT_REASONS: ReadonlySet<string> = new Set([
+  "account_not_found",
+  "account_inactive",
+  "organization_inactive",
+  "subscription_inactive",
+  "imap_disabled",
+  "imap_not_entitled"
+]);
 /** Lease of the per-account sync lock (renewed by nothing: a run is bounded well below it). */
 export const SYNC_LOCK_TTL_MS = 15 * 60 * 1000;
 /** Gmail watches last 7 days, Graph subscriptions ~70 h; both are renewed when less than this remains. */
@@ -156,19 +175,21 @@ async function processMessages(
   messageIds: string[],
   deps: HandleEventDeps,
   options: { recovery?: boolean } = {}
-): Promise<{ processed: number; skipped: number }> {
+): Promise<{ processed: number; skipped: number; halted: string | null }> {
   const processMessage = deps.processMessage;
   // IMAP only: messages listed by a history-gap recovery may be stored already under their old UIDVALIDITY.
   const recovery = options.recovery === true && account.provider === "IMAP" ? ({ recovery: true } as const) : {};
   if (!processMessage) throw new Error("processMessage is not configured");
+  const haltOnState = account.provider === "IMAP";
   let processed = 0;
   let skipped = 0;
   const failures: unknown[] = [];
   let fatal: unknown = null;
+  let halted: string | null = null;
   let next = 0;
 
   const workerLoop = async () => {
-    while (fatal === null && next < messageIds.length) {
+    while (fatal === null && halted === null && next < messageIds.length) {
       const providerMessageId = messageIds[next++] as string;
       try {
         const outcome = await processMessage({
@@ -178,7 +199,9 @@ async function processMessages(
           providerMessageId,
           ...recovery
         });
-        if (outcome.status === "skipped") skipped += 1;
+        // IMAP (M1 D1): the mailbox may not be processed any more: stop, never count it as handled.
+        if (outcome.status === "skipped" && haltOnState && IMAP_HALT_REASONS.has(outcome.reason)) halted ??= outcome.reason;
+        else if (outcome.status === "skipped") skipped += 1;
         else processed += 1;
       } catch (error) {
         if (error instanceof AttachmentsPendingError) processed += 1;
@@ -198,7 +221,7 @@ async function processMessages(
     );
     throw failures[0];
   }
-  return { processed, skipped };
+  return { processed, skipped, halted };
 }
 
 /**
@@ -224,6 +247,12 @@ export async function syncAccount(account: WorkerAccount, deps: HandleEventDeps,
     jobType: reason
   });
   if (!allowed) return empty;
+  // IMAP M1 (decision A): the plan must still include IMAP. Not an account error: nothing is listed, the cursor stays
+  // and synchronization resumes from it once the plan allows IMAP again.
+  if (account.provider === "IMAP" && !(await deps.accounts.imapEntitled(account.organizationId))) {
+    deps.logger.info({ event: "imap.not_entitled", emailAccountId: account.id, organizationId: account.organizationId, reason }, "IMAP not in the plan; account skipped");
+    return empty;
+  }
 
   const now = deps.now ?? Date.now;
   const lockToken = deps.lock ? await deps.lock.acquire(account.id, SYNC_LOCK_TTL_MS) : "unlocked";
@@ -235,7 +264,13 @@ export async function syncAccount(account: WorkerAccount, deps: HandleEventDeps,
   try {
     const adapter = deps.providers[account.provider];
     const context = deps.createContext(account);
-    const changes = await adapter.listNewMessageIds(context, { maxMessages: MAX_MESSAGES_PER_SYNC });
+    const imap = account.provider === "IMAP";
+    // IMAP M1 (decision B): bounded catch-up (300 per run, continued from the last message processed) and a 7-day
+    // window. Gmail / Microsoft: unchanged.
+    const changes = await adapter.listNewMessageIds(
+      context,
+      imap ? { maxMessages: IMAP_MAX_MESSAGES_PER_SYNC, since: new Date(now() - RECOVERY_MAX_WINDOW_MS) } : { maxMessages: MAX_MESSAGES_PER_SYNC }
+    );
 
     let messageIds = changes.messageIds;
     let nextCursor = changes.nextCursor;
@@ -265,15 +300,43 @@ export async function syncAccount(account: WorkerAccount, deps: HandleEventDeps,
       );
     }
 
-    const { processed, skipped } = await processMessages(account, messageIds, deps, { recovery: historyGap });
+    const { processed, skipped, halted } = await processMessages(account, messageIds, deps, { recovery: historyGap });
 
-    // Only now, with every message durably handled, the cursor moves.
+    // IMAP (M1 D1): the mailbox stopped being processable during the batch (paused, disconnected, no access, IMAP
+    // left the plan): the cursor is NOT moved, so the remaining messages are processed after a resume (the ones
+    // already stored are deduplicated by provider message id).
+    if (halted !== null) {
+      deps.logger.warn({ event: "imap.sync.halted", ...log, reason: halted, found: messageIds.length, processed, skipped }, "IMAP sync stopped; cursor unchanged");
+      return { found: messageIds.length, processed, skipped, historyGap, hasMore: false, cursorAdvanced: false };
+    }
+
+    // Only now, with every message durably handled, the cursor moves (IMAP: only while the mailbox is still ACTIVE).
     const cursorAdvanced = await deps.accounts.advanceSyncCursor(account.id, {
       from: account.syncCursor,
       to: nextCursor ?? account.syncCursor,
-      lastSyncedAt: new Date(now()).toISOString()
+      lastSyncedAt: new Date(now()).toISOString(),
+      ...(imap ? { requireActive: true } : {})
     });
-    if (!cursorAdvanced) deps.logger.warn({ ...log }, "cursor moved by another sync meanwhile; not overwritten");
+    if (!cursorAdvanced) deps.logger.warn({ ...log }, "cursor not advanced (moved by another sync meanwhile, or the mailbox is no longer active)");
+
+    // IMAP (decision B): messages older than the window were skipped on purpose; say so, never claim them imported.
+    const outOfWindow = changes.outOfWindow ?? 0;
+    if (imap && outOfWindow > 0 && cursorAdvanced) {
+      deps.logger.warn(
+        { event: "imap.sync.outside_window", ...log, count: outOfWindow, windowDays: RECOVERY_MAX_WINDOW_MS / 86_400_000 },
+        "IMAP messages older than the window were not imported"
+      );
+      await deps.audit
+        ?.recordAccountEvent({
+          organizationId: account.organizationId,
+          emailAccountId: account.id,
+          action: "PROCESS",
+          event: "imap.sync.outside_window",
+          description: `${outOfWindow} message(s) received more than ${RECOVERY_MAX_WINDOW_MS / 86_400_000} days ago were not imported`,
+          metadata: { provider: account.provider, count: outOfWindow, windowDays: RECOVERY_MAX_WINDOW_MS / 86_400_000 }
+        })
+        .catch((error: unknown) => deps.logger.warn({ err: serializeError(error) }, "could not record the skipped IMAP messages"));
+    }
 
     const hasMore = changes.hasMore === true;
     if (hasMore && cursorAdvanced) await deps.enqueueSync(account, "CONTINUATION");

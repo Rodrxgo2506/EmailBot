@@ -476,6 +476,14 @@ export type ImapAccountConnection =
   | { outcome: "FEATURE_NOT_AVAILABLE" }
   | { outcome: "DUPLICATE_ACCOUNT" };
 
+/**
+ * IMAP M1: public.activate_imap_email_account (the only way to make an IMAP mailbox ACTIVE).
+ * Refusals write nothing; ALREADY_ACTIVE is a no-op.
+ */
+export type ImapAccountActivation =
+  | { outcome: "ACTIVATED" | "ALREADY_ACTIVE"; account: EmailAccount; previousStatus: EmailAccountStatus }
+  | { outcome: "NOT_FOUND" | "NOT_IMAP" | "DISCONNECTED" | "RECONNECT_REQUIRED" | "CREDENTIALS_MISSING" | "SETTINGS_INVALID" | "FEATURE_NOT_AVAILABLE" };
+
 /** Outcome categories of portal.create_session (never shown to the client). */
 /** SUBSCRIPTION_INACTIVE (Commercial V1.2): the organization has no commercial access (or its plan has no portal). */
 export type PortalLoginFailure = "INVALID" | "REVOKED" | "EXPIRED" | "CUSTOMER_INACTIVE" | "ORGANIZATION_INACTIVE" | "SUBSCRIPTION_INACTIVE";
@@ -541,6 +549,14 @@ export interface PrivilegedOperations {
    * EMAIL_ACCOUNTS limit and insert / reconnection in one locked transaction; the mailbox stays PAUSED.
    */
   connectImapEmailAccount(input: ImapAccountConnect): Promise<ImapAccountConnection>;
+  /**
+   * IMAP M1: public.activate_imap_email_account (service role, one transaction under the organization lock).
+   * Only PAUSED -> ACTIVE (ACTIVATED), after the plan feature IMAP with commercial access, a v2 password and valid
+   * settings; ACTIVE is a no-op (ALREADY_ACTIVE). Refused, writing nothing: ERROR (RECONNECT_REQUIRED: connect it
+   * again), DISCONNECTED, NOT_FOUND (another organization's or unknown), NOT_IMAP, CREDENTIALS_MISSING,
+   * SETTINGS_INVALID and FEATURE_NOT_AVAILABLE.
+   */
+  activateImapEmailAccount(organizationId: string, id: string): Promise<ImapAccountActivation>;
   disconnectEmailAccount(organizationId: string, id: string): Promise<EmailAccount | null>;
   insertAuditLog(entry: AuditEntry): Promise<void>;
   createSignedDownloadUrl(bucket: string, path: string, expiresInSeconds: number, filename: string): Promise<string>;

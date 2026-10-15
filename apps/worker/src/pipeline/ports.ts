@@ -24,8 +24,10 @@ export interface AccountStore {
    * Compare-and-set of the history cursor: written only if it still equals
    * `from` (the cursor the sync started with). Returns false when another
    * sync moved it meanwhile (nothing is overwritten, the cursor never goes back).
+   * requireActive (IMAP only, M1 D1): also only while the mailbox is still ACTIVE, so a run whose
+   * mailbox was paused or disconnected meanwhile never moves the cursor past unprocessed mail.
    */
-  advanceSyncCursor(id: string, state: { from: string | null; to: string | null; lastSyncedAt: string }): Promise<boolean>;
+  advanceSyncCursor(id: string, state: { from: string | null; to: string | null; lastSyncedAt: string; requireActive?: boolean }): Promise<boolean>;
   /** Push subscription state (Gmail users.watch, phase 5.6; Microsoft Graph subscription expiry, F9). */
   saveWatchState(
     id: string,
@@ -52,7 +54,16 @@ export interface AccountStore {
     id: string,
     tokens: { accessTokenEncrypted: string; refreshTokenEncrypted: string | null; tokenExpiresAt: string | null }
   ): Promise<void>;
+  /**
+   * Records an account error (and optionally its ERROR status). An IMAP mailbox that is DISCONNECTED is
+   * never changed (M1 D2: a late job cannot revive it); every other row behaves as before.
+   */
   markError(id: string, error: { code: string; message: string; status?: "ERROR" }): Promise<void>;
+  /**
+   * IMAP M1: plan feature IMAP with commercial access (public.organization_entitlements, the same source as
+   * the API and the activation RPC). false when the organization lost it (e.g. downgraded to BASIC).
+   */
+  imapEntitled(organizationId: string): Promise<boolean>;
   /**
    * Commercial V1.2: commercial access of organizations (public.organization_access,
    * the same definition the API and the portal use). An organization missing

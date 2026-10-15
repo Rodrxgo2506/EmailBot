@@ -185,10 +185,13 @@ describe.each<DefaultPrivilegesProfile>(["production", "local"])("AFTER migratio
     // OAuth callback after it re-checked the role and the plan (covered by email-account-connect.test.ts).
     // IMAP mailbox connection (E1): plan feature IMAP + the same limit under the same lock; the API validates
     // the settings and the destination first (covered by imap-e1.test.ts).
+    // IMAP mailbox activation (M1): the only way to make an IMAP mailbox ACTIVE, under the same lock, after the
+    // API checked the role and the plan (covered by imap-m1.test.ts).
     // Libro de Reclamaciones: the public form through the API (every input validated again) and the state of the
     // consumer's copy e-mail (claim / record, one sender at a time) (complaints-book.test.ts).
     expect(executable.sort()).toEqual(
       [
+        "public.activate_imap_email_account(p_organization_id uuid, p_email_account_id uuid)",
         "public.connect_imap_email_account(p_organization_id uuid, p_email_address text, p_display_name text, p_username text, p_host text, p_port integer, p_security text, p_password_encrypted text, p_sync_cursor text)",
         "public.connect_oauth_email_account(p_organization_id uuid, p_provider email_provider, p_email_address text, p_display_name text, p_provider_account_id text, p_access_token_encrypted text, p_refresh_token_encrypted text, p_token_expires_at timestamp with time zone, p_sync_cursor text)",
         "public.claim_complaint_confirmation_email(p_entry_id uuid)",

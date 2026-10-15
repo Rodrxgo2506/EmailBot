@@ -294,7 +294,7 @@ describe("public.connect_imap_email_account", () => {
     expect(guard.proacl).toBe("{postgres=X/postgres}");
   });
 
-  it("PRO with room: CREATED, PAUSED with IMAP_SYNC_NOT_IMPLEMENTED, encrypted password and settings stored, never ACTIVE", async () => {
+  it("PRO with room: CREATED, PAUSED with IMAP_ACTIVATION_PENDING (M1), encrypted password and settings stored, never ACTIVE", async () => {
     const pro = await organization("PRO");
     const result = await connect(pro.id, { email: "  Ventas@Example-Mail.COM ", username: "ventas@example-mail.com", host: "IMAP.Example-Mail.com", cursor: "imap:v1:7:120", displayName: "Ventas" });
     expect(result).toMatchObject({ outcome: "CREATED", previous_status: null });
@@ -308,7 +308,7 @@ describe("public.connect_imap_email_account", () => {
       access_token_encrypted: V2,
       refresh_token_encrypted: null,
       sync_cursor: "imap:v1:7:120",
-      last_error_code: "IMAP_SYNC_NOT_IMPLEMENTED",
+      last_error_code: "IMAP_ACTIVATION_PENDING",
       provider_metadata: { imap: { host: "imap.example-mail.com", port: 993, security: "TLS", username: "ventas@example-mail.com" } }
     });
   });
@@ -381,7 +381,7 @@ describe("public.connect_imap_email_account", () => {
     await markError(id);
     const reconnected = await connect(pro.id, { password: V2_OTHER, cursor: "imap:v1:7:999" });
     expect(reconnected).toMatchObject({ outcome: "RECONNECTED", email_account_id: id, previous_status: "ERROR" });
-    expect(await row(id)).toMatchObject({ status: "PAUSED", sync_cursor: "imap:v1:7:150", access_token_encrypted: V2_OTHER, last_error_code: "IMAP_SYNC_NOT_IMPLEMENTED" });
+    expect(await row(id)).toMatchObject({ status: "PAUSED", sync_cursor: "imap:v1:7:150", access_token_encrypted: V2_OTHER, last_error_code: "IMAP_ACTIVATION_PENDING" });
   });
 
   it("ERROR moved to another server: starts from the caller's cursor (the old position means nothing there)", async () => {

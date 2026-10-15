@@ -103,6 +103,7 @@ export function createFakePrivileged(): { [K in keyof PrivilegedOperations]: Ret
     getMemberRole: unexpected("privileged.getMemberRole"),
     connectOAuthEmailAccount: unexpected("privileged.connectOAuthEmailAccount"),
     connectImapEmailAccount: unexpected("privileged.connectImapEmailAccount"),
+    activateImapEmailAccount: unexpected("privileged.activateImapEmailAccount"),
     disconnectEmailAccount: unexpected("privileged.disconnectEmailAccount"),
     insertAuditLog: vi.fn(async () => undefined),
     createSignedDownloadUrl: unexpected("privileged.createSignedDownloadUrl"),

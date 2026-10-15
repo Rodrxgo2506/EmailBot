@@ -143,6 +143,8 @@ export function createAccountStore(db: SupabaseClient): AccountStore {
         .update({ sync_cursor: state.to, last_synced_at: state.lastSyncedAt, last_error_code: null, last_error_message: null })
         .eq("id", id);
       query = state.from === null ? query.is("sync_cursor", null) : query.eq("sync_cursor", state.from);
+      // IMAP (M1 D1): in the same UPDATE, only while the mailbox is still ACTIVE (paused / disconnected meanwhile: unchanged).
+      if (state.requireActive) query = query.eq("status", "ACTIVE");
       const rows = check(await query.select("id"), "advanceSyncCursor") as Row[];
       return rows.length > 0;
     },
@@ -212,8 +214,24 @@ export function createAccountStore(db: SupabaseClient): AccountStore {
             last_error_message: error.message.slice(0, 2000),
             ...(error.status ? { status: error.status } : {})
           })
-          .eq("id", id),
+          .eq("id", id)
+          // IMAP (M1 D2): never a DISCONNECTED IMAP mailbox (a late job cannot make it ERROR and count again).
+          // Gmail / Microsoft rows always match (provider <> IMAP): unchanged behaviour.
+          .or("provider.neq.IMAP,status.neq.DISCONNECTED"),
         "markError"
+      );
+    },
+
+    async imapEntitled(organizationId) {
+      // Same source and rule as public.activate_imap_email_account / connect_imap_email_account (fail closed).
+      const rows = check(await db.rpc("organization_entitlements", { p_organization_id: organizationId }), "organizationEntitlements") as Row[] | null;
+      return (rows ?? []).some(
+        (row) =>
+          row.key === "IMAP" &&
+          row.kind === "FEATURE" &&
+          row.enabled === true &&
+          (row.access === "SUBSCRIPTION" || row.access === "LEGACY") &&
+          ["BASIC", "PRO", "BUSINESS"].includes(String(row.effective_plan))
       );
     }
   };

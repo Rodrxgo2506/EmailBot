@@ -365,6 +365,76 @@ export function emailAccountRoutes(deps: AppDeps) {
       return reply.status(created ? 201 : 200).send({ account });
     });
 
+    /**
+     * IMAP M1: resuming an IMAP mailbox (PAUSED after every (re)connection) goes through
+     * public.activate_imap_email_account only (service role, organization lock): plan feature IMAP with
+     * commercial access, a usable stored login and settings, never a DISCONNECTED mailbox. Members cannot
+     * set it ACTIVE directly (E1 trigger). The first synchronization is queued best effort: the mailbox is
+     * ACTIVE either way and the recovery polling picks it up if the queue is unavailable.
+     * A mailbox in ERROR (refused login, certificate, TLS...) is never resumed: resuming it would make the
+     * worker log in again outside the connection-test limits (E4). It must be connected again (connection test
+     * with those limits, then PAUSED); the database refuses it too (RECONNECT_REQUIRED).
+     */
+    const imapReconnectRequired = () =>
+      conflict("The IMAP mailbox stopped with an error; connect it again so the connection is tested again", "IMAP_RECONNECT_REQUIRED");
+
+    async function activateImapMailbox(request: FastifyRequest, current: { id: string; status: string }, displayName: string | null | undefined) {
+      const organizationId = getOrganization(request).id;
+      // Refused before anything else: no plan lookup, no RPC, no queue, no audit, no connection.
+      if (current.status === "ERROR") throw imapReconnectRequired();
+      // Early, friendly refusal; the database checks plan and access again in the same transaction as the write.
+      const entitlements = await requestEntitlements(request).assertFeatureEnabled("IMAP");
+      const plan = entitlements.effectivePlan;
+      const activation = await deps.privileged.activateImapEmailAccount(organizationId, current.id);
+      switch (activation.outcome) {
+        case "NOT_FOUND":
+        case "NOT_IMAP":
+          throw notFound("Email account");
+        case "DISCONNECTED":
+          throw conflict("The account is disconnected; connect it again", "RECONNECT_REQUIRED");
+        case "RECONNECT_REQUIRED":
+          // Became ERROR after the early check (a worker failure in between): the database's answer wins.
+          throw imapReconnectRequired();
+        case "CREDENTIALS_MISSING":
+        case "SETTINGS_INVALID":
+          throw conflict("The stored IMAP login cannot be used; connect the mailbox again", "IMAP_RECONNECT_REQUIRED");
+        case "FEATURE_NOT_AVAILABLE":
+          // The plan may have changed since the early check: the database's answer wins.
+          throw plan ? planFeatureUnavailable({ feature: "IMAP", plan }) : subscriptionRequired(entitlements.subscriptionStatus);
+      }
+
+      let account = activation.account;
+      if (displayName !== undefined) {
+        account = (await getAuth(request).repos.emailAccounts.update(organizationId, current.id, { display_name: displayName })) ?? account;
+      }
+      if (activation.outcome === "ACTIVATED") {
+        await app.audit(request, {
+          action: "UPDATE",
+          entityType: "email_account",
+          entityId: current.id,
+          metadata: {
+            from: activation.previousStatus,
+            to: "ACTIVE",
+            fields: displayName !== undefined ? ["status", "display_name"] : ["status"],
+            via: "activate_imap"
+          }
+        });
+        await deps.queue
+          .enqueueEmailEvent(
+            { type: "SYNC_ACCOUNT", emailAccountId: current.id, organizationId, requestedBy: getAuth(request).user.id },
+            // Same id as a manual sync: a repeated activation never queues a second pending run.
+            { jobId: `sync-${current.id}` }
+          )
+          .catch((error: unknown) =>
+            request.log.warn(
+              { event: "imap.activation.enqueue_failed", emailAccountId: current.id, err: serializeError(error) },
+              "first IMAP sync not queued; polling will pick the mailbox up"
+            )
+          );
+      }
+      return { account };
+    }
+
     /** Pause / resume and rename. */
     app.patch("/email-accounts/:id", manage, async (request) => {
       const repos = getAuth(request).repos;
@@ -380,7 +450,11 @@ export function emailAccountRoutes(deps: AppDeps) {
           throw conflict("The account is disconnected; connect it again", "RECONNECT_REQUIRED");
         }
         if (input.status === "ACTIVE" && current.provider === "IMAP") {
-          throw conflict("IMAP synchronization is not available yet", "IMAP_SYNC_NOT_IMPLEMENTED");
+          // IMAP disabled (config.imapAccountsEnabled: false, fixed in code): unchanged refusal, nothing contacted.
+          if (!providerAvailability(deps.config).IMAP) {
+            throw conflict("IMAP synchronization is not available yet", "IMAP_SYNC_NOT_IMPLEMENTED");
+          }
+          return activateImapMailbox(request, current, input.displayName);
         }
       }
 

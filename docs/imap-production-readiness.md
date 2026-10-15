@@ -133,10 +133,11 @@ Requisitos previos (todos deben cumplirse; si uno falla, **no activar**):
 2. `IMAP_RATE_LIMIT_SECRET` configurado y validado, el mismo en todas las instancias de la API; la API arranca.
 3. Commits E1–E4.4, A1 y E6.3 revisados, fusionados y desplegados **con IMAP aún desactivado**: las rutas siguen
    en 503 y `/api/email-accounts/providers` devuelve `IMAP: false`.
-4. Migración E1 (`20261014120000_imap_e1_security.sql`) aplicada con el procedimiento habitual (copia de
-   seguridad, *dry-run*, confirmación).
-5. Un cambio de código **y** una migración revisados (hallazgo M1, sección 8.2); no hay variable de entorno para
-   ello. Mecanismo real comprobado en el código: `imapAccountsEnabled` (`apps/api/src/config/env.ts:337`) e
+4. Migraciones E1 (`20261014120000_imap_e1_security.sql`) y M1 (`20261015120000_imap_m1_lifecycle.sql`) aplicadas
+   con el procedimiento habitual (copia de seguridad, *dry-run*, confirmación).
+5. M1 (ciclo de vida con activación explícita) implementado en local, sin commit: migración M1, RPC
+   `activate_imap_email_account`, reanudación por la API y correcciones D1 / D2 del worker (`docs/imap.md`). Además,
+   un cambio de código revisado que active los indicadores; no hay variable de entorno para ello. Mecanismo real comprobado en el código: `imapAccountsEnabled` (`apps/api/src/config/env.ts:337`) e
    `imapSyncEnabled` (`apps/worker/src/config/env.ts:169`) fijos a `false`; la ruta PATCH rechaza siempre reanudar
    una cuenta IMAP (`routes.ts:382-384`); el *trigger* de la migración E1 lo rechaza también en la base de datos y
    `connect_imap_email_account` guarda las cuentas en PAUSED con `IMAP_SYNC_NOT_IMPLEMENTED`; el worker solo sondea
@@ -342,8 +343,19 @@ de más de 10 MiB y una sola parte llegaba sin texto, porque la raíz no tiene n
 mensajes grandes no la descargaba. Ahora se pide como parte `1` (ImapFlow la lee como `TEXT` en trozos parciales);
 los mensajes multiparte no cambian y los límites A1 tampoco. Pruebas: 7 con servidor simulado y Dovecot local
 (`text/plain` y `text/html` de 10,5 MiB, multiparte con adjunto que no se descarga) [local].
-Corrección propuesta (no aplicada): A2, plazo total por operación del worker que
-cierre la conexión. M1, un cambio de código y una migración revisados para la activación (sección 5).
+**M1, implementado en local (M1.2, sin commit)**: migración `20261015120000_imap_m1_lifecycle.sql` (aditiva),
+RPC `activate_imap_email_account`, reanudación explícita por la API, D1 (el cursor IMAP no avanza si la cuenta deja
+de ser procesable durante un lote) y D2 (`markError` no revive una cuenta IMAP `DISCONNECTED`), pérdida del plan
+sin ERROR y recuperación de 300 mensajes / 7 días [local: PGlite, PostgreSQL 17 desechable, Dovecot]. Detalle en
+`docs/imap.md`. Corrección propuesta (no aplicada): A2, plazo total por operación del worker que cierre la conexión.
+**Auditoría M1.3 y correcciones M1.4 (local, sin commit)**: recorrido integrado API → PostgREST / PostgreSQL →
+BullMQ / Valkey → worker → Dovecot en una pila desechable [local]. H1 (reanudar una cuenta IMAP en `ERROR` hacía que
+el worker volviera a iniciar sesión fuera de los límites E4) corregido: la API responde `409 IMAP_RECONNECT_REQUIRED`
+sin RPC, trabajo, auditoría ni conexión, y la RPC responde `RECONNECT_REQUIRED`; hay que reconectar (prueba de
+conexión con los límites E4) [local: PGlite, PostgreSQL 17 desechable con una carrera nueva, pila integrada]. H2
+(aviso realtime `ERROR` para una cuenta ya `DISCONNECTED`, bajo) queda pendiente: su corrección toca el flujo común
+de errores compartido con Gmail / Microsoft. La pausa no cancela los mensajes ya en curso; el cursor no avanza y la
+deduplicación evita duplicados (`docs/imap.md`).
 
 Revisado sin encontrar defectos (por lectura de código y tests locales; un test que pasa no basta por sí solo):
 SSRF (todas las direcciones A / AAAA públicas, IPv6 por lista de permitidos, conexión a la IP validada; el código de
@@ -432,7 +444,7 @@ Generación sin imprimirlo, entrega, mismo valor en todas las instancias y rotac
 |---|---|---|
 | 1. Revisión del código | revisar `0e7a0b8..6f8c7c3` (E1–E4.4, A1 y E6.3) y los documentos E5 (este documento, `docs/imap.md`, `docs/render.md`); A1 ya está corregido (commit local); decidir si A2 y M1 se corrigen antes o después de publicar con IMAP desactivado (**antes de activar, obligatorio**) | [autorización] commit de la documentación E5 |
 | 2. Publicación | `git push` de `feat/imap-e4-abuse-hardening` (contiene E1–E4.4, A1 y E6.3) y PR contra `main`; CI completa en verde | [autorización] |
-| 3. Migración E1 | comprobaciones de 8.3 (pila desechable, consultas de solo lectura, `--dry-run`, copia de seguridad) y aplicación controlada con confirmación escrita | [autorización] |
+| 3. Migraciones E1 y M1 | comprobaciones de 8.3 (también para `20261015120000_imap_m1_lifecycle.sql`) (pila desechable, consultas de solo lectura, `--dry-run`, copia de seguridad) y aplicación controlada con confirmación escrita | [autorización] |
 | 4. Despliegue | API y worker con IMAP desactivado; no necesita `IMAP_RATE_LIMIT_SECRET` (es opcional y solo se valida si existe). Orden indiferente respecto a la migración: el código desplegado (`0e7a0b8`) solo escribe `status` / `display_name` con el JWT del miembro | [autorización] |
 | 5. Secreto | sección 4, coordinado, el mismo valor en todas las instancias de la API | [autorización específica] |
 | 6. Verificación tras desplegar | `/health` y *readiness* de API y worker; `POST /api/email-accounts/imap/test` y `POST /api/email-accounts/imap` → `503 IMAP_NOT_AVAILABLE`; `/api/email-accounts/providers` → `IMAP: false`; logs sin `imap.*` inesperados ni secretos; permisos de 8.4 (punto 1); regresiones de Gmail y Microsoft (conexión OAuth, *push*, sondeo, procesamiento, pausar / reanudar y renombrar una cuenta: ahora con privilegios de columna) | [pendiente] |
@@ -448,7 +460,8 @@ Generación sin imprimirlo, entrega, mismo valor en todas las instancias y rotac
 | La suite E5.3 (19/19 y 2/2) solo prueba una instancia local desechable: sin AOF, réplicas, ACL ni red de Render | las comprobaciones de las filas siguientes; repetir la suite (sección 6) si cambia la versión de Render o el código de los límites |
 | A1: respuestas IMAP sin límite de tamaño (memoria de la API y del worker) | corregido en el commit local `578cec5` (Dovecot A / B / C repetido con los límites en E6.2): falta publicación, revisión del PR y despliegue |
 | A2: operaciones del worker sin plazo total | plazo total por operación antes de activar, recomendado (sección 8.2) |
-| M1: la activación necesita código **y** migración, no solo los dos indicadores | cambio y migración revisados para la activación (secciones 5 y 8.2) |
+| M1: la activación necesita código **y** migración, no solo los dos indicadores | implementado en local (M1.2), sin commit: falta revisión, commit autorizado, migración aplicada y despliegue; después, el cambio que active los indicadores (secciones 5 y 8.2) |
+| H2: un trabajo atrasado que falla tras desconectar una cuenta IMAP publica un aviso realtime `ERROR` (la base de datos queda `DISCONNECTED`; solo es un aviso engañoso en la web) | decidir una corrección en el flujo común de errores (`markError` que informe si cambió la fila y publicación condicionada) con regresiones de Gmail / Microsoft; no bloquea la base de datos |
 | B1 / B2: cupo global agotable por otras organizaciones; DNS lento en el *threadpool* | aceptados como riesgo bajo o revisión tras uso real (sección 8.2) |
 | Permisos de `EVAL` / comandos de los scripts y `CLIENT SETNAME` en la instancia real sin comprobar directamente | método de la sección 8.4 (logs, instancia no productiva o un `EVAL` de solo lectura autorizado) |
 | Durabilidad tras reinicio, réplicas / *failover* gestionado | información de Render o una prueba autorizada en un entorno no productivo; la consulta solo muestra estados de AOF / RDB |

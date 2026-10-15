@@ -52,6 +52,7 @@ export type ProcessEmailOutcome =
         | "subscription_inactive"
         | "account_inactive"
         | "imap_disabled"
+        | "imap_not_entitled"
         | "auto_processing_disabled"
         | "duplicate"
         | "no_enabled_rules"
@@ -127,6 +128,12 @@ export async function processEmail(
     operation: "process_email"
   });
   if (!allowed) return { status: "skipped", reason: "subscription_inactive" };
+  // IMAP M1: the plan must still include IMAP (e.g. not downgraded to BASIC). Nothing is fetched; the IMAP sync run
+  // stops and keeps its cursor, so the message is processed once the plan allows it again.
+  if (account.provider === "IMAP" && !(await deps.accounts.imapEntitled(account.organizationId))) {
+    log.info({ event: "imap.not_entitled", emailAccountId: account.id, organizationId: account.organizationId, operation: "process_email" }, "IMAP not in the plan; message left for later");
+    return { status: "skipped", reason: "imap_not_entitled" };
+  }
 
   const settings = await deps.emails.loadSettings(account.organizationId);
   if (!settings.autoProcessingEnabled) return { status: "skipped", reason: "auto_processing_disabled" };

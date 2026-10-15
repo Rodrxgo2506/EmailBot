@@ -37,8 +37,8 @@ const account = (overrides: Partial<EmailAccount> = {}): EmailAccount => ({
   emailAddress: "ventas@empresa-correo.com",
   displayName: "Ventas",
   lastSyncedAt: null,
-  lastErrorCode: "IMAP_SYNC_NOT_IMPLEMENTED",
-  lastErrorMessage: "IMAP synchronization is not available yet. Credentials were stored encrypted.",
+  lastErrorCode: "IMAP_ACTIVATION_PENDING",
+  lastErrorMessage: "Mailbox connected and paused. Resume it to start synchronizing new mail.",
   createdAt: "2026-10-14T00:00:00.000Z",
   updatedAt: "2026-10-14T00:00:00.000Z",
   ...overrides
@@ -213,15 +213,18 @@ describe("IMAP connection (enabled in test configuration only)", () => {
     expect(privileged.connectImapEmailAccount).not.toHaveBeenCalled();
   });
 
-  it("an existing IMAP mailbox still cannot be resumed (the worker does not synchronize IMAP)", async () => {
-    const { repos } = await setup();
+  it("M1: resuming an IMAP mailbox goes through the activation RPC only, never a member write (imap-activation.test.ts)", async () => {
+    const { repos, privileged } = await setup();
     repos.emailAccounts.get.mockResolvedValue(account());
+    privileged.activateImapEmailAccount.mockResolvedValue({ outcome: "ACTIVATED", account: account({ status: "ACTIVE", lastErrorCode: null, lastErrorMessage: null }), previousStatus: "PAUSED" });
     const response = await ctx!.app.inject({
       method: "PATCH",
       url: `/api/email-accounts/${ACCOUNT_ID}`,
       headers: authHeaders(owner, ORG_A),
       payload: { status: "ACTIVE" }
     });
-    expect([response.statusCode, response.json().error.code]).toEqual([409, "IMAP_SYNC_NOT_IMPLEMENTED"]);
+    expect([response.statusCode, response.json().account.status]).toEqual([200, "ACTIVE"]);
+    expect(privileged.activateImapEmailAccount).toHaveBeenCalledWith(ORG_A, ACCOUNT_ID);
+    expect(repos.emailAccounts.update).not.toHaveBeenCalled();
   });
 });

@@ -166,7 +166,8 @@ export function privilegedOperations(service: SupabaseClient): PrivilegedOperati
 
     async connectImapEmailAccount(input) {
       // One transaction under the organization lock: plan feature IMAP + EMAIL_ACCOUNTS limit + insert / reconnection.
-      // See 20261014120000_imap_e1_security.sql. The mailbox is stored PAUSED (IMAP synchronization does not exist yet).
+      // See 20261014120000_imap_e1_security.sql and 20261015120000_imap_m1_lifecycle.sql. The mailbox is stored
+      // PAUSED (IMAP_ACTIVATION_PENDING): it only synchronizes after activateImapEmailAccount.
       const rows = unwrap(
         await service.rpc("connect_imap_email_account", {
           p_organization_id: input.organizationId,
@@ -206,6 +207,37 @@ export function privilegedOperations(service: SupabaseClient): PrivilegedOperati
         created: outcome === "CREATED",
         previousStatus: (result.previous_status as EmailAccountStatus | null) ?? null
       };
+    },
+
+    async activateImapEmailAccount(organizationId, id) {
+      // IMAP M1 (20261015120000_imap_m1_lifecycle.sql): one transaction under the organization lock; the
+      // database decides plan feature IMAP + access, the stored login / settings and the state transition.
+      const rows = unwrap(
+        await service.rpc("activate_imap_email_account", { p_organization_id: organizationId, p_email_account_id: id })
+      ) as Row[] | null;
+      const result = rows?.[0];
+      if (!result) throw new AppError(500, "EMAIL_ACCOUNT_ACTIVATE_FAILED", "The mailbox activation returned no result");
+
+      const outcome = result.outcome as string;
+      if (
+        outcome === "NOT_FOUND" ||
+        outcome === "NOT_IMAP" ||
+        outcome === "DISCONNECTED" ||
+        outcome === "RECONNECT_REQUIRED" ||
+        outcome === "CREDENTIALS_MISSING" ||
+        outcome === "SETTINGS_INVALID" ||
+        outcome === "FEATURE_NOT_AVAILABLE"
+      ) {
+        return { outcome };
+      }
+      if (outcome !== "ACTIVATED" && outcome !== "ALREADY_ACTIVE") {
+        throw new AppError(500, "EMAIL_ACCOUNT_ACTIVATE_FAILED", "The mailbox activation returned an unknown outcome");
+      }
+
+      const row = unwrap(
+        await service.from("email_accounts").select(EMAIL_ACCOUNT_COLUMNS).eq("id", id).eq("organization_id", organizationId).single()
+      ) as Row;
+      return { outcome, account: toEmailAccount(row), previousStatus: result.previous_status as EmailAccountStatus };
     },
 
     async disconnectEmailAccount(organizationId, id) {

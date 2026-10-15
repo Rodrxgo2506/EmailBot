@@ -45,6 +45,11 @@ export interface ChangeSet {
   hasMore?: boolean;
   /** The cursor is too old for the provider's change history: recover with recoverMessageIds. */
   historyGap?: boolean;
+  /**
+   * IMAP only (M1): new messages skipped because their INTERNALDATE is older than the `since`
+   * option (never imported, never fetched); the cursor moved past them. Reported by syncAccount.
+   */
+  outOfWindow?: number;
 }
 
 export interface RecoverySet {
@@ -62,7 +67,8 @@ export interface RecoverySet {
  */
 export interface ProviderAdapter {
   readonly provider: EmailProvider;
-  listNewMessageIds(context: ProviderContext, options?: { maxMessages?: number }): Promise<ChangeSet>;
+  /** `since` (IMAP only): messages received before it are not imported (bounded catch-up after a pause). */
+  listNewMessageIds(context: ProviderContext, options?: { maxMessages?: number; since?: Date }): Promise<ChangeSet>;
   /** Bounded recovery after a history gap (Gmail). */
   recoverMessageIds?(context: ProviderContext, options: { since: Date; maxMessages: number }): Promise<RecoverySet>;
   /** Push subscription (Gmail users.watch on a Pub/Sub topic). */

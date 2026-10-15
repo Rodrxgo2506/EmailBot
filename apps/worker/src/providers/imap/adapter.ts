@@ -111,6 +111,9 @@ function walk(node: BodyNode | undefined, visit: (node: BodyNode) => void): void
 /** Extra days searched before the recovery start (see imapSearchSince). */
 export const IMAP_SINCE_MARGIN_DAYS = 2;
 
+/** INTERNALDATE values fetched per FETCH while applying the M1 window (metadata only). */
+export const IMAP_DATE_CHUNK = 100;
+
 /**
  * IMAP SEARCH SINCE compares only the DATE part of each message's INTERNALDATE,
  * in that date's own timezone (RFC 3501 6.4.4), while ImapFlow sends the UTC
@@ -196,7 +199,7 @@ export function createImapSyncAdapter(deps: ImapAdapterDeps): ProviderAdapter {
     return dates;
   }
 
-  async function listNewMessageIds(context: ProviderContext, options: { maxMessages?: number } = {}): Promise<ChangeSet> {
+  async function listNewMessageIds(context: ProviderContext, options: { maxMessages?: number; since?: Date } = {}): Promise<ChangeSet> {
     const max = Math.max(1, options.maxMessages ?? 200);
     return withInbox(context, async (client, mailbox) => {
       const top = newest(mailbox);
@@ -209,6 +212,7 @@ export function createImapSyncAdapter(deps: ImapAdapterDeps): ProviderAdapter {
 
       // "N:*" also returns the highest message when it is below N: keep only UIDs after the cursor.
       const uids = (await uidsOf(client, { uid: `${cursor.uid + 1}:*` })).filter((uid) => uid > cursor.uid);
+      if (options.since) return withinWindow(client, mailbox, cursor.uid, top, uids, max, options.since);
       const taken = uids.slice(0, max);
       const hasMore = uids.length > max;
       // Nothing left up to `top` (expunged meanwhile): the cursor may move to `top`.
@@ -219,6 +223,54 @@ export function createImapSyncAdapter(deps: ImapAdapterDeps): ProviderAdapter {
         hasMore
       };
     });
+  }
+
+  /**
+   * IMAP M1 (decision B): the new UIDs after the cursor, oldest first, restricted to messages received since
+   * `since` (exact INTERNALDATE; candidates from a timezone-proof SEARCH SINCE two days earlier). At most `max`
+   * messages are taken; the cursor stops at the last UID examined, so nothing that was not taken or deliberately
+   * skipped is ever jumped (the rest continues in the next run). Older messages are counted in `outOfWindow`,
+   * never fetched. INTERNALDATE is read in chunks, only for the candidates this run may take.
+   */
+  async function withinWindow(client: ImapClient, mailbox: Mailbox, after: number, top: number, uids: number[], max: number, since: Date): Promise<ChangeSet> {
+    const candidates = new Set((await uidsOf(client, { uid: `${after + 1}:*`, since: imapSearchSince(since) })).filter((uid) => uid > after));
+    const candidateList = uids.filter((uid) => candidates.has(uid));
+    const dates = new Map<number, Date>();
+    let fetched = 0;
+    let candidateIndex = 0;
+    const taken: number[] = [];
+    let outOfWindow = 0;
+    let last = after;
+    let hasMore = false;
+    for (const uid of uids) {
+      if (taken.length >= max) {
+        hasMore = true;
+        break;
+      }
+      let inWindow = false;
+      if (candidates.has(uid)) {
+        if (candidateIndex >= fetched) {
+          const chunk = candidateList.slice(fetched, fetched + IMAP_DATE_CHUNK);
+          fetched += chunk.length;
+          for (const [chunkUid, date] of await internalDates(client, chunk)) dates.set(chunkUid, date);
+        }
+        candidateIndex += 1;
+        const date = dates.get(uid);
+        // An unknown INTERNALDATE is kept (deduplicated downstream), as in recoverMessageIds.
+        inWindow = date === undefined || date.getTime() >= since.getTime();
+      }
+      if (inWindow) taken.push(uid);
+      else outOfWindow += 1;
+      last = uid;
+    }
+    // Everything listed was examined: no UID up to `top` is left (any gap was expunged), the cursor may reach it.
+    if (!hasMore) last = Math.max(last, top);
+    return {
+      messageIds: taken.map((uid) => messageId(mailbox, uid)),
+      nextCursor: formatImapCursor({ uidValidity: mailbox.uidValidity, uid: last }),
+      hasMore,
+      outOfWindow
+    };
   }
 
   async function recoverMessageIds(context: ProviderContext, options: { since: Date; maxMessages: number }): Promise<RecoverySet> {

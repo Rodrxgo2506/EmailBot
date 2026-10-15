@@ -142,6 +142,44 @@ explícitos (`IMAP_PROTOCOL_LIMITS` en `packages/shared/src/imap-client.ts`; nun
 mientras analiza, antes de guardar los bytes: un literal se rechaza al leer su `{tamaño}`. Superarlos cierra la
 conexión con `IMAP_RESPONSE_TOO_LARGE` (SECURITY: en el worker, cuenta en ERROR y sin reintentos).
 
+### Ciclo de vida de una cuenta IMAP (M1)
+
+Implementado en local, sin commit (migración `20261015120000_imap_m1_lifecycle.sql`, aditiva; la de E1 no cambia).
+IMAP sigue desactivado: con los indicadores en `false` la reanudación responde `409 IMAP_SYNC_NOT_IMPLEMENTED` y las
+dos rutas IMAP, `503 IMAP_NOT_AVAILABLE`.
+
+- **Conectar / reconectar** (prueba de conexión correcta) deja la cuenta en `PAUSED` con `IMAP_ACTIVATION_PENDING`,
+  también si estaba `ACTIVE`. La sincronización solo empieza tras una reanudación explícita.
+- **Reanudar** (`PATCH /api/email-accounts/:id` `{ status: "ACTIVE" }`, OWNER / ADMIN): aviso temprano de plan y
+  después `public.activate_imap_email_account` (solo `service_role`, bloqueo por organización): cuenta de esa
+  organización, IMAP, solo desde `PAUSED`, contraseña v2 y ajustes válidos, función IMAP del plan con acceso
+  comercial. No ocupa un hueco nuevo (`PAUSED` ya cuenta). El *trigger* de E1 sigue impidiendo que un miembro la
+  active directamente. Una activación válida se audita y encola la primera sincronización (si la cola falla, la
+  cuenta queda `ACTIVE` y la recoge el sondeo). Pausar sigue igual.
+- **Una cuenta en `ERROR` no se reanuda** (M1.4): el worker la detuvo (login rechazado, certificado, TLS, ajustes...)
+  y reanudarla haría que volviera a iniciar sesión fuera de los límites anti-abuso de la prueba de conexión (E4).
+  La API responde `409 IMAP_RECONNECT_REQUIRED` antes de consultar el plan o llamar a la RPC (sin trabajo, sin
+  auditoría, sin conexión), y la RPC también la rechaza (`RECONNECT_REQUIRED`) si pasa a `ERROR` entre medias. Hay
+  que conectarla de nuevo (mismo buzón: prueba de conexión con los límites E4, queda `PAUSED`; mismo servidor y
+  usuario conservan el cursor) y después reanudarla. `DISCONNECTED` sigue respondiendo `409 RECONNECT_REQUIRED`.
+  Gmail y Microsoft en `ERROR` se reanudan como antes.
+- **Worker (solo IMAP)**: si durante un lote la cuenta deja de estar `ACTIVE`, la organización se suspende, se pierde
+  el acceso comercial o la función IMAP del plan, el cursor **no** avanza (compare-and-set con `status = ACTIVE`).
+  Cada mensaje comprueba el estado de la cuenta al empezar a procesarse: los que aún no han empezado no se
+  procesan (el lote se detiene, `imap.sync.halted`), pero **la pausa no cancela lo que ya está en curso**: los
+  mensajes que ya pasaron esa comprobación (hasta 3 a la vez) pueden terminar de procesarse y guardarse después de
+  pedir la pausa. No se promete que ningún mensaje se procese tras solicitarla. Al reanudar, la ejecución vuelve a
+  listar desde el mismo cursor y la deduplicación por id de mensaje del proveedor evita insertar de nuevo los ya
+  guardados: nada se pierde ni se duplica (verificado contra PostgreSQL y Dovecot reales en M1.3 / M1.4). Perder
+  la función IMAP no marca ERROR: la sincronización se detiene y continúa cuando el plan vuelve a incluirla.
+  `markError` nunca cambia una cuenta IMAP `DISCONNECTED` (un trabajo atrasado no la revive). La cancelación
+  inmediata de las operaciones en curso no forma parte de M1 (relacionado con A2).
+- **Recuperación acotada**: cada ejecución IMAP lista como máximo 300 mensajes nuevos (el resto sigue en una
+  ejecución de continuación desde el último procesado, sin saltar ninguno) y solo los recibidos en los últimos
+  7 días (INTERNALDATE). Los más antiguos no se descargan ni se importan: se cuentan y se informan en el log
+  (`imap.sync.outside_window`) y en la auditoría de la cuenta; el cursor los deja atrás. El cambio de UIDVALIDITY
+  mantiene su recuperación (300 / 7 días, `truncated` en el log). Gmail y Microsoft no cambian.
+
 ### Riesgos pendientes antes de activar IMAP
 
 Versión objetivo de Redis / Valkey, matriz de compatibilidad de los scripts, gestión de `IMAP_RATE_LIMIT_SECRET` y
@@ -162,8 +200,13 @@ las rutas siguen en 503 (estado por defecto del código).
   [`docs/imap-production-readiness.md`](imap-production-readiness.md). A1 (respuestas IMAP sin límite de tamaño:
   límites del protocolo, arriba) y E6.3 (texto de los mensajes grandes de una sola parte) están en commits **locales**
   de la rama `feat/imap-e4-abuse-hardening` (`578cec5` y `6f8c7c3`), sin publicar ni desplegar. Antes de activar
-  IMAP hay que corregir M1 (la activación necesita un cambio de código y una migración, no solo
-  `imapAccountsEnabled` / `imapSyncEnabled`); A2 (sin plazo total por operación en el worker) es recomendable.
+  IMAP: M1 está implementado en local, sin commit (ciclo de vida, arriba), y sigue haciendo falta un cambio de código
+  que active `imapAccountsEnabled` / `imapSyncEnabled`; A2 (sin plazo total por operación en el worker) es recomendable.
+- **H2 (pendiente, bajo)**: si un trabajo atrasado falla después de desconectar una cuenta IMAP, la base de datos
+  queda bien (`DISCONNECTED`, `markError` no la toca), pero `handleAccountFailure` publica igualmente el evento
+  realtime `email-account.status` `ERROR` y la web muestra el aviso "Una cuenta de correo necesita reconectarse"
+  (la lista se refresca y enseña `DISCONNECTED`). Corregirlo exige cambiar el flujo común de errores o la semántica
+  del evento (compartidos con Gmail / Microsoft): queda para revisión (`docs/imap-production-readiness.md`).
 - `IMAP_RATE_LIMIT_SECRET` debe configurarse (igual en todas las instancias) antes de activar IMAP; hoy no está
   definido en ningún entorno remoto.
 - Señal lateral inevitable del límite global: una organización sin fallos propios que recibe
