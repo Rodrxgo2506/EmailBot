@@ -221,9 +221,25 @@ Comportamiento:
 ## Integration tests (Valkey local)
 
 `apps/api/src/test/imap-valkey-integration.test.ts` es **opt-in** (sin `IMAP_VALKEY_URL` todo queda *skipped*;
-la CI no lo define) y **solo** debe apuntar a un Valkey / Redis desechable (el test rechaza cualquier host que no
-sea `127.0.0.1`, `localhost` o `[::1]`): lee y escribe sus claves (incluido
-`KEYS`). Lanza dos procesos de API independientes (`imap-valkey-process.ts`, `node --import tsx`) con el
+la CI no lo define) y **solo** debe apuntar a un Valkey / Redis desechable de esta máquina: lee y escribe sus
+claves (`KEYS`, `DEL`) y ejecuta `CLIENT PAUSE`.
+
+**Guard (`apps/api/src/test/valkey-target.ts`).** El test y su proceso auxiliar validan `IMAP_VALKEY_URL` antes
+de crear cualquier cliente y luego la usan sin modificarla. Solo se acepta, sobre TCP:
+
+`redis://[usuario:contraseña@]<127.0.0.1 | localhost | [::1]>[:puerto][/db]` (o `rediss://` con la misma forma).
+
+Se rechaza, sin conectar ni resolver nada y sin mostrar la URL ni sus credenciales en el error: cualquier otro
+esquema (ioredis 5.11.1 reinterpreta `x://localhost:1` como host `x` con la ruta de *pipe* `//localhost:1`),
+parámetros de consulta (`?path=//host/pipe` se convierte en una ruta de *pipe*, una ruta de red en Windows),
+fragmentos, rutas, otros hosts o direcciones (incluidas `127.0.0.2`, `0.0.0.0`, `[::]`, IPv4 mapeadas, formas
+decimales / hexadecimales / codificadas, `localhost.`, mayúsculas: `redis:` no normaliza el host), espacios,
+caracteres de control y barras invertidas. Después de esa forma estricta se comprueba también el resultado del
+propio `parseURL` de ioredis: solo `host` de loopback, `port`, `username`, `password` y `db`; nunca `path`.
+`valkey-target.test.ts` (suite normal, sin red) lo prueba con 48 entradas y verifica, interceptando y bloqueando
+conexiones, DNS y *pipes* en el mismo proceso y en procesos hijos (`net-block-hook.cjs`), que las rechazadas no
+abren nada, con controles positivos que sí detectan el intento contra un puerto de loopback cerrado y el *pipe* de
+una URL no validada. Lanza dos procesos de API independientes (`imap-valkey-process.ts`, `node --import tsx`) con el
 limitador real y el cliente de producción (`createRedisConnection`), que solo comparten ese servidor; DNS e IMAP
 son simulados (ningún socket hacia servidores de correo).
 

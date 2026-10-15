@@ -17,6 +17,7 @@ import {
   RESERVE_SCRIPT
 } from "../modules/email-accounts/imap-connection.js";
 import { authHeaders, createTestApp, makeUser, ORG_A } from "./helpers.js";
+import { assertLocalValkeyUrl } from "./valkey-target.js";
 
 /*
  * IMAP E4.1 - REAL Valkey integration of the IMAP abuse limits. Opt-in: every
@@ -32,13 +33,12 @@ import { authHeaders, createTestApp, makeUser, ORG_A } from "./helpers.js";
  * opened towards a mail server.
  */
 
-const URL_ENV = process.env.IMAP_VALKEY_URL ?? "";
+const RAW_URL = process.env.IMAP_VALKEY_URL ?? "";
 const PHASE = process.env.IMAP_VALKEY_PHASE ?? "up";
-const enabled = URL_ENV !== "";
-// These tests write keys, run KEYS and CLIENT PAUSE: only ever a throwaway server on this machine.
-if (enabled && !["127.0.0.1", "localhost", "[::1]"].includes(new URL(URL_ENV).hostname)) {
-  throw new Error("IMAP_VALKEY_URL must point at a throwaway local Valkey / Redis (127.0.0.1, localhost or [::1])");
-}
+const enabled = RAW_URL !== "";
+// These tests write keys, run KEYS / DEL and CLIENT PAUSE: only ever a throwaway server on this
+// machine over TCP (valkey-target.ts). Checked before any client exists; used unchanged afterwards.
+const URL_ENV = enabled ? assertLocalValkeyUrl(RAW_URL) : "";
 const PROCESS_SCRIPT = fileURLToPath(new URL("./imap-valkey-process.ts", import.meta.url));
 const SECRET = randomBytes(32).toString("base64");
 const HOST = "imap.hostinger.com";

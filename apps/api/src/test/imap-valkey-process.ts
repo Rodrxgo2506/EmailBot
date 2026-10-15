@@ -20,10 +20,10 @@ import type { AppDeps } from "../deps.js";
 import { createRedisConnection } from "../infrastructure/queue.js";
 import { AppError } from "../lib/errors.js";
 import { createImapConnectionTester } from "../modules/email-accounts/imap-connection.js";
+import { assertLocalValkeyUrl } from "./valkey-target.js";
 
-const url = process.env.IMAP_VALKEY_URL;
-if (!url) throw new Error("IMAP_VALKEY_URL is required");
-if (!["127.0.0.1", "localhost", "[::1]"].includes(new URL(url).hostname)) throw new Error("IMAP_VALKEY_URL must point at a throwaway local Valkey / Redis");
+// The only input naming a server; checked (valkey-target.ts) before the client exists, used unchanged.
+const url = assertLocalValkeyUrl(process.env.IMAP_VALKEY_URL);
 const secret = process.env.IMAP_TEST_LIMIT_SECRET ?? null;
 
 const redis = createRedisConnection(url, { forProducer: true });
