@@ -261,9 +261,14 @@ export function createImapSyncAdapter(deps: ImapAdapterDeps): ProviderAdapter {
       } else if (node.type === "text/plain" && !textPart) textPart = node;
       else if (node.type === "text/html" && !htmlPart) htmlPart = node;
     });
+    // The root of a single-part message has no part number (ImapFlow numbers only the children of a
+    // multipart). Its body is part "1" (RFC 3501 6.4.5): ImapFlow's download() then reads BODY.PEEK[TEXT]
+    // in partial chunks and decodes it with the message headers. Never "" (that would be the whole message).
+    const partOf = (node: BodyNode): string | undefined => node.part ?? (node === info.bodyStructure && !node.childNodes?.length ? "1" : undefined);
     const download = async (node: BodyNode | null): Promise<string | null> => {
-      if (!node?.part) return null;
-      const result = await client.download(String(uid), node.part, { uid: true, maxBytes: OVERSIZED_TEXT_BYTES });
+      const part = node ? partOf(node) : undefined;
+      if (!part) return null;
+      const result = await client.download(String(uid), part, { uid: true, maxBytes: OVERSIZED_TEXT_BYTES });
       const content = result && "content" in result ? result.content : null;
       if (!content) return null;
       const text = (await readStream(content, OVERSIZED_TEXT_BYTES)).toString("utf8").slice(0, IMAP_MAX_BODY_CHARS);
