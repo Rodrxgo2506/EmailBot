@@ -15,7 +15,6 @@ import {
   type EmailProcessingJob,
   type NotificationJob
 } from "@emailbot/shared";
-import { createClient } from "@supabase/supabase-js";
 import { Worker, type Job } from "bullmq";
 import { Redis } from "ioredis";
 import { pino } from "pino";
@@ -27,6 +26,7 @@ import { createImapSyncSlots, imapSyncSlotCount } from "./infrastructure/imap-sl
 import { createJobProcessors } from "./infrastructure/job-processors.js";
 import { createWorkerQueues } from "./infrastructure/queues.js";
 import { createJobTracker, createShutdown, shutdownLimits } from "./infrastructure/shutdown.js";
+import { createWorkerSupabase } from "./infrastructure/supabase-client.js";
 import { captureWorkerException, flushWorkerSentry, initWorkerSentry, jobType, reportJobFailure } from "./infrastructure/sentry.js";
 import { createAppRedisSyncLock } from "./infrastructure/sync-lock.js";
 import {
@@ -61,11 +61,8 @@ const logger = pino({
 initWorkerSentry({ dsn: config.sentryDsn, environment: config.env, release: sentryRelease(process.env) });
 
 // SERVICE ROLE client: the worker processes every tenant; it scopes all
-// writes with ids read from the database.
-const supabase = createClient(config.supabaseUrl, config.supabaseServiceRoleKey, {
-  auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
-  global: { fetch: fetchWithTimeout(globalThis.fetch, config.supabaseHttpTimeoutMs) }
-});
+// writes with ids read from the database. F5.3: PostgREST reads are not retried by the client (supabase-client.ts).
+const supabase = createWorkerSupabase(config.supabaseUrl, config.supabaseServiceRoleKey, config.supabaseHttpTimeoutMs);
 // Google / Microsoft: OAuth refresh, Gmail, Graph and attachment downloads.
 const providerFetch = fetchWithTimeout(globalThis.fetch, config.providerHttpTimeoutMs);
 

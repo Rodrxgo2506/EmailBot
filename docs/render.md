@@ -214,6 +214,29 @@ Leyenda: **SECRET** = nunca en logs, repositorio ni bundle; se introduce con `sy
 | `WORKER_REDIS_COMMAND_TIMEOUT_MS` | PUBLIC · WORKER ONLY | 5000 (F5.2: límite de cada comando Redis de aplicación y de cada llamada de productor de colas; 500 a 30000). Ver *Redis de aplicación del worker* |
 | `WORKER_SHUTDOWN_TIMEOUT_MS` | PUBLIC · WORKER ONLY | 25000 (F5.1: presupuesto total del apagado, de la señal a la salida del proceso; mínimo 15000, máximo 600000). Debe quedar por debajo del plazo de apagado de Render: el Blueprint declara `maxShutdownDelaySeconds: 120`; el valor aplicado al servicio está sin verificar. Ver *Apagado del worker* |
 
+## Lecturas de PostgREST del worker (F5.3)
+
+`apps/worker/src/infrastructure/supabase-client.ts`. `@supabase/postgrest-js` 2.117.2 reintenta por su cuenta las
+peticiones GET / HEAD hasta 3 veces (esperas de 1, 2 y 4 s) cuando el *fetch* falla, también por el plazo de
+`SUPABASE_HTTP_TIMEOUT_MS` (no es un `AbortError`), o el servidor responde 503 / 520. Una lectura colgada duraba
+así 4 × el plazo + 7 s (unos 247 s con 60 s) y la misma sentencia lenta llegaba a ejecutarse varias veces a la vez
+en PostgreSQL (la que vence en el cliente sigue en el servidor).
+
+El cliente del worker se crea con `db: { retry: false }`:
+
+- una lectura se envía una vez y falla como mucho en `SUPABASE_HTTP_TIMEOUT_MS`; el error llega al trabajo
+  (los *stores* lanzan en todo error, ninguno lo convierte en "no encontrado") y BullMQ lo reintenta con sus
+  intentos y esperas, la única capa de reintento;
+- un 503 pasajero (PostgREST recargando su esquema tras una migración) hace fallar ese intento del trabajo en vez
+  de esperarse dentro de él;
+- las escrituras y las RPC (POST / PATCH / DELETE) no cambian: el cliente nunca las reintentaba;
+- no afecta a Storage ni a Auth, ni a la API (crea sus propios clientes).
+
+Comprobado contra un PostgREST real desechable: una sentencia de 3 s con plazo de 1 s falla en ~1 s con una sola
+sentencia en PostgreSQL; con la configuración anterior tardaba ~11 s y llegaba a 2 sentencias simultáneas. Sin
+cambiar: el plazo de 60 s de las lecturas (un plazo propio más corto depende de verificar el `statement_timeout`
+de producción; en local `authenticator` tiene 8 s y `service_role` ninguno).
+
 ## Apagado del worker
 
 F5.1 (`apps/worker/src/infrastructure/shutdown.ts`). Con `SIGTERM` o `SIGINT` el worker se apaga por fases dentro
@@ -253,8 +276,9 @@ presupuesto debe quedar por debajo.
     *offline*) puede seguir dejando comandos esperando sin límite; no se interrumpe antes de la fase 5 porque la
     usan todos los workers y las colas. Si deja de responder, el cierre agota sus límites y el proceso sale con
     código 1 dentro del presupuesto (probado en un subproceso con Redis pausado).
-  - F5.3: una lectura de PostgREST puede reintentarse hasta 3 veces (1 + 2 + 4 s); un trabajo en ese punto no
-    se cancela, agota la gracia y se cierra forzado.
+  - F5.3: el cliente del worker ya no reintenta las lecturas de PostgREST (ver *Lecturas de PostgREST del
+    worker*), pero una lectura colgada sigue esperando hasta `SUPABASE_HTTP_TIMEOUT_MS` (60 s, más que la gracia):
+    un trabajo en ese punto no se cancela, agota la gracia y se cierra forzado.
   - F5.4: las peticiones HTTP (Supabase, Gmail, Microsoft Graph) no reciben una señal de cancelación.
 
 ## Web: cabeceras
