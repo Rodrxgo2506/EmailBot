@@ -22,7 +22,8 @@ import { requestCardToken } from "./culqi-checkout";
 /*
  * Commercial V1 phase 2 (Culqi SANDBOX): card checkout of a plan.
  *   1. period + billing contact (Culqi requires it to create the customer) + explicit acceptance of the terms;
- *   2. the API resolves the price and hands the PUBLIC key; Culqi's checkout tokenizes the card;
+ *   2. the API resolves the price and hands the PUBLIC key; Culqi's checkout tokenizes the card (this dialog is
+ *      closed meanwhile, so Culqi's own modal receives clicks and focus);
  *   3. only the token goes to the API, which creates the Culqi subscription (PENDING);
  *   4. the plan changes only when the payment is confirmed (webhook / reconciliation): this dialog waits for it.
  */
@@ -75,7 +76,7 @@ export function CheckoutDialog({
 
   useEffect(() => {
     if (step.kind !== "waiting" || !current.data || current.data.id !== step.billingId) return;
-    if (current.data.status === "ACTIVE" || current.data.status === "FAILED") {
+    if (current.data.status === "ACTIVE" || current.data.status === "FAILED" || current.data.status === "REVIEW_REQUIRED") {
       setStep({ kind: "done", summary: current.data });
       if (current.data.status === "ACTIVE") {
         void queryClient.invalidateQueries({ queryKey: queryKeys.org(organizationId) });
@@ -112,8 +113,11 @@ export function CheckoutDialog({
   const yearly = priceOf(plan, "YEARLY");
   const slow = waitingSince !== null && now - waitingSince > WAIT_NOTICE_MS;
 
+  // While Culqi's checkout is open ("paying") this dialog is closed: Culqi mounts its own modal on document.body,
+  // and an open Radix modal would block it (pointer-events: none on body + focus trap). The form values stay in
+  // react-hook-form, so the dialog comes back with them when Culqi is closed or fails, or in "waiting" with a token.
   return (
-    <Dialog open onOpenChange={(open) => step.kind !== "paying" && onOpenChange(open)}>
+    <Dialog open={step.kind !== "paying"} onOpenChange={(open) => step.kind !== "paying" && onOpenChange(open)}>
       <DialogContent className="max-h-[90vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle>Contratar el plan {plan.name}</DialogTitle>
@@ -136,11 +140,19 @@ export function CheckoutDialog({
               Culqi confirma los cobros de las suscripciones de forma asíncrona. Tu plan cambiará cuando el pago esté confirmado.
             </p>
             {slow ? (
-              <p className="text-muted-foreground">La confirmación está tardando. Puedes cerrar esta ventana: tu plan se activará cuando Culqi confirme el pago.</p>
+              <p className="text-muted-foreground">
+                Estamos verificando tu pago con Culqi. Puedes cerrar esta ventana; te mostraremos el estado cuando se confirme. Cerrarla no cancela ni cambia
+                tu pago.
+              </p>
             ) : null}
           </div>
         ) : step.kind === "done" ? (
-          step.summary.status === "ACTIVE" ? (
+          step.summary.status === "REVIEW_REQUIRED" ? (
+            <p role="status" className="py-2 text-sm">
+              No pudimos confirmar automáticamente tu pago con Culqi. No se activó ningún plan y no se canceló nada: el equipo de EmailBot lo revisará.
+              Puedes iniciar un nuevo pago si lo necesitas.
+            </p>
+          ) : step.summary.status === "ACTIVE" ? (
             <p role="status" className="flex items-center gap-2 py-2 text-sm font-medium">
               <CheckCircle2 className="size-4 text-emerald-600" aria-hidden /> Pago confirmado. Tu plan {plan.name} ya está activo.
             </p>

@@ -70,6 +70,16 @@ function renderDialog() {
   return { onOpenChange };
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((onResolve, onReject) => {
+    resolve = onResolve;
+    reject = onReject;
+  });
+  return { promise, resolve, reject };
+}
+
 function fillForm() {
   fireEvent.change(screen.getByLabelText("Nombres"), { target: { value: "Ana" } });
   fireEvent.change(screen.getByLabelText("Apellidos"), { target: { value: "Pérez" } });
@@ -161,6 +171,89 @@ describe("choosing a plan", () => {
     fireEvent.click(screen.getByRole("button", { name: "Continuar al pago" }));
     expect(await screen.findByText("El pago fue rechazado. Revisa los datos de la tarjeta o usa otra.")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Continuar al pago" })).toBeEnabled();
+  });
+
+  it("while Culqi's form is open this dialog is closed: nothing blocks Culqi's modal (pointer events, focus)", async () => {
+    const token = deferred<string>();
+    requestCardToken.mockReturnValue(token.promise);
+    renderDialog();
+    await screen.findByRole("dialog", { name: "Contratar el plan Pro" });
+    fillForm();
+    fireEvent.click(screen.getByRole("checkbox"));
+    expect(document.body.style.pointerEvents).toBe("none"); // the Radix modal lock that blocked Culqi's iframe
+    fireEvent.click(screen.getByRole("button", { name: "Continuar al pago" }));
+
+    await waitFor(() => expect(requestCardToken).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(document.body.style.pointerEvents).not.toBe("none");
+    expect(document.activeElement?.closest('[role="dialog"]') ?? null).toBeNull();
+    expect(post).not.toHaveBeenCalled();
+
+    // Culqi returns a token: the existing flow continues (POST) and the dialog comes back waiting.
+    token.resolve("tkn_test_TOKEN1");
+    expect(await screen.findByText(/Esperando la confirmación del pago/)).toBeInTheDocument();
+    expect(screen.getByRole("dialog", { name: "Contratar el plan Pro" })).toBeInTheDocument();
+    expect(post).toHaveBeenCalledTimes(1);
+    expect((post.mock.calls[0] as [string, Record<string, unknown>])[1]).toMatchObject({ plan: "PRO", tokenId: "tkn_test_TOKEN1" });
+  });
+
+  it.each([
+    ["the user closes Culqi's form", "Cerraste el formulario de pago sin completarlo. No se realizó ningún cobro."],
+    ["Culqi cannot tokenize the card", "Tarjeta inválida"]
+  ])("%s: the dialog comes back with the form data, nothing is sent, and paying can be retried", async (_label, message) => {
+    const first = deferred<string>();
+    requestCardToken.mockReturnValueOnce(first.promise);
+    renderDialog();
+    await screen.findByRole("dialog", { name: "Contratar el plan Pro" });
+    fillForm();
+    fireEvent.click(screen.getByRole("checkbox"));
+    fireEvent.click(screen.getByRole("button", { name: "Continuar al pago" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+
+    first.reject(new Error(message));
+    expect(await screen.findByRole("dialog", { name: "Contratar el plan Pro" })).toBeInTheDocument();
+    expect(screen.getByText(message)).toBeInTheDocument();
+    expect(screen.getByLabelText("Nombres")).toHaveValue("Ana");
+    expect(screen.getByLabelText("Ciudad")).toHaveValue("Lima");
+    expect(screen.getByLabelText("Periodicidad")).toHaveValue("MONTHLY");
+    expect(screen.getByRole("checkbox")).toBeChecked();
+    expect(post).not.toHaveBeenCalled();
+
+    // Retry with the same data: Culqi opens again and the token goes to the existing POST.
+    fireEvent.click(screen.getByRole("button", { name: "Continuar al pago" }));
+    expect(await screen.findByText(/Esperando la confirmación del pago/)).toBeInTheDocument();
+    expect(requestCardToken).toHaveBeenCalledTimes(2);
+    expect((post.mock.calls[0] as [string, Record<string, unknown>])[1]).toMatchObject({
+      tokenId: "tkn_test_TOKEN1",
+      customer: { firstName: "Ana", lastName: "Pérez", phoneNumber: "999888777", address: "Av. Lima 123", addressCity: "Lima", countryCode: "PE" }
+    });
+  });
+
+  it("Q. while waiting for the confirmation the dialog can be closed: nothing is cancelled or changed (no further request)", async () => {
+    const { onOpenChange } = renderDialog();
+    await screen.findByRole("dialog", { name: "Contratar el plan Pro" });
+    fillForm();
+    fireEvent.click(screen.getByRole("checkbox"));
+    fireEvent.click(screen.getByRole("button", { name: "Continuar al pago" }));
+    await screen.findByText(/Esperando la confirmación del pago/);
+    const getsBefore = get.mock.calls.length;
+    fireEvent.click(screen.getAllByRole("button", { name: "Cerrar" })[0] as HTMLElement); // the footer button (the X is the other one)
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+    expect(post).toHaveBeenCalledTimes(1); // only the checkout itself: closing sends nothing
+    expect(get.mock.calls.slice(getsBefore).every(([path]) => path === "/api/billing/subscriptions/current")).toBe(true);
+  });
+
+  it("a checkout that could not be confirmed automatically (REVIEW_REQUIRED) is reported: no plan activated, nothing cancelled", async () => {
+    renderDialog();
+    await screen.findByRole("dialog", { name: "Contratar el plan Pro" });
+    fillForm();
+    fireEvent.click(screen.getByRole("checkbox"));
+    fireEvent.click(screen.getByRole("button", { name: "Continuar al pago" }));
+    await screen.findByText(/Esperando la confirmación del pago/);
+    currentStatus = "REVIEW_REQUIRED";
+    expect(await screen.findByText(/No pudimos confirmar automáticamente tu pago con Culqi/, {}, { timeout: 5000 })).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "Cerrar" })[0]).toBeEnabled();
+    expect(refresh).not.toHaveBeenCalled();
   });
 
   it("a payment that Culqi finally declines (FAILED) is reported, no plan activated", async () => {
