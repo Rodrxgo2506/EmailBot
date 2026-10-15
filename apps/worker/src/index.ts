@@ -21,19 +21,20 @@ import { Redis } from "ioredis";
 import { pino } from "pino";
 import { loadWorkerConfig } from "./config/env.js";
 import { createProviderContext } from "./credentials/token-manager.js";
+import { createAppRedis } from "./infrastructure/app-redis.js";
 import { closeServer, createHealthServer, listen, type WorkerHealthState } from "./infrastructure/health.js";
 import { createImapSyncSlots, imapSyncSlotCount } from "./infrastructure/imap-slots.js";
 import { createJobProcessors } from "./infrastructure/job-processors.js";
 import { createWorkerQueues } from "./infrastructure/queues.js";
 import { createJobTracker, createShutdown, shutdownLimits } from "./infrastructure/shutdown.js";
 import { captureWorkerException, flushWorkerSentry, initWorkerSentry, jobType, reportJobFailure } from "./infrastructure/sentry.js";
-import { createRedisSyncLock } from "./infrastructure/sync-lock.js";
+import { createAppRedisSyncLock } from "./infrastructure/sync-lock.js";
 import {
   createAccountStore,
+  createAppRealtimePublisher,
   createAttachmentStorage,
   createAuditRecorder,
   createEmailStore,
-  createRealtimePublisher,
   createRoutingStore,
   createSubscriptionMaintenance
 } from "./infrastructure/supabase-stores.js";
@@ -68,10 +69,15 @@ const supabase = createClient(config.supabaseUrl, config.supabaseServiceRoleKey,
 // Google / Microsoft: OAuth refresh, Gmail, Graph and attachment downloads.
 const providerFetch = fetchWithTimeout(globalThis.fetch, config.providerHttpTimeoutMs);
 
-// BullMQ workers require maxRetriesPerRequest = null.
+// BullMQ workers require maxRetriesPerRequest = null (BullMQ workers and queues only).
 const connection = new Redis(config.redisUrl, { maxRetriesPerRequest: null });
-const publisherConnection = new Redis(config.redisUrl, { maxRetriesPerRequest: null });
+// F5.2: the application's own commands run on bounded clients (infrastructure/app-redis.ts): the sync lock and the
+// health PING on one, realtime publishing on its own (the shutdown interrupts it without touching the lock).
+const appRedis = createAppRedis(config.redisUrl, config.redisCommandTimeoutMs);
+const publisherRedis = createAppRedis(config.redisUrl, config.redisCommandTimeoutMs);
+const publisherConnection = publisherRedis.client;
 connection.on("error", (error) => logger.error({ err: serializeError(error) }, "redis error"));
+appRedis.client.on("error", (error) => logger.error({ err: serializeError(error) }, "redis application client error"));
 publisherConnection.on("error", (error) => logger.error({ err: serializeError(error) }, "redis publisher error"));
 
 // Health endpoint (only when a port is configured): /livez answers right away,
@@ -80,7 +86,8 @@ const health: WorkerHealthState = { initialized: false, failed: false, stopping:
 const healthServer = config.health
   ? createHealthServer({
       state: health,
-      pingRedis: async () => connection.status === "ready" && (await connection.ping()) === "PONG"
+      // BullMQ's connection is checked without a command (no PING queued on it while Redis is away).
+      pingRedis: async () => connection.status === "ready" && appRedis.client.status === "ready" && (await appRedis.client.ping()) === "PONG"
     })
   : null;
 if (healthServer && config.health) {
@@ -93,10 +100,10 @@ if (healthServer && config.health) {
   }
 }
 
-const queues = createWorkerQueues(connection);
+const queues = createWorkerQueues(connection, { producerTimeoutMs: config.redisCommandTimeoutMs });
 const accounts = createAccountStore(supabase);
 const emails = createEmailStore(supabase);
-const realtime = createRealtimePublisher(publisherConnection);
+const realtime = createAppRealtimePublisher(publisherRedis);
 // IMAP: the pool and the real adapter exist only when IMAP synchronization is enabled (fixed false today).
 const imapPool = config.imapSyncEnabled ? new ImapConnectionPool<ImapClient>() : null;
 const providers = createProviderRegistry(providerFetch, imapPool ? { imap: createImapSyncAdapter({ pool: imapPool }) } : {});
@@ -130,7 +137,7 @@ const eventDeps: Omit<HandleEventDeps, "logger"> = {
   createContext,
   enqueueSync: (account, reason) => queues.enqueueSync(account, reason),
   enqueueWatch: (account) => queues.enqueueWatch(account),
-  lock: createRedisSyncLock(connection),
+  lock: createAppRedisSyncLock(appRedis),
   audit: auditRecorder,
   watchTopic: config.gmailPubSubTopic,
   microsoftPush: config.microsoftPush,
@@ -200,6 +207,7 @@ const shutdown = createShutdown(
     ],
     disconnect: () => {
       connection.disconnect();
+      appRedis.client.disconnect();
       publisherConnection.disconnect();
     },
     flush: flushWorkerSentry,

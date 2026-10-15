@@ -81,11 +81,48 @@ versión).
 | Bloqueo de login (portal; IMAP) | `EVAL` (Lua: `INCR`, `PEXPIRE`, `SET … PX`, `DEL`, `PTTL`; un script usa 2 claves: instancia única, no Cluster) | `apps/api/src/infrastructure/login-throttle.ts` |
 | Límites IMAP (desactivado) | `EVAL` (Lua: `INCR`, `DECR`, `GET`, `PTTL`, `PEXPIRE`) | `apps/api/src/modules/email-accounts/imap-connection.ts`; ver `docs/imap-production-readiness.md` |
 | Realtime | `PUBLISH` (worker) / `SUBSCRIBE` (API), canal `emailbot:realtime` | `supabase-stores.ts`, `realtime.ts` |
+| Lock de sincronización (worker) | `SET … PX NX`, `EVAL` (compara y borra) | worker `sync-lock.ts` |
 | Readiness | `PING` | `server.ts`, worker `index.ts` |
 | BullMQ 5.81.5 | `EVALSHA`/`EVAL` (scripts Lua: listas, sets, zsets, hashes, streams `XADD`/`XTRIM`), `BZPOPMIN`, `XREAD`, `CLIENT SETNAME`/`LIST`, `INFO`, `SCAN`, `MULTI` | interno |
 
 Todos están disponibles en Valkey 8 (compatible con Redis 7.2). Prueba real contra Valkey 8.1 local:
 ver el informe de compatibilidad de esta fase.
+
+### Redis de aplicación del worker (F5.2)
+
+El worker abre tres clientes ioredis (6 conexiones: BullMQ añade una bloqueante por worker):
+
+| Cliente | Usos | Opciones | Si Redis no responde |
+|---|---|---|---|
+| BullMQ | los 3 workers y las colas (productores y *schedulers*) | `maxRetriesPerRequest: null`, cola *offline*, sin `commandTimeout` (sin cambios: los workers lo exigen y una cola BullMQ que falla al inicializarse queda inservible) | espera a Redis. Cada llamada de productor se acota a `WORKER_REDIS_COMMAND_TIMEOUT_MS`; los *schedulers* del arranque esperan |
+| Aplicación | lock de sincronización, `PING` de `/readyz` | `commandTimeout` = `WORKER_REDIS_COMMAND_TIMEOUT_MS`, `enableOfflineQueue: false`, `autoResendUnfulfilledCommands: false`, `maxRetriesPerRequest: 0` | el comando falla dentro del límite |
+| Publicador realtime | `PUBLISH` | las mismas | igual; la fase de cancelación del apagado lo desconecta |
+
+`apps/worker/src/infrastructure/app-redis.ts`. Un fallo nunca cuenta como éxito: el trabajo falla y BullMQ lo
+reintenta. El resultado se clasifica:
+
+- **No enviado**: la conexión no estaba lista (se espera como mucho el límite) o se rechaza al instante. Sin cola
+  *offline* ni reenvío, un comando no enviado no se ejecuta nunca más tarde.
+- **Rechazado**: Redis respondió con un error.
+- **Desconocido**: el comando se escribió y no hubo respuesta en el límite (o la conexión cayó). Redis puede
+  ejecutarlo más tarde. Solo se reintentan operaciones idempotentes:
+  - lock: si la adquisición queda en desconocido se libera en el acto nuestro token (compara y borra); en la misma
+    conexión se ejecuta después del `SET`, así que un `SET` tardío no deja un lease huérfano (sin esa liberación
+    bloquearía la cuenta hasta su TTL de 15 min). Solo borra si el valor es nuestro token, nunca el lease de otro
+    proceso. Si la conexión se pierde entre el `SET` y la liberación, esta se envía por la conexión nueva; si Redis
+    sigue inalcanzable durante el límite, no se envía y el lease tardío dura su TTL (probado);
+  - `PUBLISH`: el evento puede llegar dos veces (al menos una vez); el correo no pasa a `PROCESSED` hasta que se
+    publica sin error. Solo la API lo consume y lo reenvía por Socket.IO sin guardarlo: el panel ignora un
+    `email.processed` o `notification` repetido (por id, en cada pestaña) y el portal solo vuelve a cargar la
+    bandeja;
+  - productores: los `jobId` son deterministas (procesamiento, notificación, *watch*) y la sincronización se
+    agrupa por cuenta, así que el reintento no duplica trabajos. Un `SYNC_ACCOUNT` puede encolarse o eliminarse
+    tarde; el reintento del trabajo y el sondeo cada 5 min lo cubren, y el cursor (CAS) impide perder correo.
+
+Limitaciones: ioredis conserva los comandos ya rechazados por tiempo hasta que llega su respuesta o se cierra la
+conexión (memoria pequeña, sin promesas pendientes). Una conexión abierta pero muda hace fallar cada comando en su
+límite hasta que se cierra (sin *keepalive* TCP configurado). La conexión de BullMQ sigue sin límite por diseño.
+La API no cambia en F5.2.
 
 ### Comportamiento sin Redis (comprobado)
 
@@ -174,6 +211,7 @@ Leyenda: **SECRET** = nunca en logs, repositorio ni bundle; se introduce con `sy
 | `WORKER_WATCH_RENEW_INTERVAL_MINUTES` | PUBLIC · WORKER ONLY | 60 por defecto; renueva watches de Gmail y suscripciones de Microsoft; no definir |
 | `WORKER_MAX_ATTACHMENT_BYTES` | PUBLIC · WORKER ONLY | 25 MiB |
 | `WORKER_HEALTH_PORT`, `WORKER_HEALTH_HOST` | PUBLIC · WORKER ONLY | no definir en Render |
+| `WORKER_REDIS_COMMAND_TIMEOUT_MS` | PUBLIC · WORKER ONLY | 5000 (F5.2: límite de cada comando Redis de aplicación y de cada llamada de productor de colas; 500 a 30000). Ver *Redis de aplicación del worker* |
 | `WORKER_SHUTDOWN_TIMEOUT_MS` | PUBLIC · WORKER ONLY | 25000 (F5.1: presupuesto total del apagado, de la señal a la salida del proceso; mínimo 15000, máximo 600000). Debe quedar por debajo del plazo de apagado de Render: el Blueprint declara `maxShutdownDelaySeconds: 120`; el valor aplicado al servicio está sin verificar. Ver *Apagado del worker* |
 
 ## Apagado del worker
@@ -209,10 +247,12 @@ presupuesto debe quedar por debajo.
 - ioredis: `disconnect()` cierra el socket y, si el servidor no responde, lo destruye tras `disconnectTimeout`
   (2 s por defecto); solo entonces se rechazan los comandos pendientes. Por eso la fase de cancelación dura 3 s.
 - Límites que dependen de fases posteriores:
-  - F5.2: la conexión Redis compartida de BullMQ (`maxRetriesPerRequest: null`, cola *offline*) puede dejar
-    comandos esperando sin límite; no se interrumpe antes de la fase 5 porque la usan todos los workers y las
-    colas. Si Redis deja de responder, el cierre agota sus límites y el proceso sale con código 1 dentro del
-    presupuesto (probado en un subproceso con Redis pausado).
+  - F5.2: los comandos Redis de aplicación (lock, `PING`, `PUBLISH`) y las llamadas de productor fallan dentro de
+    `WORKER_REDIS_COMMAND_TIMEOUT_MS` (5 s, por debajo de la gracia), así que un trabajo que espera en ellos
+    termina solo (ver *Redis de aplicación del worker*). La conexión de BullMQ (`maxRetriesPerRequest: null`, cola
+    *offline*) puede seguir dejando comandos esperando sin límite; no se interrumpe antes de la fase 5 porque la
+    usan todos los workers y las colas. Si deja de responder, el cierre agota sus límites y el proceso sale con
+    código 1 dentro del presupuesto (probado en un subproceso con Redis pausado).
   - F5.3: una lectura de PostgREST puede reintentarse hasta 3 veces (1 + 2 + 4 s); un trabajo en ese punto no
     se cancela, agota la gracia y se cierra forzado.
   - F5.4: las peticiones HTTP (Supabase, Gmail, Microsoft Graph) no reciben una señal de cancelación.

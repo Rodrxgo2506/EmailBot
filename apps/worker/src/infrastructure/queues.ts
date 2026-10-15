@@ -14,6 +14,7 @@ import {
 import { Queue } from "bullmq";
 import type { Redis } from "ioredis";
 import type { JobProducer } from "../pipeline/ports.js";
+import { DEFAULT_REDIS_COMMAND_TIMEOUT_MS, withRedisDeadline } from "./app-redis.js";
 
 export interface WorkerQueues {
   emailEvents: Queue<EmailEventJob>;
@@ -25,7 +26,16 @@ export interface WorkerQueues {
   close(): Promise<void>;
 }
 
-export function createWorkerQueues(connection: Redis): WorkerQueues {
+/**
+ * F5.2: the queues use BullMQ's connection (unchanged: no command timeout, offline queue); every producer call is
+ * bounded by `producerTimeoutMs` (withRedisDeadline): past it the job gets an error and is retried, while the
+ * commands may still run once Redis answers. That is safe because every producer is idempotent: deterministic
+ * job ids (processing, notification, watch) and coalesced syncs (a repeated SYNC_ACCOUNT is coalesced or
+ * equivalent). The job schedulers (index.ts initialization) are not bounded: the worker waits for Redis there.
+ */
+export function createWorkerQueues(connection: Redis, options: { producerTimeoutMs?: number } = {}): WorkerQueues {
+  const producerTimeoutMs = options.producerTimeoutMs ?? DEFAULT_REDIS_COMMAND_TIMEOUT_MS;
+  const bounded = <T>(operation: string, work: () => Promise<T>) => withRedisDeadline(operation, producerTimeoutMs, work);
   const emailEvents = new Queue<EmailEventJob>(QUEUE_NAMES.emailEvents, { connection });
   const emailProcessing = new Queue<EmailProcessingJob>(QUEUE_NAMES.emailProcessing, { connection });
   const notifications = new Queue<NotificationJob>(QUEUE_NAMES.notifications, { connection });
@@ -38,24 +48,28 @@ export function createWorkerQueues(connection: Redis): WorkerQueues {
       async enqueueProcessing(job, options) {
         // Deterministic id: the same provider message is never queued twice
         // while a job for it is pending or retained.
-        await emailProcessing.add("process-email", job, {
-          ...DEFAULT_JOB_OPTIONS,
-          jobId: options?.jobId ?? emailProcessingJobId(job.emailAccountId, job.providerMessageId)
-        });
+        await bounded("enqueue processing", () =>
+          emailProcessing.add("process-email", job, {
+            ...DEFAULT_JOB_OPTIONS,
+            jobId: options?.jobId ?? emailProcessingJobId(job.emailAccountId, job.providerMessageId)
+          })
+        );
       },
       async enqueueNotification(job) {
         // Deterministic id: a resumed/retried email does not notify twice while the job is retained.
-        await notifications.add("notify", job, { ...DEFAULT_JOB_OPTIONS, attempts: 3, jobId: notificationJobId(job) });
+        await bounded("enqueue notification", () => notifications.add("notify", job, { ...DEFAULT_JOB_OPTIONS, attempts: 3, jobId: notificationJobId(job) }));
       }
     },
     async enqueueSync(account, reason = "POLL") {
-      await addCoalescedSync(emailEvents as never, account, reason);
+      await bounded("enqueue sync", () => addCoalescedSync(emailEvents as never, account, reason));
     },
     async enqueueWatch(account) {
-      await emailEvents.add(
-        "WATCH_ACCOUNT",
-        { type: "WATCH_ACCOUNT", emailAccountId: account.id, organizationId: account.organizationId },
-        { ...COALESCED_JOB_OPTIONS, jobId: watchAccountJobId(account.id) }
+      await bounded("enqueue watch", () =>
+        emailEvents.add(
+          "WATCH_ACCOUNT",
+          { type: "WATCH_ACCOUNT", emailAccountId: account.id, organizationId: account.organizationId },
+          { ...COALESCED_JOB_OPTIONS, jobId: watchAccountJobId(account.id) }
+        )
       );
     },
     async close() {

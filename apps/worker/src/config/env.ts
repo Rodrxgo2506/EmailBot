@@ -1,6 +1,7 @@
 import { encryptionKeyEnv, EnvValidationError, graphLifecycleUrl, optionalEnv, parseEnv, type OAuthClientConfig } from "@emailbot/shared";
 import { productionUrlProblem, PUBLIC_URL, REDIS_URL } from "@emailbot/validation";
 import { z } from "zod";
+import { DEFAULT_REDIS_COMMAND_TIMEOUT_MS, MAX_REDIS_COMMAND_TIMEOUT_MS, MIN_REDIS_COMMAND_TIMEOUT_MS } from "../infrastructure/app-redis.js";
 import { DEFAULT_SHUTDOWN_TIMEOUT_MS, MIN_SHUTDOWN_TIMEOUT_MS } from "../infrastructure/shutdown.js";
 
 const envSchema = z.object({
@@ -76,6 +77,13 @@ const envSchema = z.object({
    * deploy/render/render.yaml; the value applied to the service is not verified).
    */
   WORKER_SHUTDOWN_TIMEOUT_MS: z.coerce.number().int().min(MIN_SHUTDOWN_TIMEOUT_MS).max(600_000).default(DEFAULT_SHUTDOWN_TIMEOUT_MS),
+  /** F5.2: limit of each application Redis command (sync lock, health PING, realtime) and queue producer call. */
+  WORKER_REDIS_COMMAND_TIMEOUT_MS: z.coerce
+    .number()
+    .int()
+    .min(MIN_REDIS_COMMAND_TIMEOUT_MS)
+    .max(MAX_REDIS_COMMAND_TIMEOUT_MS)
+    .default(DEFAULT_REDIS_COMMAND_TIMEOUT_MS),
   SENTRY_DSN: optionalEnv(z.url())
 }).superRefine((env, ctx) => {
   const issue = (path: string, message: string) => ctx.addIssue({ code: "custom", path: [path], message });
@@ -139,6 +147,8 @@ export interface WorkerConfig {
   maxAttachmentBytes: number;
   /** F5.1: total shutdown budget (ms), see infrastructure/shutdown.ts. */
   shutdownTimeoutMs: number;
+  /** F5.2: application Redis command / queue producer limit (ms), see infrastructure/app-redis.ts. */
+  redisCommandTimeoutMs: number;
   /** null = health endpoint disabled. */
   health: { port: number; host: string } | null;
   sentryDsn: string | null;
@@ -215,6 +225,7 @@ export function loadWorkerConfig(source: NodeJS.ProcessEnv = process.env): Worke
       : null,
     sentryDsn: env.SENTRY_DSN ?? null,
     shutdownTimeoutMs: env.WORKER_SHUTDOWN_TIMEOUT_MS,
+    redisCommandTimeoutMs: env.WORKER_REDIS_COMMAND_TIMEOUT_MS,
     // Not read from the environment on purpose (see WorkerConfig.imapSyncEnabled).
     imapSyncEnabled: false
   };

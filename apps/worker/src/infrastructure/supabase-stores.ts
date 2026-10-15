@@ -1,7 +1,7 @@
 import type { EmailRuleRow } from "@emailbot/rules-engine";
 import { REALTIME_REDIS_CHANNEL } from "@emailbot/types";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import type { Redis } from "ioredis";
+import type { AppRedis } from "./app-redis.js";
 import type {
   AccountStore,
   AttachmentStorage,
@@ -589,7 +589,17 @@ export function createAttachmentStorage(db: SupabaseClient): AttachmentStorage {
   };
 }
 
-export function createRealtimePublisher(redis: Redis): RealtimePublisher {
+/** The one Redis command the publisher needs (an ioredis client, or index.ts's bounded application client). */
+export interface RealtimeRedis {
+  publish(channel: string, message: string): Promise<number>;
+}
+
+/** F5.2: publishing on a bounded application client (index.ts); a failure or timeout rejects (never a success). */
+export function createAppRealtimePublisher(app: AppRedis): RealtimePublisher {
+  return createRealtimePublisher({ publish: (channel, message) => app.run("realtime publish", (redis) => redis.publish(channel, message)) });
+}
+
+export function createRealtimePublisher(redis: RealtimeRedis): RealtimePublisher {
   return {
     async publish(event) {
       await redis.publish(REALTIME_REDIS_CHANNEL, JSON.stringify(event));
