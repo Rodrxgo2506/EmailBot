@@ -201,11 +201,17 @@ describe("organization plan (Commercial V1)", () => {
 });
 
 describe("Mi plan: plans above the current one (catalog GET /api/plans; nothing is charged)", () => {
+  /** The same overview, with the subscription paid by card (Culqi): nothing to move to card payments. */
+  const paidByCard = (overview: OrganizationPlanOverview): OrganizationPlanOverview => ({
+    ...overview,
+    subscription: overview.subscription ? { ...overview.subscription, paymentMethod: "CULQI" } : null
+  });
   const overviewFor = (plan: "PRO" | "BUSINESS"): OrganizationPlanOverview => {
-    const base = basicOverview({}, "BASIC");
+    const base = paidByCard(basicOverview({}, "BASIC"));
     const entry = PLAN_CATALOG.find((item) => item.code === plan);
     return {
       ...base,
+      subscription: base.subscription ? { ...base.subscription, plan } : null,
       entitlements: { ...base.entitlements, plan, effectivePlan: plan, access: "SUBSCRIPTION", limits: entry!.limits, features: entry!.features }
     };
   };
@@ -215,9 +221,9 @@ describe("Mi plan: plans above the current one (catalog GET /api/plans; nothing 
       .map((group) => group.getAttribute("aria-label"))
       .filter((label) => label?.startsWith("Plan "));
 
-  it("Básico: offers Pro and Business with what each adds", async () => {
+  it("Básico paid by card: offers only Pro and Business with what each adds (Básico is not offered again)", async () => {
     currentOrganization = { ...organization, plan: "BASIC" };
-    planOverview = basicOverview();
+    planOverview = paidByCard(basicOverview());
     renderSettings();
     expect(await screen.findByRole("heading", { name: "Mi plan" })).toBeInTheDocument();
     expect(await screen.findByRole("heading", { name: "Mejorar plan" })).toBeInTheDocument();
@@ -228,6 +234,37 @@ describe("Mi plan: plans above the current one (catalog GET /api/plans; nothing 
     expect(pro).toHaveTextContent("Portal de clientes");
     expect(screen.getByText("S/ 39.90")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Comparar planes" })).toHaveAttribute("href", "/planes");
+    expect(screen.queryByRole("button", { name: /con tarjeta/ })).not.toBeInTheDocument();
+  });
+
+  it("legacy FREE organization on Básico: Básico can be paid by card (not an upgrade), Pro and Business stay upgrades", async () => {
+    planOverview = basicOverview({}, "FREE");
+    renderSettings();
+    expect(await screen.findByRole("heading", { name: "Pagar con tarjeta o mejorar" })).toBeInTheDocument();
+    expect(upgrades()).toEqual(["Plan Básico", "Plan Pro", "Plan Business"]);
+    const basic = screen.getByRole("group", { name: "Plan Básico" });
+    expect(basic).toHaveTextContent("Plan actual");
+    expect(screen.getByRole("list", { name: "Qué obtienes con Básico" })).toHaveTextContent("Los mismos límites y funciones de tu plan");
+    expect(screen.getByRole("button", { name: "Pagar Básico con tarjeta" })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "Mejorar a Básico" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Mejorar a Pro" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Mejorar a Business" })).toBeEnabled();
+  });
+
+  it("Básico paid manually (transfer): it can move to card payments", async () => {
+    currentOrganization = { ...organization, plan: "BASIC" };
+    planOverview = basicOverview();
+    renderSettings();
+    expect(await screen.findByRole("button", { name: "Pagar Básico con tarjeta" })).toBeEnabled();
+    expect(upgrades()).toEqual(["Plan Básico", "Plan Pro", "Plan Business"]);
+  });
+
+  it("paying the current plan by card opens the same dialog as any plan (no request without billing enabled)", async () => {
+    planOverview = basicOverview({}, "FREE");
+    renderSettings();
+    fireEvent.click(await screen.findByRole("button", { name: "Pagar Básico con tarjeta" }));
+    expect(await screen.findByRole("dialog", { name: "Contratación en línea próximamente" })).toBeInTheDocument();
+    expect(post).not.toHaveBeenCalled();
   });
 
   it("Pro: shows the Pro plan and offers only Business", async () => {

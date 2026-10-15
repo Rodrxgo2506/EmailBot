@@ -3,6 +3,7 @@ import { Badge, Card, CardContent, CardDescription, CardHeader, CardTitle, Error
 import { SkeletonRows } from "@/components/ui/feedback";
 import { getErrorMessage } from "@/lib/errors";
 import { PlanUpgradeCard } from "@/features/plans/plan-upgrade-card";
+import { canPayCurrentPlanByCard } from "@/features/billing/checkout-policy";
 import { cn } from "@/lib/utils";
 import { usePlanOverview } from "./api";
 import { hasAccess, planDescription, planFeatures, planTitle, planUsageRows } from "./plan-model";
@@ -11,6 +12,8 @@ import { hasAccess, planDescription, planFeatures, planTitle, planUsageRows } fr
 export function MyPlanSection() {
   const overview = usePlanOverview();
   const currentPlan = overview.data && hasAccess(overview.data) ? overview.data.entitlements.effectivePlan : null;
+  // Legacy or manually paid plans can move to card payments (same rule as the API checkout policy).
+  const canPayCurrentByCard = Boolean(currentPlan && overview.data && canPayCurrentPlanByCard(overview.data.entitlements.access, overview.data.subscription?.paymentMethod));
 
   return (
     <section id="mi-plan" aria-labelledby="mi-plan-title" className="scroll-mt-20 space-y-4">
@@ -18,7 +21,7 @@ export function MyPlanSection() {
         Mi plan
       </h2>
       <PlanCard />
-      {overview.data ? <PlanUpgradeCard currentPlan={currentPlan} /> : null}
+      {overview.data ? <PlanUpgradeCard currentPlan={currentPlan} canPayCurrentByCard={canPayCurrentByCard} /> : null}
     </section>
   );
 }

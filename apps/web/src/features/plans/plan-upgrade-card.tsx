@@ -8,14 +8,18 @@ import { SkeletonRows } from "@/components/ui/feedback";
 import { getErrorMessage } from "@/lib/errors";
 import { usePlanCatalog } from "./api";
 import { ChoosePlanDialog } from "@/features/billing/choose-plan-dialog";
-import { formatPrice, monthlyPrice, upgradeBenefits, upgradeOptions } from "./plans-model";
+import { formatPrice, monthlyPrice, myPlanOptions, upgradeBenefits } from "./plans-model";
+
+/** What paying the current plan by card keeps and changes (same plan, same limits). */
+const PAY_BY_CARD_BENEFITS = ["Los mismos límites y funciones de tu plan", "Pago con tarjeta y renovación automática"];
 
 /**
  * Settings > Mi plan: the plans above the organization's current one and what
- * each adds. Choosing one only shows the "Próximamente" notice (no payment).
+ * each adds, plus the current plan itself when it can be moved to card payments
+ * (legacy or paid manually). Each option opens ChoosePlanDialog (the same checkout).
  * currentPlan null = no commercial access (every plan is offered).
  */
-export function PlanUpgradeCard({ currentPlan }: { currentPlan: CommercialPlan | null }) {
+export function PlanUpgradeCard({ currentPlan, canPayCurrentByCard = false }: { currentPlan: CommercialPlan | null; canPayCurrentByCard?: boolean }) {
   const catalog = usePlanCatalog();
   const [choosing, setChoosing] = useState<PlanCatalogEntry | null>(null);
 
@@ -23,13 +27,14 @@ export function PlanUpgradeCard({ currentPlan }: { currentPlan: CommercialPlan |
   if (catalog.error) return <ErrorMessage error={new Error(getErrorMessage(catalog.error))} />;
 
   const current = catalog.data.find((plan) => plan.code === currentPlan) ?? null;
-  const options = upgradeOptions(catalog.data, currentPlan);
+  const options = myPlanOptions(catalog.data, currentPlan, canPayCurrentByCard);
+  const payingByCard = options.some((option) => option.action === "PAY_BY_CARD");
 
   return (
     <Card>
       <CardHeader className="flex-row items-start justify-between gap-4">
         <div className="grid gap-1.5">
-          <CardTitle>{current ? "Mejorar plan" : "Planes disponibles"}</CardTitle>
+          <CardTitle>{!current ? "Planes disponibles" : payingByCard ? "Pagar con tarjeta o mejorar" : "Mejorar plan"}</CardTitle>
           <CardDescription>
             {options.length === 0 ? "Actualmente tienes el plan más completo." : "Lo que obtienes al cambiar de plan. Precios mensuales, IGV incluido."}
           </CardDescription>
@@ -40,13 +45,17 @@ export function PlanUpgradeCard({ currentPlan }: { currentPlan: CommercialPlan |
       </CardHeader>
       {options.length > 0 ? (
         <CardContent className="grid gap-4 md:grid-cols-2">
-          {options.map((plan) => {
+          {options.map(({ plan, action, label }) => {
             const price = monthlyPrice(plan);
+            const benefits = action === "PAY_BY_CARD" ? PAY_BY_CARD_BENEFITS : upgradeBenefits(current, plan);
             return (
               <div key={plan.code} role="group" aria-label={`Plan ${plan.name}`} className="flex flex-col gap-3 rounded-md border p-4">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <span className="font-semibold">{plan.name}</span>
-                  {plan.badge ? <Badge>{plan.badge}</Badge> : null}
+                  <div className="flex flex-wrap gap-1.5">
+                    {action === "PAY_BY_CARD" ? <Badge variant="success">Plan actual</Badge> : null}
+                    {plan.badge ? <Badge>{plan.badge}</Badge> : null}
+                  </div>
                 </div>
                 {price ? (
                   <p className="text-sm">
@@ -54,15 +63,15 @@ export function PlanUpgradeCard({ currentPlan }: { currentPlan: CommercialPlan |
                   </p>
                 ) : null}
                 <ul className="grid gap-1.5 text-sm" aria-label={`Qué obtienes con ${plan.name}`}>
-                  {upgradeBenefits(current, plan).map((benefit) => (
+                  {benefits.map((benefit) => (
                     <li key={benefit} className="flex items-start gap-2">
                       <Check className="mt-0.5 size-4 shrink-0 text-primary" aria-hidden />
                       {benefit}
                     </li>
                   ))}
                 </ul>
-                <Button className="mt-auto" variant={plan.badge ? "default" : "outline"} onClick={() => setChoosing(plan)}>
-                  {current ? `Mejorar a ${plan.name}` : `Elegir ${plan.name}`}
+                <Button className="mt-auto" variant={plan.badge || action === "PAY_BY_CARD" ? "default" : "outline"} onClick={() => setChoosing(plan)}>
+                  {label}
                 </Button>
               </div>
             );
