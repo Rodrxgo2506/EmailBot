@@ -374,9 +374,9 @@ permisos de Render.
 
 - **Compatibilidad** [local]: depende de `plan_catalog`, `plan_entitlements`, `organization_entitlements()`,
   `email_accounts` y del patrón de `20261007160000_email_account_oauth_connect.sql`, presentes en `0e7a0b8`. Es
-  posterior a la última aplicada en producción (`20261007170000`). Las migraciones de Culqi pendientes en otra rama
-  (`20261007150000`, `20261007150100`) son **anteriores** a `20261007170000` y necesitarán su propio análisis de
-  orden; no afectan a E1.
+  posterior a la última aplicada en producción (`20261007170000`). Las migraciones de Culqi se renumeraron a
+  `20261016120000`–`20261016120300` (mismo contenido), **posteriores** a M1 (`20261015120000`): se aplican después
+  de E1 y M1 y no las afectan.
 - **Sin cambios destructivos de datos** [local]: inserta 3 filas de `plan_entitlements` (falla si ya existieran:
   no es idempotente), crea un *trigger* y una función. No borra ni modifica filas. Sí cambia privilegios:
   `authenticated` pierde `INSERT` y `UPDATE` sobre `email_accounts` salvo `UPDATE (status, display_name)`. Revisado

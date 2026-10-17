@@ -3,8 +3,8 @@ import { createTestDatabase, type TestDatabase, type Tx } from "../src/harness.j
 import { count, one, seedTwoTenants, type Fixtures } from "./fixtures.js";
 
 /*
- * Commercial V1 phase 2, Culqi SANDBOX (20261007130000_culqi_billing_sandbox.sql
- * + 20261007140000_culqi_billing_verified_charges.sql). The provider side
+ * Commercial V1 phase 2, Culqi SANDBOX (20261016120000_culqi_billing_sandbox.sql
+ * + 20261016120100_culqi_billing_verified_charges.sql). The provider side
  * (billing_*) never grants access by itself: only a Culqi CHARGE verified by
  * the worker is applied, through private.activate_subscription (origin
  * CULQI), once per charge id; stale charges never lower a plan or shorten a
@@ -389,7 +389,7 @@ describe("declined charges and provider-side states (access unchanged)", () => {
   });
 });
 
-describe("REVIEW_REQUIRED: a checkout whose charge stayed unconfirmed (20261007150100)", () => {
+describe("REVIEW_REQUIRED: a checkout whose charge stayed unconfirmed (20261016120300)", () => {
   const markReview = (billingId: string, code = "CULQI_UNCONFIRMED_REVIEW") =>
     t.asService((tx) => one<{ result: string }>(tx, "select public.billing_mark_culqi_review_required($1, $2, 'req-review') as result", [billingId, code])).then((row) => row.result);
   /** What the worker records on every unconfirmed reconciliation (direct update, service_role). */

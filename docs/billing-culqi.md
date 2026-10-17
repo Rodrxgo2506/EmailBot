@@ -65,7 +65,11 @@ token + plan + periodo + T&C ────► POST /api/billing/subscriptions
 `subscription.creation.succeeded` ni el estado 3 «Activa» de Culqi activan por sí mismos. Ver [Verificación](#verificación-de-suscripción-y-cargo).
 - EmailBot nunca recibe ni guarda número de tarjeta, CVV ni PAN: Culqi tokeniza en su iframe y guarda la tarjeta.
 
-## Modelo de datos (migración `20261007130000_culqi_billing_sandbox.sql`)
+## Modelo de datos (migración `20261016120000_culqi_billing_sandbox.sql`)
+
+Las cuatro migraciones de Culqi se renumeraron de `20261007130000`–`20261007150100` a `20261016120000`–
+`20261016120300` (mismos nombres, orden y contenido SQL) para aplicarse después de IMAP M1 (`20261015120000`). Una
+base que ya tenga registradas las versiones antiguas no debe volver a aplicarlas: su historial se ajusta aparte.
 
 | Tabla | Para qué | Claves |
 |---|---|---|
@@ -77,14 +81,14 @@ token + plan + periodo + T&C ────► POST /api/billing/subscriptions
 
 - Los ids tienen el formato de Culqi y deben ser del mismo entorno que la fila (`cus_test_…` en una fila `test`): un
   id `live` nunca entra en una fila de prueba.
-- Migración `20261007140000_culqi_billing_verified_charges.sql` (revisión F1–F5):
+- Migración `20261016120100_culqi_billing_verified_charges.sql` (revisión F1–F5):
   - `external_customer_id` admite `NULL`: el checkout se reserva **antes** de crear el cliente en Culqi;
   - `billing_subscriptions_customer_before_subscription`: no hay suscripción de Culqi sin cliente;
   - `payment_events_external_payment_unique`: un cargo se registra una sola vez;
   - `billing_activate_culqi_subscription` exige un id de cargo `chr_(test|live)_…` del mismo entorno y que la clave
     de activación **sea** ese id; si no, error y nada cambia.
-- Migraciones `20261007150000` (valor `REVIEW_REQUIRED` del enum, en su propio archivo) y
-  `20261007150100_culqi_billing_review_required.sql`: columnas de traza (`review_required_at`, `last_reconciled_at`,
+- Migraciones `20261016120200` (valor `REVIEW_REQUIRED` del enum, en su propio archivo) y
+  `20261016120300_culqi_billing_review_required.sql`: columnas de traza (`review_required_at`, `last_reconciled_at`,
   `last_charge_id`, `last_outcome_type`, `last_outcome_code`, `last_decline_code`), transiciones, la función
   `billing_mark_culqi_review_required` (solo `service_role`) y la guarda `CONFLICT` en la activación.
 - RLS: ningún miembro accede por la Data API. `service_role` (API + worker): `SELECT / INSERT / UPDATE`, nunca `DELETE`.
