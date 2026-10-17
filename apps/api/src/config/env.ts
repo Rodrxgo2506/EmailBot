@@ -141,8 +141,9 @@ const envSchema = z
     CULQI_PUBLIC_KEY: optionalEnv(z.string().min(1)),
     CULQI_API_URL: optionalEnv(z.url()),
     /**
-     * Optional shared secret appended to the webhook URL configured in CulqiPanel (?token=...). The Culqi
-     * documentation does not describe a webhook signature; every event is re-read from the Culqi API anyway.
+     * Shared secret appended to the webhook URL configured in CulqiPanel (?token=...). REQUIRED whenever Culqi
+     * is configured: the Culqi documentation does not describe a webhook signature, so without it anyone could
+     * make the API record events and queue Culqi reads (every event is still re-read from the Culqi API).
      */
     CULQI_WEBHOOK_TOKEN: optionalEnv(z.string().min(32, "must contain at least 32 characters"))
   })
@@ -160,6 +161,10 @@ const envSchema = z
     if (env.CULQI_PUBLIC_KEY !== undefined) {
       const problem = culqiKeyProblem(env.CULQI_PUBLIC_KEY, "public");
       if (problem) issue("CULQI_PUBLIC_KEY", problem);
+    }
+    // Every environment: an enabled Culqi webhook is never unauthenticated.
+    if ((env.CULQI_SECRET_KEY !== undefined || env.CULQI_PUBLIC_KEY !== undefined) && env.CULQI_WEBHOOK_TOKEN === undefined) {
+      issue("CULQI_WEBHOOK_TOKEN", "is required when Culqi is configured (CULQI_SECRET_KEY / CULQI_PUBLIC_KEY)");
     }
 
     // Every environment: CORS matches the Origin header by exact string, so
@@ -286,7 +291,7 @@ export interface ApiConfig {
   syncHealthStaleMinutes: number;
   sentryDsn: string | null;
   /** Commercial V1 phase 2: Culqi sandbox; null = card checkout disabled. */
-  culqi: { secretKey: string; publicKey: string; apiUrl: string; webhookToken: string | null } | null;
+  culqi: { secretKey: string; publicKey: string; apiUrl: string; webhookToken: string } | null;
 }
 
 function oauthConfig(
@@ -372,12 +377,13 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): ApiConfig {
     syncHealthStaleMinutes: env.SYNC_HEALTH_STALE_MINUTES,
     sentryDsn: env.SENTRY_DSN ?? null,
     culqi:
-      env.CULQI_SECRET_KEY && env.CULQI_PUBLIC_KEY
+      // The schema refuses keys without CULQI_WEBHOOK_TOKEN, so configured keys always come with it.
+      env.CULQI_SECRET_KEY && env.CULQI_PUBLIC_KEY && env.CULQI_WEBHOOK_TOKEN
         ? {
             secretKey: env.CULQI_SECRET_KEY,
             publicKey: env.CULQI_PUBLIC_KEY,
             apiUrl: env.CULQI_API_URL ?? CULQI_API_URL,
-            webhookToken: env.CULQI_WEBHOOK_TOKEN ?? null
+            webhookToken: env.CULQI_WEBHOOK_TOKEN
           }
         : null
   };

@@ -60,7 +60,7 @@ rate limiting. No usarlo como health check de Render (igual que `/health/ready`)
 | GET | `/api/billing/checkout?plan&billingPeriod` | `organization:update` — precio del catálogo + llave **pública** de Culqi; valida upgrade, mapeo y checkout pendiente ([detalle](billing-culqi.md)) |
 | POST | `/api/billing/subscriptions` | `organization:update` — `{ plan, billingPeriod, tokenId, acceptTerms: true, customer }` (estricto: nunca importe, moneda ni datos de tarjeta) → `202` `PENDING`; el plan se activa al confirmarse el pago; 10 req / 10 min por IP |
 | GET | `/api/billing/subscriptions/current` | miembro — última suscripción de Culqi de la organización (estado) |
-| POST | `/webhooks/culqi` | Culqi — solo el `id` del evento (se relee desde Culqi); `?token=` si `CULQI_WEBHOOK_TOKEN`; `404` sin Culqi configurado |
+| POST | `/webhooks/culqi` | Culqi — solo el `id` del evento (se relee desde Culqi); `?token=` obligatorio (`CULQI_WEBHOOK_TOKEN`; ausente o incorrecto → `401`); `404` sin Culqi configurado |
 
 **Planes y suscripción (Comercial V1 / V1.1, [detalle](commercial-plans.md))**: EmailBot es de pago. Sin una suscripción
 activa (ni acceso de legado) toda acción comercial responde `403 SUBSCRIPTION_REQUIRED` (`details: { subscriptionStatus }`).

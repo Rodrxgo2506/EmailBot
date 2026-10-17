@@ -221,7 +221,9 @@ comercial pendiente.
 `POST /webhooks/culqi` (fuera de `/api`, como los webhooks de Gmail y Microsoft):
 
 1. Si Culqi no está configurado → `404`.
-2. Token opcional en la URL (`?token=` = `CULQI_WEBHOOK_TOKEN`, comparación en tiempo constante).
+2. Token obligatorio en la URL (`?token=` = `CULQI_WEBHOOK_TOKEN`, comparación en tiempo constante). Ausente o
+   incorrecto → `401`, sin registrar ni encolar nada. El token nunca aparece en los logs (la URL se registra con
+   `token=[REDACTED]`).
 3. Cuerpo: solo se exige `id` con formato `evt_(test|live)_…`. Malformado → `400`. Evento de otro entorno → `200`
    sin registrar.
 4. Registra el evento una vez (`billing_webhook_events`).
@@ -349,7 +351,7 @@ Sin cargo pagado verificado, la fila sigue `PENDING` (el evento queda `PROCESSED
 | `CULQI_SECRET_KEY` | API y worker | solo `sk_test_` en esta fase; nunca en `VITE_*` |
 | `CULQI_PUBLIC_KEY` | API | solo `pk_test_`; la API la entrega al navegador en `GET /api/billing/checkout` (sin variable `VITE_*` ni rebuild) |
 | `CULQI_API_URL` | API y worker | opcional (por defecto `https://api.culqi.com`) |
-| `CULQI_WEBHOOK_TOKEN` | API | opcional, 32+ caracteres; añadir `?token=…` a la URL del webhook en CulqiPanel |
+| `CULQI_WEBHOOK_TOKEN` | API | **obligatorio con las llaves**, 32+ caracteres aleatorios; añadir `?token=…` a la URL del webhook en CulqiPanel. Sin él, la API no arranca |
 
 Las dos llaves de la API van juntas o ninguna. Una llave `live` impide arrancar. Los mensajes de error nunca muestran
 la llave.
@@ -369,7 +371,7 @@ Nada en `connect-src`: la tarjeta y el token viajan dentro del iframe de Culqi. 
 2. En el `.env` local (raíz):
    - `CULQI_SECRET_KEY=sk_test_…`
    - `CULQI_PUBLIC_KEY=pk_test_…`
-   - opcional: `CULQI_WEBHOOK_TOKEN=<32+ caracteres aleatorios>`.
+   - `CULQI_WEBHOOK_TOKEN=<32+ caracteres aleatorios>` (obligatorio: sin él la API no arranca con las llaves).
 
    No configurar nada de esto en Render en esta fase.
 3. Aplicar la migración **en la BD local**:
