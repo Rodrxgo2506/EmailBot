@@ -224,6 +224,8 @@ comercial pendiente.
 2. Token obligatorio en la URL (`?token=` = `CULQI_WEBHOOK_TOKEN`, comparación en tiempo constante). Ausente o
    incorrecto → `401`, sin registrar ni encolar nada. El token nunca aparece en los logs (la URL se registra con
    `token=[REDACTED]`).
+   Fastify analiza el cuerpo JSON antes de ejecutar el handler: sin token, un JSON inválido responde `400` y uno de
+   más de 1 MiB `413`. Aun así, sin un token válido el evento nunca se valida, registra ni encola.
 3. Cuerpo: solo se exige `id` con formato `evt_(test|live)_…`. Malformado → `400`. Evento de otro entorno → `200`
    sin registrar.
 4. Registra el evento una vez (`billing_webhook_events`).

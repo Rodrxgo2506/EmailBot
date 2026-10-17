@@ -521,7 +521,9 @@ describe("POST /webhooks/culqi", () => {
     expect(ctx.queue.enqueueEmailEvent).not.toHaveBeenCalled();
   });
 
-  it("token missing -> 401 before reading the body; nothing recorded or queued", async () => {
+  // Fastify may parse the JSON body before the handler runs; the token check comes first in the handler, so the
+  // event is never validated, recorded or queued without a valid token.
+  it("token missing -> 401 before the event is validated, recorded or queued", async () => {
     const ctx = await accepting();
     for (const query of ["", "?token=", "?other=1"]) {
       const response = await post(ctx, { id: EVT }, query);
