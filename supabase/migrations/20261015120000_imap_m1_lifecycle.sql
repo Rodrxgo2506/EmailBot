@@ -39,6 +39,51 @@
 
 
 -- ============================================================
+-- 0. Precondition: IMAP E1 (20261014120000_imap_e1_security.sql) applied
+--
+-- M1 replaces E1's connect_imap_email_account and relies on E1's member
+-- protections. Checked on what E1 creates (function, enabled trigger, least
+-- privilege of authenticated), never on the migration history or on SQL text,
+-- so it holds with every runner (Supabase CLI, psql, the PGlite harness).
+-- First statement: without E1 nothing below runs, whatever the transaction mode.
+-- ============================================================
+
+do $$
+declare
+  missing text[] := '{}';
+  guard_fn regprocedure := to_regprocedure('private.guard_email_account_member_update()');
+begin
+  if to_regprocedure('public.connect_imap_email_account(uuid, text, text, text, text, integer, text, text, text)') is null then
+    missing := missing || 'function public.connect_imap_email_account(uuid, text, text, text, text, integer, text, text, text)'::text;
+  end if;
+
+  if guard_fn is null or not exists (
+    select 1
+    from pg_catalog.pg_trigger t
+    where t.tgrelid = 'public.email_accounts'::regclass
+      and t.tgname = 'email_accounts_guard_member_update'
+      and not t.tgisinternal
+      and t.tgfoid = guard_fn
+      and t.tgenabled in ('O', 'A')
+  ) then
+    missing := missing || 'enabled trigger email_accounts_guard_member_update (private.guard_email_account_member_update)'::text;
+  end if;
+
+  -- Before E1, authenticated holds column-level INSERT and UPDATE grants: checked at column level.
+  if pg_catalog.has_any_column_privilege('authenticated', 'public.email_accounts', 'INSERT')
+     or pg_catalog.has_column_privilege('authenticated', 'public.email_accounts', 'provider_metadata', 'UPDATE') then
+    missing := missing || 'least privilege of authenticated on public.email_accounts (no INSERT, no UPDATE of provider_metadata)'::text;
+  end if;
+
+  if pg_catalog.cardinality(missing) > 0 then
+    raise exception 'IMAP M1 requires IMAP E1 (20261014120000_imap_e1_security) to be applied first; missing: %',
+      pg_catalog.array_to_string(missing, '; ');
+  end if;
+end;
+$$;
+
+
+-- ============================================================
 -- 1. public.connect_imap_email_account (same signature, PAUSED + IMAP_ACTIVATION_PENDING)
 -- ============================================================
 
