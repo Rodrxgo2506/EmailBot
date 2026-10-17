@@ -250,19 +250,19 @@ export function billingRoutes(deps: AppDeps) {
   };
 }
 
-/** POST /webhooks/culqi: authenticates (optional URL token), deduplicates, enqueues. Never processes inline. */
+/** POST /webhooks/culqi: authenticates (mandatory URL token), deduplicates, enqueues. Never processes inline. */
 export function culqiWebhookRoutes(deps: AppDeps) {
   return async (app: FastifyInstance) => {
     app.post("/webhooks/culqi", { config: { rateLimit: RATE_LIMITS.webhook } }, async (request, reply) => {
       const culqi = deps.config.culqi;
       if (!culqi) throw notFound("Route");
 
-      if (culqi.webhookToken) {
-        const token = (request.query as Record<string, unknown> | undefined)?.token;
-        if (typeof token !== "string" || !safeEqual(token, culqi.webhookToken)) {
-          request.log.warn({ event: "billing.culqi.webhook_rejected", reason: "invalid_token" }, "Culqi webhook rejected");
-          throw unauthorized("Invalid webhook token");
-        }
+      // The configuration requires CULQI_WEBHOOK_TOKEN with the keys; an empty one still refuses (fail closed).
+      const token = (request.query as Record<string, unknown> | undefined)?.token;
+      if (!culqi.webhookToken || typeof token !== "string" || !safeEqual(token, culqi.webhookToken)) {
+        const reason = token === undefined ? "missing_token" : "invalid_token";
+        request.log.warn({ event: "billing.culqi.webhook_rejected", reason }, "Culqi webhook rejected");
+        throw unauthorized("Invalid webhook token");
       }
 
       const body = culqiWebhookBodySchema.safeParse(request.body);

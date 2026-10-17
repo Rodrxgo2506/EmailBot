@@ -1,5 +1,7 @@
+import { randomBytes } from "node:crypto";
 import type { BillingSubscriptionSummary, CommercialPlan, OrganizationSubscriptionSummary } from "@emailbot/types";
 import { describe, expect, it, vi } from "vitest";
+import { buildApp } from "../app.js";
 import type { ApiConfig } from "../config/env.js";
 import { loadConfig } from "../config/env.js";
 import { decideCheckout } from "../modules/billing/policy.js";
@@ -16,7 +18,9 @@ import { entitlementsFor, noAccess } from "./plan-fixtures.js";
 
 const SECRET = "sk_test_SECRETkey1234567890";
 const PUBLIC = "pk_test_PUBLICkey123456";
-const CULQI: NonNullable<ApiConfig["culqi"]> = { secretKey: SECRET, publicKey: PUBLIC, apiUrl: "https://culqi.test", webhookToken: null };
+// Random per run and never printed (no test name or message contains it): assertions only check its absence.
+const WEBHOOK_TOKEN = randomBytes(24).toString("base64url");
+const CULQI: NonNullable<ApiConfig["culqi"]> = { secretKey: SECRET, publicKey: PUBLIC, apiUrl: "https://culqi.test", webhookToken: WEBHOOK_TOKEN };
 const ORDER: Record<CommercialPlan, number> = { BASIC: 1, PRO: 2, BUSINESS: 3 };
 const PRICES: Record<CommercialPlan, { amount: string; cents: number }> = {
   BASIC: { amount: "19.90", cents: 1990 },
@@ -122,9 +126,36 @@ const subscribe = (ctx: Awaited<ReturnType<typeof setup>>, body: unknown = BODY)
 describe("configuration: sandbox keys only", () => {
   const base = { SUPABASE_URL: "http://127.0.0.1:54321", SUPABASE_ANON_KEY: "anon", SUPABASE_SERVICE_ROLE_KEY: "service", TOKEN_ENCRYPTION_KEY: Buffer.from(Array.from({ length: 32 }, (_, i) => i * 7 + 3)).toString("base64"), OAUTH_STATE_SECRET: "x".repeat(32) };
 
-  it("disabled by default; enabled with an sk_test_ / pk_test_ pair", () => {
+  it("disabled by default; enabled with an sk_test_ / pk_test_ pair and the webhook token", () => {
     expect(loadConfig(base).culqi).toBeNull();
-    expect(loadConfig({ ...base, CULQI_SECRET_KEY: SECRET, CULQI_PUBLIC_KEY: PUBLIC }).culqi).toMatchObject({ secretKey: SECRET, publicKey: PUBLIC, apiUrl: "https://api.culqi.com" });
+    const culqi = loadConfig({ ...base, CULQI_SECRET_KEY: SECRET, CULQI_PUBLIC_KEY: PUBLIC, CULQI_WEBHOOK_TOKEN: WEBHOOK_TOKEN }).culqi;
+    // Compared field by field so a failure diff never prints the token.
+    expect({ secretKey: culqi?.secretKey, publicKey: culqi?.publicKey, apiUrl: culqi?.apiUrl }).toEqual({ secretKey: SECRET, publicKey: PUBLIC, apiUrl: "https://api.culqi.com" });
+    expect(culqi?.webhookToken === WEBHOOK_TOKEN).toBe(true);
+  });
+
+  it("Culqi disabled: a webhook token without keys does not enable it", () => {
+    expect(loadConfig({ ...base, CULQI_WEBHOOK_TOKEN: WEBHOOK_TOKEN }).culqi).toBeNull();
+  });
+
+  it.each([
+    ["keys without CULQI_WEBHOOK_TOKEN", { CULQI_SECRET_KEY: SECRET, CULQI_PUBLIC_KEY: PUBLIC }, /CULQI_WEBHOOK_TOKEN: is required when Culqi is configured/],
+    ["a single key without CULQI_WEBHOOK_TOKEN", { CULQI_PUBLIC_KEY: PUBLIC }, /CULQI_WEBHOOK_TOKEN: is required when Culqi is configured/],
+    ["a CULQI_WEBHOOK_TOKEN shorter than 32 characters", { CULQI_SECRET_KEY: SECRET, CULQI_PUBLIC_KEY: PUBLIC, CULQI_WEBHOOK_TOKEN: "x".repeat(31) }, /CULQI_WEBHOOK_TOKEN: must contain at least 32 characters/]
+  ])("refuses %s", (_label, extra, message) => {
+    expect(() => loadConfig({ ...base, ...extra })).toThrow(message);
+  });
+
+  it("the configuration error never contains the webhook token", () => {
+    // Token present but the keys are invalid: the error names the variables only.
+    let text = "";
+    try {
+      loadConfig({ ...base, CULQI_SECRET_KEY: "sk_live_SECRETkey1234567890", CULQI_PUBLIC_KEY: PUBLIC, CULQI_WEBHOOK_TOKEN: WEBHOOK_TOKEN });
+    } catch (error) {
+      text = String(error instanceof Error ? error.message : error);
+    }
+    expect(text).toMatch(/CULQI_SECRET_KEY/);
+    expect(text.includes(WEBHOOK_TOKEN)).toBe(false);
   });
 
   it.each([
@@ -442,8 +473,20 @@ describe("POST /api/billing/subscriptions", () => {
 
 describe("POST /webhooks/culqi", () => {
   const EVT = "evt_test_0CjjdWhFpEAZlxlz";
-  const post = (ctx: Awaited<ReturnType<typeof setup>>, body: unknown, query = "") =>
+  const VALID = `?token=${encodeURIComponent(WEBHOOK_TOKEN)}`;
+  // Same length as the real token, random: never equal to it.
+  const WRONG = `?token=${encodeURIComponent(randomBytes(24).toString("base64url"))}`;
+  const post = (ctx: Awaited<ReturnType<typeof setup>>, body: unknown, query = VALID) =>
     ctx.app.inject({ method: "POST", url: `/webhooks/culqi${query}`, payload: body as Record<string, unknown> });
+  const accepting = async (culqi?: ApiConfig["culqi"]) => {
+    const ctx = await setup(culqi === undefined ? {} : { culqi });
+    ctx.billing.recordWebhookEvent.mockResolvedValue({ isNew: true, status: "RECEIVED", attempts: 0 });
+    return ctx;
+  };
+  const nothingRecorded = (ctx: Awaited<ReturnType<typeof setup>>) => {
+    expect(ctx.billing.recordWebhookEvent).not.toHaveBeenCalled();
+    expect(ctx.queue.enqueueEmailEvent).not.toHaveBeenCalled();
+  };
 
   it("valid event: recorded once and queued for the worker (only its id), 200", async () => {
     const ctx = await setup();
@@ -478,13 +521,67 @@ describe("POST /webhooks/culqi", () => {
     expect(ctx.queue.enqueueEmailEvent).not.toHaveBeenCalled();
   });
 
-  it("optional URL token (CULQI_WEBHOOK_TOKEN): required when configured", async () => {
-    const token = "t".repeat(40);
-    const ctx = await setup({ culqi: { ...CULQI, webhookToken: token } });
-    ctx.billing.recordWebhookEvent.mockResolvedValue({ isNew: true, status: "RECEIVED", attempts: 0 });
-    expect((await post(ctx, { id: EVT })).statusCode).toBe(401);
-    expect((await post(ctx, { id: EVT }, "?token=wrong")).statusCode).toBe(401);
-    expect((await post(ctx, { id: EVT }, `?token=${token}`)).statusCode).toBe(200);
+  // Fastify may parse the JSON body before the handler runs; the token check comes first in the handler, so the
+  // event is never validated, recorded or queued without a valid token.
+  it("token missing -> 401 before the event is validated, recorded or queued", async () => {
+    const ctx = await accepting();
+    for (const query of ["", "?token=", "?other=1"]) {
+      const response = await post(ctx, { id: EVT }, query);
+      expect(response.statusCode).toBe(401);
+      expect(response.body.includes(WEBHOOK_TOKEN)).toBe(false);
+    }
+    expect((await post(ctx, { type: "malformed" }, "")).statusCode).toBe(401);
+    nothingRecorded(ctx);
+  });
+
+  it("token wrong -> 401: another value, a prefix, a repeated parameter or different case; nothing recorded or queued", async () => {
+    const ctx = await accepting();
+    const prefix = `?token=${encodeURIComponent(WEBHOOK_TOKEN.slice(0, -1))}`;
+    const repeated = `${VALID}&token=${encodeURIComponent(WEBHOOK_TOKEN)}`;
+    const upper = `?token=${encodeURIComponent(WEBHOOK_TOKEN.toUpperCase())}`;
+    const queries = [WRONG, prefix, repeated, `${VALID}x`, ...(WEBHOOK_TOKEN.toUpperCase() === WEBHOOK_TOKEN ? [] : [upper])];
+    for (const query of queries) {
+      const response = await post(ctx, { id: EVT }, query);
+      expect(response.statusCode).toBe(401);
+      expect(response.body.includes(WEBHOOK_TOKEN)).toBe(false);
+    }
+    nothingRecorded(ctx);
+  });
+
+  it("token valid -> the event is recorded and queued (200)", async () => {
+    const ctx = await accepting();
+    expect((await post(ctx, { id: EVT }, VALID)).statusCode).toBe(200);
+    expect(ctx.billing.recordWebhookEvent).toHaveBeenCalledTimes(1);
+    expect(ctx.queue.enqueueEmailEvent).toHaveBeenCalledWith({ type: "CULQI_EVENT", eventId: EVT }, { jobId: `culqi-evt-${EVT}` });
+  });
+
+  it("fail closed: a configuration without a token (empty) refuses every request, even ?token= empty", async () => {
+    const ctx = await accepting({ ...CULQI, webhookToken: "" });
+    for (const query of ["", "?token=", VALID]) expect((await post(ctx, { id: EVT }, query)).statusCode).toBe(401);
+    nothingRecorded(ctx);
+  });
+
+  it("logs never contain the token (valid or wrong): the URL is redacted and rejections name only the reason", async () => {
+    const lines: string[] = [];
+    const ctx = await accepting();
+    const app = await buildApp(ctx.deps, { logger: { level: "debug", stream: { write: (line: string) => void lines.push(line) } } });
+    const wrongValue = decodeURIComponent(WRONG.slice("?token=".length));
+    for (const query of [VALID, WRONG, ""]) await app.inject({ method: "POST", url: `/webhooks/culqi${query}`, payload: { id: EVT } });
+    await app.close();
+    const output = lines.join("\n");
+    expect(output.includes(WEBHOOK_TOKEN)).toBe(false);
+    expect(output.includes(encodeURIComponent(WEBHOOK_TOKEN))).toBe(false);
+    expect(output.includes(wrongValue)).toBe(false);
+    expect(output).toMatch(/\/webhooks\/culqi\?token=(\[REDACTED\]|%5BREDACTED%5D)/);
+    expect(output).toContain("billing.culqi.webhook_accepted");
+    expect(output).toMatch(/"reason":"invalid_token"/);
+    expect(output).toMatch(/"reason":"missing_token"/);
+  });
+
+  it("Culqi disabled: the route does not exist (404) with or without a token; nothing recorded", async () => {
+    const ctx = await setup({ culqi: null });
+    for (const query of ["", VALID, WRONG]) expect((await post(ctx, { id: EVT }, query)).statusCode).toBe(404);
+    nothingRecorded(ctx);
   });
 
   it("Culqi not configured: the route does not exist (404); queue down -> 503 so Culqi retries", async () => {
