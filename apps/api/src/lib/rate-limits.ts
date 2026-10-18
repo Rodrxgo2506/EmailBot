@@ -13,6 +13,8 @@ export const RATE_LIMITS = {
   oauthStart: { max: 20, timeWindow: "10 minutes" },
   oauthCallback: { max: 30, timeWindow: "10 minutes" },
   imapCreate: { max: 10, timeWindow: "10 minutes" },
+  /** IMAP connection test (a real login against a mail server); per user / organization limits in imap-connection.ts. */
+  imapTest: { max: 10, timeWindow: "10 minutes" },
   accountSync: { max: 10, timeWindow: "1 minute" },
   loginEvent: { max: 20, timeWindow: "10 minutes" },
   /** Acceptance of the current legal versions (one per user normally). */
@@ -31,6 +33,8 @@ export const RATE_LIMITS = {
   customerAccessIssue: { max: 30, timeWindow: "10 minutes" },
   /** Platform administration writes (create organization, plan, status). */
   adminWrite: { max: 60, timeWindow: "1 minute" },
+  /** Card checkout (Culqi customer, card and subscription creation) per IP. */
+  billingCheckout: { max: 10, timeWindow: "10 minutes" },
   /** Public plan catalog (pricing page, no session); cached by browsers for 5 minutes. */
   planCatalog: { max: 60, timeWindow: "1 minute" },
   // Libro de Reclamaciones (public form): a person files a few sheets, never dozens.

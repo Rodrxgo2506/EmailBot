@@ -2,7 +2,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { catalogEntry, PLAN_CATALOG } from "@/test/plan-catalog-fixture";
-import { comparisonGroups, formatLimit, formatPrice, monthlyPrice, planCta, upgradeBenefits, upgradeOptions } from "./plans-model";
+import { comparisonGroups, formatLimit, formatPrice, monthlyPrice, myPlanOptions, planCta, upgradeBenefits, upgradeOptions } from "./plans-model";
 
 describe("plans model (catalog from GET /api/plans)", () => {
   it("prices come from the catalog's decimal strings, in soles", () => {
@@ -34,6 +34,28 @@ describe("plans model (catalog from GET /api/plans)", () => {
     expect(planCta(pro, { authenticated: true, currentPlan: "BUSINESS" }, PLAN_CATALOG).kind).toBe("LOWER");
     expect(planCta(pro, { authenticated: true, currentPlan: "BASIC" }, PLAN_CATALOG)).toEqual({ kind: "CHOOSE", label: "Mejorar a Pro" });
     expect(planCta(pro, { authenticated: true, currentPlan: null }, PLAN_CATALOG)).toEqual({ kind: "CHOOSE", label: "Elegir Pro" });
+  });
+
+  it("the current plan: 'Tu plan actual', or 'Pagar … con tarjeta' when it can move to card payments (never 'Mejorar a')", () => {
+    const basic = catalogEntry("BASIC");
+    expect(planCta(basic, { authenticated: true, currentPlan: "BASIC", canPayCurrentByCard: true }, PLAN_CATALOG)).toEqual({ kind: "PAY_BY_CARD", label: "Pagar Básico con tarjeta" });
+    expect(planCta(basic, { authenticated: true, currentPlan: "BASIC", canPayCurrentByCard: false }, PLAN_CATALOG)).toEqual({ kind: "CURRENT", label: "Tu plan actual" });
+    expect(planCta(basic, { authenticated: true, currentPlan: "BASIC" }, PLAN_CATALOG).kind).toBe("CURRENT");
+    expect(planCta(catalogEntry("PRO"), { authenticated: true, currentPlan: "BASIC", canPayCurrentByCard: true }, PLAN_CATALOG)).toEqual({ kind: "CHOOSE", label: "Mejorar a Pro" });
+    expect(planCta(basic, { authenticated: true, currentPlan: "PRO", canPayCurrentByCard: true }, PLAN_CATALOG).kind).toBe("LOWER");
+  });
+
+  it("Mi plan options: the current plan first when it can be paid by card, then the upgrades; every plan without access", () => {
+    const summary = (options: ReturnType<typeof myPlanOptions>) => options.map((option) => `${option.plan.code}:${option.action}:${option.label}`);
+    expect(summary(myPlanOptions(PLAN_CATALOG, "BASIC", true))).toEqual([
+      "BASIC:PAY_BY_CARD:Pagar Básico con tarjeta",
+      "PRO:UPGRADE:Mejorar a Pro",
+      "BUSINESS:UPGRADE:Mejorar a Business"
+    ]);
+    expect(summary(myPlanOptions(PLAN_CATALOG, "BASIC", false))).toEqual(["PRO:UPGRADE:Mejorar a Pro", "BUSINESS:UPGRADE:Mejorar a Business"]);
+    expect(summary(myPlanOptions(PLAN_CATALOG, "BUSINESS", false))).toEqual([]);
+    expect(summary(myPlanOptions(PLAN_CATALOG, "BUSINESS", true))).toEqual(["BUSINESS:PAY_BY_CARD:Pagar Business con tarjeta"]);
+    expect(summary(myPlanOptions(PLAN_CATALOG, null, false))).toEqual(["BASIC:CHOOSE:Elegir Básico", "PRO:CHOOSE:Elegir Pro", "BUSINESS:CHOOSE:Elegir Business"]);
   });
 
   it("upgrade options are the plans above the current one; none for the most complete", () => {

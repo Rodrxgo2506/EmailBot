@@ -1,5 +1,6 @@
 import { SecretBoxError, serializeError } from "@emailbot/shared";
-import { ProviderAuthError, ProviderNotImplementedError } from "../providers/types.js";
+import { RequestCancelledError } from "../infrastructure/http-cancellation.js";
+import { ProviderAuthError, ProviderCancelledError, ProviderNotImplementedError, ProviderSecurityError } from "../providers/types.js";
 import type { AccountStore, Logger, RealtimePublisher } from "./ports.js";
 
 /** Error that must not be retried by the queue. */
@@ -39,6 +40,22 @@ export async function handleAccountFailure(
     throw new NonRetryableError(error.message);
   }
 
+  if (account && error instanceof ProviderSecurityError) {
+    // IMAP: forbidden destination, certificate / TLS failure, no STARTTLS or invalid stored
+    // settings. Retrying cannot help and must never fall back to a weaker connection.
+    await deps.accounts.markError(account.id, { code: error.code, message: error.message, status: "ERROR" });
+    await deps.realtime
+      .publish({
+        type: "email-account.status",
+        organizationId: account.organizationId,
+        emailAccountId: account.id,
+        status: "ERROR"
+      })
+      .catch(() => undefined);
+    deps.logger.warn({ emailAccountId: account.id, code: error.code }, "mailbox connection refused for security reasons");
+    throw new NonRetryableError(error.message);
+  }
+
   if (account && error instanceof SecretBoxError) {
     // Almost always a TOKEN_ENCRYPTION_KEY that differs from the API's (compare
     // the key fingerprints both services log at startup). Retrying cannot help.
@@ -52,6 +69,12 @@ export async function handleAccountFailure(
   if (account && error instanceof ProviderNotImplementedError) {
     await deps.accounts.markError(account.id, { code: "PROVIDER_NOT_IMPLEMENTED", message: error.message });
     throw new NonRetryableError(error.message);
+  }
+
+  // F5.4: a provider request (or token refresh) cancelled by the worker shutdown: expected, retried, not an error.
+  if (error instanceof ProviderCancelledError || error instanceof RequestCancelledError) {
+    deps.logger.info({ event: "worker.shutdown.request_cancelled", emailAccountId: account?.id }, "provider request cancelled by the shutdown; the job is retried");
+    throw error;
   }
 
   deps.logger.error({ err: serializeError(error), emailAccountId: account?.id }, "job failed");

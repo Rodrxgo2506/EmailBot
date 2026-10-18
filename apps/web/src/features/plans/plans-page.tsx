@@ -12,7 +12,8 @@ import { getErrorMessage } from "@/lib/errors";
 import { useAuth } from "@/providers/auth-provider";
 import { useOrganization } from "@/providers/organization-provider";
 import { usePlanCatalog } from "./api";
-import { ComingSoonDialog } from "./coming-soon-dialog";
+import { canPayCurrentPlanByCard } from "@/features/billing/checkout-policy";
+import { ChoosePlanDialog } from "@/features/billing/choose-plan-dialog";
 import { PlanComparison } from "./plan-comparison";
 import { PlanOfferCard } from "./plan-offer-card";
 import { planCta, type Viewer } from "./plans-model";
@@ -34,7 +35,12 @@ function useViewer(): Viewer | undefined {
   if (!organization) return { authenticated: true, currentPlan: null };
   if (overview.isPending) return undefined;
   const entitlements = overview.data?.entitlements;
-  return { authenticated: true, currentPlan: entitlements && entitlements.access !== "NONE" ? entitlements.effectivePlan : null };
+  const currentPlan = entitlements && entitlements.access !== "NONE" ? entitlements.effectivePlan : null;
+  return {
+    authenticated: true,
+    currentPlan,
+    canPayCurrentByCard: Boolean(currentPlan && entitlements && canPayCurrentPlanByCard(entitlements.access, overview.data?.subscription?.paymentMethod))
+  };
 }
 
 /**
@@ -146,7 +152,7 @@ export function PlansPage() {
 
       <PublicFooter showLogin={!viewer?.authenticated} />
 
-      <ComingSoonDialog plan={choosing} onOpenChange={(open) => !open && setChoosing(null)} />
+      <ChoosePlanDialog plan={choosing} onOpenChange={(open) => !open && setChoosing(null)} />
     </div>
   );
 }

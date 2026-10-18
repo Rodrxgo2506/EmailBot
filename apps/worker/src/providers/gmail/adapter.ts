@@ -1,7 +1,8 @@
 import type { NormalizedEmail } from "@emailbot/types";
 import { z } from "zod";
-import { decodeBase64Url, ProviderHttpError, providerGet, providerPost } from "../http.js";
+import { ProviderHttpError, providerGet, providerGetResponse, providerPost } from "../http.js";
 import type { ChangeSet, ProviderAdapter, ProviderContext } from "../types.js";
+import { readGmailAttachment } from "./attachment-body.js";
 import { normalizeGmailMessage } from "./normalize.js";
 
 /*
@@ -49,9 +50,9 @@ const messageListSchema = z.object({
 
 const profileSchema = z.object({ historyId });
 const watchSchema = z.object({ historyId, expiration: z.union([z.string(), z.number()]).transform(Number) });
-const attachmentSchema = z.object({ data: z.string() });
 
-export function createGmailAdapter(fetchImpl: typeof fetch = fetch): ProviderAdapter {
+/** `attachmentFetch`: attachment downloads (F5.5: streamed, with their own limits); every other call uses `fetchImpl`. */
+export function createGmailAdapter(fetchImpl: typeof fetch = fetch, attachmentFetch: typeof fetch = fetchImpl): ProviderAdapter {
   async function currentHistoryId(context: ProviderContext): Promise<string> {
     return profileSchema.parse(await providerGet(context, `${API}/profile`, fetchImpl)).historyId;
   }
@@ -145,14 +146,13 @@ export function createGmailAdapter(fetchImpl: typeof fetch = fetch): ProviderAda
     },
 
     async downloadAttachment(context, providerMessageId, providerAttachmentId) {
-      const body = attachmentSchema.parse(
-        await providerGet(
-          context,
-          `${API}/messages/${encodeURIComponent(providerMessageId)}/attachments/${encodeURIComponent(providerAttachmentId)}`,
-          fetchImpl
-        )
+      // F5.7: decoded from the bytes of the body (attachment-body.ts), without building the JSON or base64 strings.
+      return providerGetResponse(
+        context,
+        `${API}/messages/${encodeURIComponent(providerMessageId)}/attachments/${encodeURIComponent(providerAttachmentId)}`,
+        attachmentFetch,
+        readGmailAttachment
       );
-      return decodeBase64Url(body.data);
     }
   };
 }

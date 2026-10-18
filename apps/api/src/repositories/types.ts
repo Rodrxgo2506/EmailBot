@@ -4,9 +4,14 @@ import type {
   ComplaintEmailStatus,
   ComplaintGoodType,
   ComplaintKind,
-  ComplaintStatus
+  ComplaintStatus,
+  ImapSecurity
 } from "@emailbot/types";
 import type {
+  BillingEnvironment,
+  BillingPeriod,
+  BillingSubscriptionSummary,
+  CommercialPlan,
   AdminActivityItem,
   AdminAuditEntry,
   AdminBot,
@@ -455,16 +460,33 @@ export type ComplaintResponseConfirmation =
   | { outcome: "NOT_UNCERTAIN" }
   | { outcome: "CONFIRMED"; status: ComplaintStatus; respondedAt: string | null };
 
-export interface ImapAccountInsert {
+/** Input of public.connect_imap_email_account (IMAP E1). The password is already encrypted (SecretBox v2, bound to the mailbox). */
+export interface ImapAccountConnect {
   organizationId: string;
   emailAddress: string;
   displayName: string | null;
-  passwordEncrypted: string;
+  username: string;
   host: string;
   port: number;
-  secure: boolean;
-  username: string;
+  security: ImapSecurity;
+  passwordEncrypted: string;
+  /** Server position at connection time; null = start from the newest message (no history is imported). */
+  syncCursor: string | null;
 }
+
+export type ImapAccountConnection =
+  | { outcome: "CREATED" | "RECONNECTED"; account: EmailAccount; created: boolean; previousStatus: EmailAccountStatus | null }
+  | { outcome: "PLAN_LIMIT_REACHED"; used: number; limit: number }
+  | { outcome: "FEATURE_NOT_AVAILABLE" }
+  | { outcome: "DUPLICATE_ACCOUNT" };
+
+/**
+ * IMAP M1: public.activate_imap_email_account (the only way to make an IMAP mailbox ACTIVE).
+ * Refusals write nothing; ALREADY_ACTIVE is a no-op.
+ */
+export type ImapAccountActivation =
+  | { outcome: "ACTIVATED" | "ALREADY_ACTIVE"; account: EmailAccount; previousStatus: EmailAccountStatus }
+  | { outcome: "NOT_FOUND" | "NOT_IMAP" | "DISCONNECTED" | "RECONNECT_REQUIRED" | "CREDENTIALS_MISSING" | "SETTINGS_INVALID" | "FEATURE_NOT_AVAILABLE" };
 
 /** Outcome categories of portal.create_session (never shown to the client). */
 /** SUBSCRIPTION_INACTIVE (Commercial V1.2): the organization has no commercial access (or its plan has no portal). */
@@ -526,7 +548,19 @@ export interface PrivilegedOperations {
    * reused (same organization, provider and address, case-insensitive) in one locked transaction.
    */
   connectOAuthEmailAccount(input: OAuthAccountUpsert): Promise<OAuthAccountConnection>;
-  createImapEmailAccount(input: ImapAccountInsert): Promise<EmailAccount>;
+  /**
+   * IMAP E1: the only write of an IMAP mailbox (public.connect_imap_email_account): plan feature IMAP,
+   * EMAIL_ACCOUNTS limit and insert / reconnection in one locked transaction; the mailbox stays PAUSED.
+   */
+  connectImapEmailAccount(input: ImapAccountConnect): Promise<ImapAccountConnection>;
+  /**
+   * IMAP M1: public.activate_imap_email_account (service role, one transaction under the organization lock).
+   * Only PAUSED -> ACTIVE (ACTIVATED), after the plan feature IMAP with commercial access, a v2 password and valid
+   * settings; ACTIVE is a no-op (ALREADY_ACTIVE). Refused, writing nothing: ERROR (RECONNECT_REQUIRED: connect it
+   * again), DISCONNECTED, NOT_FOUND (another organization's or unknown), NOT_IMAP, CREDENTIALS_MISSING,
+   * SETTINGS_INVALID and FEATURE_NOT_AVAILABLE.
+   */
+  activateImapEmailAccount(organizationId: string, id: string): Promise<ImapAccountActivation>;
   disconnectEmailAccount(organizationId: string, id: string): Promise<EmailAccount | null>;
   insertAuditLog(entry: AuditEntry): Promise<void>;
   createSignedDownloadUrl(bucket: string, path: string, expiresInSeconds: number, filename: string): Promise<string>;
@@ -676,4 +710,51 @@ export interface AdminOperations {
     outcome: ComplaintEmailOutcome,
     requestId: string
   ): Promise<{ status: ComplaintStatus; respondedAt: string | null } | null>;
+}
+
+/*
+ * Commercial V1 phase 2 (Culqi SANDBOX): provider side of the subscriptions.
+ * SERVICE ROLE; every call is scoped by the organization the route resolved
+ * (membership + permission checked first). Never returns card data (EmailBot
+ * has none).
+ */
+export interface BillingPrice {
+  planPriceId: string;
+  plan: CommercialPlan;
+  planName: string;
+  billingPeriod: BillingPeriod;
+  currency: string;
+  /** "39.90" */
+  amount: string;
+  amountCents: number;
+  sortOrder: number;
+}
+
+export interface BillingRepository {
+  /** The ACTIVE price of a commercial plan / period (EmailBot catalog), or null. */
+  resolvePrice(plan: CommercialPlan, billingPeriod: BillingPeriod): Promise<BillingPrice | null>;
+  /** sort_order of every active commercial plan (upgrade = higher). */
+  planOrder(): Promise<Partial<Record<CommercialPlan, number>>>;
+  /** Culqi plan id mapped to an EmailBot price in an environment, or null. */
+  providerPlanId(planPriceId: string, environment: BillingEnvironment): Promise<string | null>;
+  customerId(organizationId: string, environment: BillingEnvironment): Promise<string | null>;
+  /** Stores the organization's Culqi customer; returns the stored id (the existing one on a race). */
+  saveCustomer(organizationId: string, environment: BillingEnvironment, externalCustomerId: string, createdBy: string): Promise<string>;
+  /** A checkout already waiting for Culqi (PENDING). */
+  hasPending(organizationId: string): Promise<boolean>;
+  /**
+   * Reserves the checkout: inserts the PENDING row (no Culqi customer yet) BEFORE anything is created at Culqi;
+   * null when another checkout of the organization is already PENDING (atomic: unique partial index).
+   */
+  createPending(input: { organizationId: string; planPriceId: string; environment: BillingEnvironment; externalPlanId: string; createdBy: string }): Promise<string | null>;
+  /** Sets the Culqi customer of a reserved checkout (PENDING, customer not set yet); throws otherwise. */
+  attachCustomer(id: string, externalCustomerId: string): Promise<void>;
+  attachCulqiSubscription(id: string, input: { externalCardId: string; externalSubscriptionId: string; providerStatus: number | null }): Promise<void>;
+  /** PENDING -> FAILED (public.billing_set_culqi_status, audited). */
+  markFailed(id: string, failureCode: string, failureMessage: string | null, requestId: string): Promise<void>;
+  get(organizationId: string, id: string): Promise<BillingSubscriptionSummary | null>;
+  /** Latest Culqi subscription of the organization. */
+  current(organizationId: string): Promise<BillingSubscriptionSummary | null>;
+  /** Webhook idempotency: inserts the event once (unique id) and returns its state. */
+  recordWebhookEvent(environment: BillingEnvironment, externalEventId: string): Promise<{ isNew: boolean; status: string; attempts: number }>;
 }

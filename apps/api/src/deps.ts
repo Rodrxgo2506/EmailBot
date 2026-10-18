@@ -1,10 +1,10 @@
-import type { EmailEventJob, SecretBox, SyncReason } from "@emailbot/shared";
+import type { EmailEventJob, ImapProbeOpen, ImapResolver, SecretBox, SyncReason } from "@emailbot/shared";
 import type { RealtimeEvent } from "@emailbot/types";
 import type { ApiConfig } from "./config/env.js";
 import type { RateLimitRedis } from "./infrastructure/rate-limit-store.js";
 import type { GoogleOidcVerifier } from "./lib/google-oidc.js";
 import type { PollSchedulerState } from "./modules/health/sync-health.js";
-import type { AdminOperations, PrivilegedOperations, Repositories } from "./repositories/types.js";
+import type { AdminOperations, BillingRepository, PrivilegedOperations, Repositories } from "./repositories/types.js";
 
 export interface AuthenticatedUser {
   id: string;
@@ -83,6 +83,8 @@ export interface AppDeps {
   privileged: PrivilegedOperations;
   /** Platform administration: admin.* functions only (service role, actor re-checked in the database). */
   admin: AdminOperations;
+  /** Commercial V1 phase 2 (Culqi sandbox): billing_* tables (service role). */
+  billing: BillingRepository;
   queue: JobQueue;
   secretBox: SecretBox;
   fetch: typeof fetch;
@@ -96,4 +98,11 @@ export interface AppDeps {
   mailer?: TransactionalMailer;
   /** Publishes realtime events to every API instance through Redis (portal signals of manual deliveries). */
   realtimePublisher?: { publish(event: RealtimeEvent): Promise<void> };
+  /** DNS resolver of the IMAP destination check (default: the system resolver; fakes in tests, no network). */
+  imapResolver?: ImapResolver;
+  /**
+   * IMAP connection test (E3): replaces only the ImapFlow connection, AFTER every E1 check, so tests
+   * observe the checked options without a network. Never set in production (default: ImapFlow).
+   */
+  imapProbeOpen?: ImapProbeOpen;
 }

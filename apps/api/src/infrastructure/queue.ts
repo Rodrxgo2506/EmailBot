@@ -1,4 +1,4 @@
-import { addCoalescedSync, COALESCED_JOB_OPTIONS, DEFAULT_JOB_OPTIONS, isSyncPending, POLL_SCHEDULER_ID, QUEUE_NAMES, type EmailEventJob } from "@emailbot/shared";
+import { addCoalescedSync, COALESCED_JOB_OPTIONS, CULQI_RECONCILE_JOB_OPTIONS, DEFAULT_JOB_OPTIONS, isSyncPending, POLL_SCHEDULER_ID, QUEUE_NAMES, type EmailEventJob } from "@emailbot/shared";
 import { Queue } from "bullmq";
 import { Redis } from "ioredis";
 import type { JobQueue } from "../deps.js";
@@ -30,7 +30,11 @@ export function createBullJobQueue(connection: Redis): JobQueue {
         // retained one would make BullMQ ignore the next job with the same id, e.g. the
         // worker's WATCH_ACCOUNT for a renewal or a Graph lifecycle event (same options as
         // the worker's coalesced jobs).
-        ...(job.type === "SYNC_ACCOUNT" || job.type === "WATCH_ACCOUNT" ? COALESCED_JOB_OPTIONS : DEFAULT_JOB_OPTIONS),
+        ...(job.type === "SYNC_ACCOUNT" || job.type === "WATCH_ACCOUNT"
+          ? COALESCED_JOB_OPTIONS
+          : job.type === "CULQI_RECONCILE"
+            ? CULQI_RECONCILE_JOB_OPTIONS
+            : DEFAULT_JOB_OPTIONS),
         ...(options?.jobId ? { jobId: options.jobId } : {})
       });
     },

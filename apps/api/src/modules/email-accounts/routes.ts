@@ -2,6 +2,8 @@ import {
   buildAuthorizationUrl,
   createOAuthState,
   exchangeAuthorizationCode,
+  imapAllowedForOrganization,
+  imapCredentialContext,
   serializeError,
   verifyOAuthState,
   type OAuthProvider,
@@ -12,9 +14,10 @@ import {
   emailAccountUpdateSchema,
   idParamsSchema,
   imapAccountCreateSchema,
+  imapConnectionTestSchema,
   oauthProviderParamsSchema
 } from "@emailbot/validation";
-import type { FastifyInstance, FastifyReply } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import type { ApiConfig, OAuthProviderConfig } from "../../config/env.js";
 import type { AppDeps } from "../../deps.js";
@@ -24,7 +27,17 @@ import { parseWith } from "../../lib/validation.js";
 import { getAuth } from "../../plugins/auth.js";
 import { getOrganization, requirePermission } from "../../plugins/organization.js";
 import { removeStoredObjects } from "../emails/routes.js";
-import { assertWithinLimit, canUseFeature, hasCommercialAccess, isWithinLimit, requestEntitlements } from "../plans/entitlements.js";
+import {
+  assertWithinLimit,
+  canUseFeature,
+  hasCommercialAccess,
+  isWithinLimit,
+  planFeatureUnavailable,
+  planLimitReached,
+  requestEntitlements,
+  subscriptionRequired
+} from "../plans/entitlements.js";
+import { createImapConnectionTester } from "./imap-connection.js";
 import { fetchMailboxIdentity } from "./mailbox-identity.js";
 import { removeMicrosoftSubscription } from "./microsoft-subscription.js";
 
@@ -38,14 +51,16 @@ function providerConfig(config: ApiConfig, provider: OAuthProvider): OAuthProvid
  * Single source of which providers NEW accounts can be connected with: an
  * OAuth provider needs its server configuration (client id, secret, redirect
  * URI), so Microsoft becomes available just by configuring it and deploying;
- * IMAP stays refused until its synchronization exists (config.imapAccountsEnabled).
+ * IMAP stays refused until its synchronization exists (config.imapAccountsEnabled) and, even then,
+ * for every organization outside the trial allowlist fixed in code (config.imapOrganizationIds).
+ * `organizationId` is the organization verified for the request (membership checked); null = none: IMAP false.
  * Existing accounts of any provider can always be listed, disconnected and deleted.
  */
-export function providerAvailability(config: ApiConfig): EmailProviderAvailability {
+export function providerAvailability(config: ApiConfig, organizationId: string | null): EmailProviderAvailability {
   return {
     GMAIL: providerConfig(config, "GMAIL") !== null,
     MICROSOFT: providerConfig(config, "MICROSOFT") !== null,
-    IMAP: config.imapAccountsEnabled
+    IMAP: imapAllowedForOrganization(config.imapAccountsEnabled, config.imapOrganizationIds, organizationId)
   };
 }
 
@@ -67,12 +82,55 @@ export function emailAccountRoutes(deps: AppDeps) {
 
     const oauthStartGuards = { ...manage, config: { rateLimit: RATE_LIMITS.oauthStart } };
     const oauthCallbackOptions = { config: { rateLimit: RATE_LIMITS.oauthCallback } };
-    const imapGuards = { ...manage, config: { rateLimit: RATE_LIMITS.imapCreate } };
+    /*
+     * IMAP routes (E4, B2): the per-IP limit runs in onRequest like every route; then
+     * authentication, organization, permission and the "IMAP disabled" check run in
+     * preParsing, i.e. BEFORE the body (and its password) is read or parsed. Anonymous
+     * and unauthorized callers keep their 401 / 403; while IMAP is disabled every other
+     * caller gets 503 whatever the body (malformed, oversized, another content type).
+     * The check uses the organization verified just before (requireOrganization): an organization
+     * outside the trial allowlist gets the same 503 as when IMAP is off (nothing tells it a trial exists).
+     */
+    const imapAvailable = async (request: FastifyRequest) => {
+      if (!providerAvailability(deps.config, getOrganization(request).id).IMAP) {
+        throw serviceUnavailable("IMAP accounts are not available yet", "IMAP_NOT_AVAILABLE");
+      }
+    };
+    const beforeBody = (hook: (request: FastifyRequest, reply: FastifyReply) => Promise<unknown>) =>
+      async (request: FastifyRequest, reply: FastifyReply, payload: unknown) => {
+        await hook(request, reply);
+        return payload;
+      };
+    const imapPreParsing = [app.authenticate, app.requireOrganization, requirePermission("email-accounts:manage"), imapAvailable].map(beforeBody);
+    const imapGuards = { preParsing: imapPreParsing, config: { rateLimit: RATE_LIMITS.imapCreate } };
+    const imapTestGuards = { preParsing: imapPreParsing, config: { rateLimit: RATE_LIMITS.imapTest } };
+    const imap = createImapConnectionTester(deps, app.log);
+
+    /**
+     * Checks done before any IMAP connection (test or creation): plan feature IMAP
+     * (PRO, BUSINESS), the same mailbox not connected through Gmail / Microsoft, and
+     * room for one more mailbox unless this one already counts (a reconnection).
+     * Only this organization is looked at. The database decides again atomically.
+     */
+    async function assertImapConnectable(request: FastifyRequest, emailAddress: string) {
+      const plans = requestEntitlements(request);
+      const entitlements = await plans.assertFeatureEnabled("IMAP");
+      const address = emailAddress.trim().toLowerCase();
+      const accounts = await getAuth(request).repos.emailAccounts.list(getOrganization(request).id);
+      const sameMailbox = accounts.filter((existing) => existing.status !== "DISCONNECTED" && existing.emailAddress.trim().toLowerCase() === address);
+      if (sameMailbox.some((existing) => existing.provider !== "IMAP")) {
+        throw conflict("This mailbox is already connected with another provider", "EMAIL_ACCOUNT_ALREADY_CONNECTED");
+      }
+      if (!sameMailbox.some((existing) => existing.provider === "IMAP")) {
+        assertWithinLimit(entitlements, "EMAIL_ACCOUNTS", (await plans.usage(["EMAIL_ACCOUNTS"])).EMAIL_ACCOUNTS ?? 0);
+      }
+      return entitlements;
+    }
 
     /** Providers new accounts can be connected with (the web app only offers these). */
-    app.get("/email-accounts/providers", read, async (_request, reply) => {
+    app.get("/email-accounts/providers", read, async (request, reply) => {
       reply.header("cache-control", "no-store");
-      return { providers: providerAvailability(deps.config) };
+      return { providers: providerAvailability(deps.config, getOrganization(request).id) };
     });
 
     app.get("/email-accounts", read, async (request) => {
@@ -234,37 +292,155 @@ export function emailAccountRoutes(deps: AppDeps) {
     });
 
     /**
-     * IMAP / custom domains. Synchronization is NOT implemented (the worker
-     * adapter is a scaffold), so new IMAP accounts are refused with 503
-     * IMAP_NOT_AVAILABLE before the body (and its password) is even parsed.
-     * When enabled, credentials are validated and stored encrypted and the
-     * account is created PAUSED with an explicit error code.
+     * IMAP / custom domains. Synchronization is NOT enabled, so both IMAP routes
+     * answer 503 IMAP_NOT_AVAILABLE before the body (and its password) is even
+     * parsed (config.imapAccountsEnabled: false, fixed in code). When enabled:
+     *   - OWNER / ADMIN (email-accounts:manage), per-IP route limit;
+     *   - only 993/TLS or 143/STARTTLS and a public DNS name (validation);
+     *   - plan feature IMAP (PRO, BUSINESS) and EMAIL_ACCOUNTS room (assertImapConnectable);
+     *   - imap.test(): attempts per user / organization and login lockout BEFORE any
+     *     DNS query, then SSRF (every address of the host must be public,
+     *     resolveImapDestination; checked again by the shared connector right before
+     *     it dials the validated IP), concurrency and the connection;
+     *   - connection test with the transport the worker uses: login only after TLS /
+     *     STARTTLS, EXAMINE INBOX read-only, LOGOUT, every connection closed.
+     */
+
+    /** Connection test only: nothing is stored, no password is kept, nothing is queued or imported. */
+    app.post("/email-accounts/imap/test", imapTestGuards, async (request) => {
+      if (!providerAvailability(deps.config, getOrganization(request).id).IMAP) {
+        throw serviceUnavailable("IMAP accounts are not available yet", "IMAP_NOT_AVAILABLE");
+      }
+      const input = parseWith(imapConnectionTestSchema, request.body);
+      await assertImapConnectable(request, input.emailAddress);
+      await imap.test({ organizationId: getOrganization(request).id, userId: getAuth(request).user.id, log: request.log }, input);
+      return { ok: true };
+    });
+
+    /**
+     * Connection, after the same checks and a successful connection test: the
+     * password is encrypted bound to the mailbox (SecretBox v2) and the database
+     * decides plan, limit, duplicates and reconnection atomically
+     * (connect_imap_email_account: one transaction, nothing stored on a refusal).
+     * The account stays PAUSED and nothing is queued. Its initial cursor is the
+     * INBOX position seen by the test ("imap:v1:<UIDVALIDITY>:<UIDNEXT - 1>"):
+     * no older message is ever imported, none received after the test is lost.
      */
     app.post("/email-accounts/imap", imapGuards, async (request, reply) => {
-      if (!providerAvailability(deps.config).IMAP) {
+      const organizationId = getOrganization(request).id;
+      if (!providerAvailability(deps.config, organizationId).IMAP) {
         throw serviceUnavailable("IMAP accounts are not available yet", "IMAP_NOT_AVAILABLE");
       }
       const input = parseWith(imapAccountCreateSchema, request.body);
-      await requestEntitlements(request).assertWithinLimit("EMAIL_ACCOUNTS");
-      const account = await deps.privileged.createImapEmailAccount({
-        organizationId: getOrganization(request).id,
+      // Early, friendly refusals; the database checks plan and limit again in the same transaction as the write.
+      const entitlements = await assertImapConnectable(request, input.emailAddress);
+      const plan = entitlements.effectivePlan;
+
+      const position = await imap.test({ organizationId, userId: getAuth(request).user.id, log: request.log }, input);
+
+      const connection = await deps.privileged.connectImapEmailAccount({
+        organizationId,
         emailAddress: input.emailAddress,
         displayName: input.displayName ?? null,
-        passwordEncrypted: deps.secretBox.encrypt(input.password),
+        username: input.username,
         host: input.host,
         port: input.port,
-        secure: input.secure,
-        username: input.username
+        security: input.security,
+        passwordEncrypted: deps.secretBox.encryptBound(input.password, imapCredentialContext(organizationId, input.emailAddress)),
+        syncCursor: position.cursor
       });
+      // The plan may have changed since the early check: the database's answer wins.
+      if (connection.outcome === "FEATURE_NOT_AVAILABLE") {
+        throw plan ? planFeatureUnavailable({ feature: "IMAP", plan }) : subscriptionRequired(entitlements.subscriptionStatus);
+      }
+      if (connection.outcome === "PLAN_LIMIT_REACHED") {
+        throw plan
+          ? planLimitReached({ limit: "EMAIL_ACCOUNTS", max: connection.limit, used: connection.used, plan })
+          : subscriptionRequired(entitlements.subscriptionStatus);
+      }
+      if (connection.outcome === "DUPLICATE_ACCOUNT") {
+        throw conflict("This mailbox is already connected with another provider", "EMAIL_ACCOUNT_ALREADY_CONNECTED");
+      }
+      const { account, created } = connection;
 
       await app.audit(request, {
         action: "CONNECT",
         entityType: "email_account",
         entityId: account.id,
-        metadata: { provider: "IMAP", emailAddress: account.emailAddress, host: input.host }
+        metadata: { provider: "IMAP", emailAddress: account.emailAddress, host: input.host, reconnected: !created }
       });
-      return reply.status(201).send({ account });
+      return reply.status(created ? 201 : 200).send({ account });
     });
+
+    /**
+     * IMAP M1: resuming an IMAP mailbox (PAUSED after every (re)connection) goes through
+     * public.activate_imap_email_account only (service role, organization lock): plan feature IMAP with
+     * commercial access, a usable stored login and settings, never a DISCONNECTED mailbox. Members cannot
+     * set it ACTIVE directly (E1 trigger). The first synchronization is queued best effort: the mailbox is
+     * ACTIVE either way and the recovery polling picks it up if the queue is unavailable.
+     * A mailbox in ERROR (refused login, certificate, TLS...) is never resumed: resuming it would make the
+     * worker log in again outside the connection-test limits (E4). It must be connected again (connection test
+     * with those limits, then PAUSED); the database refuses it too (RECONNECT_REQUIRED).
+     */
+    const imapReconnectRequired = () =>
+      conflict("The IMAP mailbox stopped with an error; connect it again so the connection is tested again", "IMAP_RECONNECT_REQUIRED");
+
+    async function activateImapMailbox(request: FastifyRequest, current: { id: string; status: string }, displayName: string | null | undefined) {
+      const organizationId = getOrganization(request).id;
+      // Refused before anything else: no plan lookup, no RPC, no queue, no audit, no connection.
+      if (current.status === "ERROR") throw imapReconnectRequired();
+      // Early, friendly refusal; the database checks plan and access again in the same transaction as the write.
+      const entitlements = await requestEntitlements(request).assertFeatureEnabled("IMAP");
+      const plan = entitlements.effectivePlan;
+      const activation = await deps.privileged.activateImapEmailAccount(organizationId, current.id);
+      switch (activation.outcome) {
+        case "NOT_FOUND":
+        case "NOT_IMAP":
+          throw notFound("Email account");
+        case "DISCONNECTED":
+          throw conflict("The account is disconnected; connect it again", "RECONNECT_REQUIRED");
+        case "RECONNECT_REQUIRED":
+          // Became ERROR after the early check (a worker failure in between): the database's answer wins.
+          throw imapReconnectRequired();
+        case "CREDENTIALS_MISSING":
+        case "SETTINGS_INVALID":
+          throw conflict("The stored IMAP login cannot be used; connect the mailbox again", "IMAP_RECONNECT_REQUIRED");
+        case "FEATURE_NOT_AVAILABLE":
+          // The plan may have changed since the early check: the database's answer wins.
+          throw plan ? planFeatureUnavailable({ feature: "IMAP", plan }) : subscriptionRequired(entitlements.subscriptionStatus);
+      }
+
+      let account = activation.account;
+      if (displayName !== undefined) {
+        account = (await getAuth(request).repos.emailAccounts.update(organizationId, current.id, { display_name: displayName })) ?? account;
+      }
+      if (activation.outcome === "ACTIVATED") {
+        await app.audit(request, {
+          action: "UPDATE",
+          entityType: "email_account",
+          entityId: current.id,
+          metadata: {
+            from: activation.previousStatus,
+            to: "ACTIVE",
+            fields: displayName !== undefined ? ["status", "display_name"] : ["status"],
+            via: "activate_imap"
+          }
+        });
+        await deps.queue
+          .enqueueEmailEvent(
+            { type: "SYNC_ACCOUNT", emailAccountId: current.id, organizationId, requestedBy: getAuth(request).user.id },
+            // Same id as a manual sync: a repeated activation never queues a second pending run.
+            { jobId: `sync-${current.id}` }
+          )
+          .catch((error: unknown) =>
+            request.log.warn(
+              { event: "imap.activation.enqueue_failed", emailAccountId: current.id, err: serializeError(error) },
+              "first IMAP sync not queued; polling will pick the mailbox up"
+            )
+          );
+      }
+      return { account };
+    }
 
     /** Pause / resume and rename. */
     app.patch("/email-accounts/:id", manage, async (request) => {
@@ -281,7 +457,12 @@ export function emailAccountRoutes(deps: AppDeps) {
           throw conflict("The account is disconnected; connect it again", "RECONNECT_REQUIRED");
         }
         if (input.status === "ACTIVE" && current.provider === "IMAP") {
-          throw conflict("IMAP synchronization is not available yet", "IMAP_SYNC_NOT_IMPLEMENTED");
+          // IMAP disabled (config.imapAccountsEnabled: false, fixed in code) or this organization outside the trial
+          // allowlist: unchanged refusal, nothing contacted.
+          if (!providerAvailability(deps.config, organizationId).IMAP) {
+            throw conflict("IMAP synchronization is not available yet", "IMAP_SYNC_NOT_IMPLEMENTED");
+          }
+          return activateImapMailbox(request, current, input.displayName);
         }
       }
 
@@ -338,6 +519,10 @@ export function emailAccountRoutes(deps: AppDeps) {
         const account = await getAuth(request).repos.emailAccounts.get(organizationId, id);
         if (!account) throw notFound("Email account");
         if (account.status !== "ACTIVE") throw conflict("Only active accounts can be synchronized", "ACCOUNT_NOT_ACTIVE");
+        // IMAP off, or this organization outside the trial allowlist: the worker would skip it; nothing is queued.
+        if (account.provider === "IMAP" && !providerAvailability(deps.config, organizationId).IMAP) {
+          throw conflict("IMAP synchronization is not available yet", "IMAP_SYNC_NOT_IMPLEMENTED");
+        }
         // Commercial V1.2: the worker would skip it anyway; say why instead of queuing a no-op.
         await requestEntitlements(request).get();
 

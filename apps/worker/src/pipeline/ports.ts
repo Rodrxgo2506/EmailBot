@@ -17,13 +17,17 @@ export interface AccountStore {
   findActiveAccountsByAddress(provider: EmailProvider, emailAddress: string): Promise<WorkerAccount[]>;
   findAccountBySubscription(subscriptionId: string): Promise<WorkerAccount | null>;
   listActiveOAuthAccounts(limit: number): Promise<Array<Pick<WorkerAccount, "id" | "organizationId">>>;
+  /** ACTIVE IMAP mailboxes of ACTIVE organizations (polled only while IMAP synchronization is enabled). */
+  listActiveImapAccounts?(limit: number): Promise<Array<Pick<WorkerAccount, "id" | "organizationId">>>;
   updateSyncState(id: string, state: { syncCursor: string | null; lastSyncedAt: string }): Promise<void>;
   /**
    * Compare-and-set of the history cursor: written only if it still equals
    * `from` (the cursor the sync started with). Returns false when another
    * sync moved it meanwhile (nothing is overwritten, the cursor never goes back).
+   * requireActive (IMAP only, M1 D1): also only while the mailbox is still ACTIVE, so a run whose
+   * mailbox was paused or disconnected meanwhile never moves the cursor past unprocessed mail.
    */
-  advanceSyncCursor(id: string, state: { from: string | null; to: string | null; lastSyncedAt: string }): Promise<boolean>;
+  advanceSyncCursor(id: string, state: { from: string | null; to: string | null; lastSyncedAt: string; requireActive?: boolean }): Promise<boolean>;
   /** Push subscription state (Gmail users.watch, phase 5.6; Microsoft Graph subscription expiry, F9). */
   saveWatchState(
     id: string,
@@ -50,7 +54,16 @@ export interface AccountStore {
     id: string,
     tokens: { accessTokenEncrypted: string; refreshTokenEncrypted: string | null; tokenExpiresAt: string | null }
   ): Promise<void>;
+  /**
+   * Records an account error (and optionally its ERROR status). An IMAP mailbox that is DISCONNECTED is
+   * never changed (M1 D2: a late job cannot revive it); every other row behaves as before.
+   */
   markError(id: string, error: { code: string; message: string; status?: "ERROR" }): Promise<void>;
+  /**
+   * IMAP M1: plan feature IMAP with commercial access (public.organization_entitlements, the same source as
+   * the API and the activation RPC). false when the organization lost it (e.g. downgraded to BASIC).
+   */
+  imapEntitled(organizationId: string): Promise<boolean>;
   /**
    * Commercial V1.2: commercial access of organizations (public.organization_access,
    * the same definition the API and the portal use). An organization missing
@@ -70,6 +83,111 @@ export interface CommercialAccess {
 export interface SubscriptionMaintenance {
   /** How many subscriptions became EXPIRED. */
   expireDue(): Promise<number>;
+}
+
+/* Commercial V1 phase 2 (Culqi sandbox): provider side of the subscriptions (billing_* tables). */
+
+export type BillingSubscriptionStatus = "PENDING" | "ACTIVE" | "PAST_DUE" | "CANCELED" | "EXPIRED" | "FAILED" | "REVIEW_REQUIRED";
+
+export interface BillingSubscriptionRow {
+  id: string;
+  organizationId: string;
+  status: BillingSubscriptionStatus;
+  environment: "test" | "live";
+  externalSubscriptionId: string | null;
+  /** The Culqi plan mapped to the EmailBot price at checkout. */
+  externalPlanId: string;
+  externalCustomerId: string | null;
+  externalCardId: string | null;
+  billingPeriod: "MONTHLY" | "YEARLY";
+  /** EmailBot catalog price of the subscribed plan (what every charge must be). */
+  amountCents: number;
+  currency: string;
+  cancelReason: "USER" | "PROVIDER" | "UPGRADED" | null;
+  createdAt: string;
+  /** EmailBot plan code of the price (BASIC / PRO / BUSINESS); null if unreadable. */
+  planCode: string | null;
+  /** When the checkout became REVIEW_REQUIRED (null otherwise). */
+  reviewRequiredAt: string | null;
+  /** Last reconciliation that found a charge neither confirmed nor declined. */
+  lastReconciledAt: string | null;
+}
+
+/** The last Culqi charge of a checkout that could not be confirmed nor declined (traceability). */
+export interface UnconfirmedChargeTrace {
+  chargeId: string;
+  outcomeType: string | null;
+  outcomeCode: string | null;
+  declineCode: string | null;
+}
+
+export interface WebhookEventRow {
+  status: "RECEIVED" | "PROCESSED" | "IGNORED" | "FAILED";
+  attempts: number;
+}
+
+export interface BillingStore {
+  getWebhookEvent(eventId: string): Promise<WebhookEventRow | null>;
+  updateWebhookEvent(
+    eventId: string,
+    patch: {
+      status?: WebhookEventRow["status"];
+      eventType?: string | null;
+      lastError?: string | null;
+      externalSubscriptionId?: string | null;
+      externalChargeId?: string | null;
+      attempts?: number;
+      processed?: boolean;
+    }
+  ): Promise<void>;
+  getBillingSubscription(id: string): Promise<BillingSubscriptionRow | null>;
+  findBillingSubscriptionByExternalId(externalSubscriptionId: string): Promise<BillingSubscriptionRow | null>;
+  /** public.billing_activate_culqi_subscription (idempotent per activation key). */
+  activate(input: {
+    billingSubscriptionId: string;
+    activationKey: string;
+    eventType: string;
+    periodStart: string;
+    periodEnd: string;
+    currentPeriod: number | null;
+    externalChargeId: string | null;
+    providerStatus: number | null;
+    requestId: string;
+  }): Promise<{ outcome: string; subscriptionId: string | null; supersededExternalIds: string[] }>;
+  /** public.billing_record_culqi_charge_failure: RECORDED or DUPLICATE. */
+  recordChargeFailure(input: {
+    billingSubscriptionId: string;
+    externalEventId: string;
+    eventType: string;
+    externalChargeId: string | null;
+    failureCode: string | null;
+    failureMessage: string | null;
+    providerStatus: number | null;
+    requestId: string;
+  }): Promise<string>;
+  /** public.billing_set_culqi_status: CHANGED, UNCHANGED or IGNORED. */
+  setStatus(input: {
+    billingSubscriptionId: string;
+    status: Exclude<BillingSubscriptionStatus, "PENDING" | "ACTIVE" | "REVIEW_REQUIRED">;
+    providerStatus: number | null;
+    cancelReason: "USER" | "PROVIDER" | "UPGRADED" | null;
+    failureCode: string | null;
+    failureMessage: string | null;
+    requestId: string;
+  }): Promise<string>;
+  /** Culqi subscriptions replaced by an upgrade whose cancellation Culqi has not confirmed yet. */
+  listUnconfirmedCancellations(organizationId: string): Promise<Array<{ id: string; externalSubscriptionId: string }>>;
+  markProviderCanceled(id: string): Promise<void>;
+  /** F3: ACTIVE / PAST_DUE subscriptions whose period ends between the two instants (renewal window). */
+  listDueForReconciliation(input: { endBefore: string; endAfter: string; limit: number }): Promise<BillingSubscriptionRow[]>;
+  /** PENDING checkouts older than the thresholds (with a Culqi subscription id: periodic reconciliation; without: incomplete). */
+  listStalePending(input: { withSubscriptionCreatedBefore: string; withoutSubscriptionCreatedBefore: string; limit: number }): Promise<BillingSubscriptionRow[]>;
+  /** REVIEW_REQUIRED checkouts created after `createdAfter` and not reconciled since `reconciledBefore`. */
+  listReviewRequired(input: { createdAfter: string; reconciledBefore: string; limit: number }): Promise<BillingSubscriptionRow[]>;
+  /** Records a reconciliation of a PENDING / REVIEW_REQUIRED checkout (and its last unconfirmed charge, when known). */
+  recordReconciliation(id: string, input: { at: string; charge: UnconfirmedChargeTrace | null }): Promise<void>;
+  /** public.billing_mark_culqi_review_required: CHANGED, UNCHANGED or IGNORED (no longer PENDING). */
+  markReviewRequired(input: { billingSubscriptionId: string; reviewCode: string; requestId: string }): Promise<string>;
 }
 
 export interface OrganizationProcessingSettings {
@@ -137,13 +255,32 @@ export interface IncompleteEmail {
   provider: EmailProvider;
   providerMessageId: string;
   processingAttempts: number;
+  /** F2.2: returned by the IMAP-only query (the page key of the IMAP recovery scan). */
+  processingStartedAt?: string;
 }
 
 export interface EmailStore {
   findEmail(emailAccountId: string, providerMessageId: string): Promise<ExistingEmail | null>;
+  /**
+   * IMAP history-gap recovery only: an email of this account already stored with
+   * this Message-ID AND this received_at (IMAP INTERNALDATE), i.e. the same
+   * message under a new UIDVALIDITY after a mailbox renumbering.
+   */
+  findEmailIdByInternetMessageId?(emailAccountId: string, internetMessageId: string, receivedAt: string): Promise<string | null>;
   updateProcessingState(emailId: string, state: ProcessingStateUpdate): Promise<void>;
-  /** Incomplete emails of ACTIVE accounts whose processing started before `startedBefore`. */
-  listIncompleteEmails(options: { startedBefore: string; limit: number }): Promise<IncompleteEmail[]>;
+  /**
+   * Incomplete emails of ACTIVE accounts whose processing started before `startedBefore`, oldest first.
+   * `imap` (F2): "exclude" = every provider but IMAP, "only" = IMAP mailboxes only; absent = every provider.
+   * F2.2, with `imap: "only"` only: ordered by (processing_started_at, id); `after` = the page key (rows strictly
+   * after it); `excludeOrganizations` = organizations left out of this page.
+   */
+  listIncompleteEmails(options: {
+    startedBefore: string;
+    limit: number;
+    imap?: "only" | "exclude";
+    after?: { startedAt: string; id: string };
+    excludeOrganizations?: string[];
+  }): Promise<IncompleteEmail[]>;
   loadEnabledRules(organizationId: string): Promise<EmailRuleRow[]>;
   loadSettings(organizationId: string): Promise<OrganizationProcessingSettings>;
   /** INSERT ... ON CONFLICT (email_account_id, provider_message_id) DO NOTHING. Null = duplicate. */

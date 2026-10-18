@@ -1,4 +1,4 @@
-import { OAuthError, refreshAccessToken, type OAuthClientConfig, type SecretBox } from "@emailbot/shared";
+import { imapCredentialContext, OAuthError, refreshAccessToken, type OAuthClientConfig, type SecretBox } from "@emailbot/shared";
 import type { AccountStore } from "../pipeline/ports.js";
 import { ProviderAuthError, type ProviderContext, type WorkerAccount } from "../providers/types.js";
 
@@ -18,6 +18,7 @@ export interface TokenManagerDeps {
  * expire. Plaintext tokens only live in memory for the duration of a job.
  */
 export function createProviderContext(account: WorkerAccount, deps: TokenManagerDeps): ProviderContext {
+  if (account.provider === "IMAP") return createImapContext(account, deps);
   const now = deps.now ?? Date.now;
   let cached: { token: string; expiresAt: number | null } | null = null;
 
@@ -75,6 +76,32 @@ export function createProviderContext(account: WorkerAccount, deps: TokenManager
         }
       }
       return refresh();
+    }
+  };
+}
+
+/**
+ * IMAP mailboxes have no OAuth token: the login is the username of
+ * provider_metadata.imap and the password stored by connect_imap_email_account,
+ * encrypted with SecretBox v2 bound to (organization, address). It is
+ * decrypted on demand, in memory, for the current job only; a legacy v1 value,
+ * a value copied from another mailbox or a wrong key fails with SecretBoxError
+ * (account marked CREDENTIALS_UNREADABLE, never retried).
+ */
+function createImapContext(account: WorkerAccount, deps: Pick<TokenManagerDeps, "secretBox">): ProviderContext {
+  return {
+    account,
+    getAccessToken() {
+      return Promise.reject(new ProviderAuthError("IMAP accounts do not use OAuth tokens", "NOT_OAUTH"));
+    },
+    async getImapCredentials() {
+      const settings = (account.providerMetadata?.imap ?? null) as { username?: unknown } | null;
+      const username = typeof settings?.username === "string" ? settings.username.trim() : "";
+      if (!username || !account.accessTokenEncrypted) {
+        throw new ProviderAuthError("The IMAP login is not stored. Connect the mailbox again.", "IMAP_CREDENTIALS_MISSING");
+      }
+      const password = deps.secretBox.decryptBound(account.accessTokenEncrypted, imapCredentialContext(account.organizationId, account.emailAddress));
+      return { username, password };
     }
   };
 }

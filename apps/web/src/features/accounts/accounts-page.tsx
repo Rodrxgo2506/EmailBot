@@ -7,7 +7,14 @@ import { Button } from "@/components/ui/button";
 import { Badge, Card, CardContent, CardDescription, CardHeader, CardTitle, EmptyState, ErrorMessage, PageHeader } from "@/components/ui/display";
 import { ConfirmDialog, SkeletonRows } from "@/components/ui/feedback";
 import { getErrorMessage } from "@/lib/errors";
-import { ACCOUNT_ERROR_LABELS, ACCOUNT_STATUS_LABELS, PROVIDER_LABELS } from "@/lib/labels";
+import {
+  ACCOUNT_ERROR_LABELS,
+  ACCOUNT_STATUS_LABELS,
+  IMAP_ACCOUNT_ERROR_FALLBACK,
+  IMAP_ACCOUNT_ERROR_LABELS,
+  IMAP_RECONNECT_HINT,
+  PROVIDER_LABELS
+} from "@/lib/labels";
 import { formatDate } from "@/lib/utils";
 import { useOrganization } from "@/providers/organization-provider";
 import { usePlanOverview } from "@/features/organization/api";
@@ -46,22 +53,36 @@ function connectHint(providers: EmailProviderAvailability | undefined): string {
   return `Conecta ${names.join(" o ")} para empezar a procesar correos.`;
 }
 
+/** Error line of an account: the known label, else the stored message. An IMAP mailbox in ERROR never shows the worker's text. */
+function errorLine(account: EmailAccount): string | null {
+  const label = account.lastErrorCode ? ACCOUNT_ERROR_LABELS[account.lastErrorCode] : undefined;
+  if (account.provider === "IMAP" && account.status === "ERROR") {
+    return (account.lastErrorCode ? IMAP_ACCOUNT_ERROR_LABELS[account.lastErrorCode] : undefined) ?? label ?? IMAP_ACCOUNT_ERROR_FALLBACK;
+  }
+  return account.lastErrorMessage ? (label ?? account.lastErrorMessage) : null;
+}
+
 function AccountCard({
   account,
   providers,
   onConfirm,
-  onReconnect
+  onReconnect,
+  onReconnectImap
 }: {
   account: EmailAccount;
   providers: EmailProviderAvailability | undefined;
   onConfirm(action: NonNullable<PendingAction>): void;
   onReconnect(provider: OAuthProviderSlug): void;
+  onReconnectImap(account: EmailAccount): void;
 }) {
   const { can } = useOrganization();
   const canManage = can("email-accounts:manage");
   const { update, sync } = useEmailAccountMutations();
   // Reconnecting goes through the provider's OAuth: only offered while that provider is available.
   const oauthProvider = account.provider === "IMAP" || providers?.[account.provider] !== true ? null : PROVIDER_SLUG[account.provider];
+  // IMAP in ERROR: connected again through the IMAP dialog (connection test with the E4 limits, then PAUSED).
+  const imapError = account.provider === "IMAP" && account.status === "ERROR";
+  const error = errorLine(account);
 
   const run = (promise: Promise<unknown>, message: string) =>
     promise.then(() => toast.success(message)).catch((error: unknown) => toast.error(getErrorMessage(error)));
@@ -83,12 +104,13 @@ function AccountCard({
               {account.displayName ? ` · ${account.displayName}` : ""}
             </p>
             <p className="text-xs text-muted-foreground">Última sincronización: {formatDate(account.lastSyncedAt)}</p>
-            {account.lastErrorMessage ? (
+            {error ? (
               <p className="mt-1 flex items-start gap-1 text-xs text-destructive">
                 <AlertCircle className="mt-0.5 size-3.5 shrink-0" />
-                {(account.lastErrorCode && ACCOUNT_ERROR_LABELS[account.lastErrorCode]) ?? account.lastErrorMessage}
+                {error}
               </p>
             ) : null}
+            {imapError ? <p className="mt-1 text-xs text-muted-foreground">{IMAP_RECONNECT_HINT}</p> : null}
           </div>
         </div>
 
@@ -108,7 +130,11 @@ function AccountCard({
               <Pause /> Pausar
             </Button>
           ) : null}
-          {canManage && (account.status === "PAUSED" || account.status === "ERROR") && account.provider !== "IMAP" ? (
+          {/* IMAP M1: resumable only while the server offers IMAP (GET /providers); the API activates it explicitly.
+              M1.4: an IMAP mailbox in ERROR is never resumed (the API answers IMAP_RECONNECT_REQUIRED): it is connected again. */}
+          {canManage &&
+          (account.status === "PAUSED" || (account.status === "ERROR" && account.provider !== "IMAP")) &&
+          (account.provider !== "IMAP" || providers?.IMAP === true) ? (
             <Button
               variant="outline"
               size="sm"
@@ -120,6 +146,11 @@ function AccountCard({
           ) : null}
           {canManage && oauthProvider && (account.status === "ERROR" || account.status === "DISCONNECTED") ? (
             <Button size="sm" onClick={() => onReconnect(oauthProvider)}>
+              <PlugZap /> Reconectar
+            </Button>
+          ) : null}
+          {canManage && imapError && providers?.IMAP === true ? (
+            <Button size="sm" onClick={() => onReconnectImap(account)}>
               <PlugZap /> Reconectar
             </Button>
           ) : null}
@@ -152,6 +183,8 @@ export function AccountsPage() {
   const { startOAuth, disconnect, remove } = useEmailAccountMutations();
   const [searchParams, setSearchParams] = useSearchParams();
   const [imapOpen, setImapOpen] = useState(false);
+  // Address of the IMAP mailbox being reconnected (null: a new IMAP account).
+  const [imapReconnectEmail, setImapReconnectEmail] = useState<string | null>(null);
   const [pending, setPending] = useState<PendingAction>(null);
 
   // Result of the OAuth callback redirect (/accounts?oauth=connected|error&reason=...).
@@ -215,7 +248,13 @@ export function AccountsPage() {
                   </div>
                 ) : null}
                 {providers.data.IMAP ? (
-                  <Button variant="outline" onClick={() => setImapOpen(true)}>
+                  <Button
+                    variant="outline"
+                    onClick={() => {
+                      setImapReconnectEmail(null);
+                      setImapOpen(true);
+                    }}
+                  >
                     <Server /> Agregar IMAP
                   </Button>
                 ) : null}
@@ -237,12 +276,22 @@ export function AccountsPage() {
       ) : (
         <div className="space-y-3">
           {accounts.data.map((account) => (
-            <AccountCard key={account.id} account={account} providers={providers.data} onConfirm={setPending} onReconnect={connect} />
+            <AccountCard
+              key={account.id}
+              account={account}
+              providers={providers.data}
+              onConfirm={setPending}
+              onReconnect={connect}
+              onReconnectImap={(target) => {
+                setImapReconnectEmail(target.emailAddress);
+                setImapOpen(true);
+              }}
+            />
           ))}
         </div>
       )}
 
-      {providers.data?.IMAP ? <ImapDialog open={imapOpen} onOpenChange={setImapOpen} /> : null}
+      {providers.data?.IMAP ? <ImapDialog open={imapOpen} onOpenChange={setImapOpen} reconnectEmail={imapReconnectEmail} /> : null}
 
       <ConfirmDialog
         open={pending !== null}

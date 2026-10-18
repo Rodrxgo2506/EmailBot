@@ -19,7 +19,8 @@ export interface RateLimitRedis {
   eval(script: string, numberOfKeys: number, ...args: Array<string | number>): Promise<unknown>;
 }
 
-const INCR_SCRIPT = `
+/** Fixed-window counter (also used directly by the IMAP limits, which never fall back). */
+export const INCR_SCRIPT = `
 local current = redis.call('INCR', KEYS[1])
 local ttl = redis.call('PTTL', KEYS[1])
 if current == 1 or ttl < 0 then

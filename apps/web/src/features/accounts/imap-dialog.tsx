@@ -10,41 +10,57 @@ import { Field } from "@/components/ui/field";
 import { Input } from "@/components/ui/form-controls";
 import { getErrorMessage } from "@/lib/errors";
 import { useEmailAccountMutations } from "./api";
+import { imapAccountPayload, imapSecurityForPort } from "./imap-dialog-model";
 
 const schema = z.object({
   emailAddress: z.email("Correo inválido"),
   displayName: z.string().max(200),
   host: z.string().trim().min(1, "Servidor obligatorio").regex(/^[A-Za-z0-9.-]+$/, "Servidor inválido"),
-  port: z.number({ error: "Puerto inválido" }).int().min(1).max(65535),
-  secure: z.boolean(),
+  // The API's only transports (no plaintext): 993 -> TLS, 143 -> STARTTLS (imap-dialog-model.ts).
+  port: z
+    .number({ error: "Puerto inválido" })
+    .int()
+    .refine((port) => imapSecurityForPort(port) !== null, "Usa el puerto 993 (TLS) o 143 (STARTTLS)"),
   username: z.string().trim().min(1, "Usuario obligatorio"),
   password: z.string().min(1, "Contraseña obligatoria").max(1000)
 });
 
 /**
- * Stores IMAP credentials (encrypted by the API). Synchronization is not
- * implemented yet; the account is created PAUSED and the UI says so.
+ * Stores IMAP credentials (encrypted by the API) after its connection test; the account is created PAUSED
+ * and nothing is synchronized until it is activated (IMAP M1). The body is built by imapAccountPayload:
+ * exactly the API's strict schema, with security derived from the port.
+ * reconnectEmail (M1.6): reconnection of an existing IMAP mailbox in ERROR. The same route and checks as a
+ * new account (POST /api/email-accounts/imap: connection test with its limits, then PAUSED); only the
+ * address is known (the stored server, user and password are never sent to the browser) and it is fixed.
  */
-export function ImapDialog({ open, onOpenChange }: { open: boolean; onOpenChange(open: boolean): void }) {
+export function ImapDialog({ open, onOpenChange, reconnectEmail = null }: { open: boolean; onOpenChange(open: boolean): void; reconnectEmail?: string | null }) {
   const { createImap } = useEmailAccountMutations();
+  const defaults = { emailAddress: "", displayName: "", host: "", port: 993, username: "", password: "" };
   const form = useForm({
     resolver: zodResolver(schema),
-    defaultValues: { emailAddress: "", displayName: "", host: "", port: 993, secure: true, username: "", password: "" }
+    defaultValues: defaults
   });
+  const reconnecting = reconnectEmail !== null;
 
   useEffect(() => {
     if (!open) {
       form.reset();
       createImap.reset();
+    } else if (reconnecting) {
+      form.reset({ ...defaults, emailAddress: reconnectEmail });
     }
-  }, [open]); // reset on close only
+  }, [open, reconnectEmail]); // reset on close; prefill the known address when reconnecting
 
   const onSubmit = form.handleSubmit(async (values) => {
-    await createImap.mutateAsync({
-      ...values,
-      ...(values.displayName.trim() ? { displayName: values.displayName.trim() } : { displayName: undefined })
-    });
-    toast.success("Cuenta IMAP guardada (sincronización pendiente de implementación)");
+    try {
+      await createImap.mutateAsync(imapAccountPayload(values));
+    } catch {
+      // Shown in the dialog (createImap.error), which stays open; never an unhandled rejection.
+      return;
+    }
+    toast.success(
+      reconnecting ? "Buzón IMAP reconectado: queda en pausa hasta que lo reanudes" : "Cuenta IMAP guardada en pausa. No se sincronizará ningún correo hasta que se active."
+    );
     onOpenChange(false);
   });
 
@@ -52,16 +68,17 @@ export function ImapDialog({ open, onOpenChange }: { open: boolean; onOpenChange
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-xl">
         <DialogHeader>
-          <DialogTitle>Agregar cuenta IMAP</DialogTitle>
+          <DialogTitle>{reconnecting ? "Reconectar cuenta IMAP" : "Agregar cuenta IMAP"}</DialogTitle>
           <DialogDescription>
-            Para dominios propios. Las credenciales se cifran en el servidor. La sincronización IMAP aún no está
-            disponible: la cuenta quedará en pausa.
+            {reconnecting
+              ? "Vuelve a introducir el servidor, el usuario y la contraseña: se probará de nuevo la conexión. Las credenciales se cifran en el servidor y la cuenta quedará en pausa hasta que la reanudes."
+              : "Para dominios propios. Se probará la conexión antes de guardar y las credenciales se cifran en el servidor. La cuenta quedará en pausa: no se sincronizará ningún correo hasta que se active."}
           </DialogDescription>
         </DialogHeader>
         <form onSubmit={onSubmit} className="grid gap-4 sm:grid-cols-2" noValidate>
           <ErrorMessage error={createImap.error ? new Error(getErrorMessage(createImap.error)) : null} />
           <Field label="Correo" htmlFor="imap-email" error={form.formState.errors.emailAddress?.message} className="sm:col-span-2">
-            <Input id="imap-email" type="email" {...form.register("emailAddress")} />
+            <Input id="imap-email" type="email" readOnly={reconnecting} {...form.register("emailAddress")} />
           </Field>
           <Field label="Nombre visible (opcional)" htmlFor="imap-name" className="sm:col-span-2">
             <Input id="imap-name" {...form.register("displayName")} />
@@ -78,10 +95,9 @@ export function ImapDialog({ open, onOpenChange }: { open: boolean; onOpenChange
           <Field label="Contraseña" htmlFor="imap-password" error={form.formState.errors.password?.message}>
             <Input id="imap-password" type="password" autoComplete="new-password" {...form.register("password")} />
           </Field>
-          <label className="flex items-center gap-2 text-sm sm:col-span-2">
-            <input type="checkbox" className="size-4 accent-[var(--primary)]" {...form.register("secure")} />
-            Usar TLS (recomendado)
-          </label>
+          <p className="text-sm text-muted-foreground sm:col-span-2">
+            Puerto 993: TLS. Puerto 143: STARTTLS. No se admiten conexiones sin cifrar.
+          </p>
           <DialogFooter className="sm:col-span-2">
             <Button variant="outline" onClick={() => onOpenChange(false)}>
               Cancelar

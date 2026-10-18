@@ -65,10 +65,64 @@ export class SecretBox {
     }
   }
 
+  /**
+   * Format "v2.<iv>.<tag>.<ciphertext>": same key and AES-256-GCM, plus
+   * additional authenticated data (`context`), so the ciphertext only decrypts
+   * for the record it was written for (copied to another row it fails).
+   * Used for IMAP passwords (imapCredentialContext). OAuth tokens keep v1:
+   * encrypt() / decrypt() are unchanged and never accept v2.
+   */
+  encryptBound(plaintext: string, context: string): string {
+    const aad = boundContext(context);
+    const iv = randomBytes(IV_BYTES);
+    const cipher = createCipheriv("aes-256-gcm", this.#key, iv, { authTagLength: TAG_BYTES });
+    cipher.setAAD(aad);
+    const ciphertext = Buffer.concat([cipher.update(plaintext, "utf8"), cipher.final()]);
+    return [BOUND_VERSION, iv.toString("base64url"), cipher.getAuthTag().toString("base64url"), ciphertext.toString("base64url")].join(".");
+  }
+
+  /** Decrypts a v2 value written for `context`. A v1 value, another context, key or altered data is refused. */
+  decryptBound(payload: string, context: string): string {
+    const aad = boundContext(context);
+    const [version, iv, tag, ciphertext, extra] = payload.split(".");
+    if (version !== BOUND_VERSION || !iv || !tag || ciphertext === undefined || extra !== undefined) {
+      throw new SecretBoxError("Unsupported encrypted payload format");
+    }
+    const ivBytes = Buffer.from(iv, "base64url");
+    const tagBytes = Buffer.from(tag, "base64url");
+    if (ivBytes.length !== IV_BYTES || tagBytes.length !== TAG_BYTES) throw new SecretBoxError("Unsupported encrypted payload format");
+
+    try {
+      const decipher = createDecipheriv("aes-256-gcm", this.#key, ivBytes, { authTagLength: TAG_BYTES });
+      decipher.setAAD(aad);
+      decipher.setAuthTag(tagBytes);
+      return Buffer.concat([decipher.update(Buffer.from(ciphertext, "base64url")), decipher.final()]).toString("utf8");
+    } catch {
+      throw new SecretBoxError("Encrypted value cannot be decrypted with the configured TOKEN_ENCRYPTION_KEY for this record");
+    }
+  }
+
   /** Prevents accidental serialization of the key. */
   toJSON(): string {
     return "[SecretBox]";
   }
+}
+
+const BOUND_VERSION = "v2";
+const TAG_BYTES = 16;
+
+function boundContext(context: string): Buffer {
+  if (typeof context !== "string" || context.length === 0) throw new SecretBoxError("An encryption context is required");
+  return Buffer.from(`emailbot:${context}`, "utf8");
+}
+
+/**
+ * Context of an IMAP password: the mailbox's unique key in email_accounts
+ * (organization, provider, lower-case address), known before the row exists
+ * and unchanged by a reconnection (the address of a row cannot be edited).
+ */
+export function imapCredentialContext(organizationId: string, emailAddress: string): string {
+  return `imap-password:v2:${organizationId}:${emailAddress.trim().toLowerCase()}`;
 }
 
 /** Constant-time string comparison for shared secrets (webhook tokens, etc). */

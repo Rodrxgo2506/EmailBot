@@ -22,8 +22,18 @@ export interface WorkerAccount {
 
 export interface ProviderContext {
   account: WorkerAccount;
-  /** Returns a valid access token, refreshing it when needed. */
+  /** Returns a valid access token, refreshing it when needed (OAuth providers only). */
   getAccessToken(options?: { forceRefresh?: boolean }): Promise<string>;
+  /**
+   * IMAP only: the mailbox login, decrypted in memory for this job (SecretBox v2
+   * bound to the mailbox). Never logged, stored or returned anywhere else.
+   */
+  getImapCredentials?(): Promise<ImapCredentials>;
+}
+
+export interface ImapCredentials {
+  username: string;
+  password: string;
 }
 
 export interface ChangeSet {
@@ -35,6 +45,13 @@ export interface ChangeSet {
   hasMore?: boolean;
   /** The cursor is too old for the provider's change history: recover with recoverMessageIds. */
   historyGap?: boolean;
+  /**
+   * IMAP only (M1): new messages skipped because their INTERNALDATE is older than the `since`
+   * option (never imported, never fetched); the cursor moved past them. Reported by syncAccount.
+   */
+  outOfWindow?: number;
+  /** IMAP only (A2): the UIDs counted in `outOfWindow`, so a run that stops early reports only those behind its cursor. */
+  outOfWindowUids?: number[];
 }
 
 export interface RecoverySet {
@@ -52,7 +69,8 @@ export interface RecoverySet {
  */
 export interface ProviderAdapter {
   readonly provider: EmailProvider;
-  listNewMessageIds(context: ProviderContext, options?: { maxMessages?: number }): Promise<ChangeSet>;
+  /** `since` (IMAP only): messages received before it are not imported (bounded catch-up after a pause). */
+  listNewMessageIds(context: ProviderContext, options?: { maxMessages?: number; since?: Date }): Promise<ChangeSet>;
   /** Bounded recovery after a history gap (Gmail). */
   recoverMessageIds?(context: ProviderContext, options: { since: Date; maxMessages: number }): Promise<RecoverySet>;
   /** Push subscription (Gmail users.watch on a Pub/Sub topic). */
@@ -76,6 +94,23 @@ export class ProviderAuthError extends Error {
   }
 }
 
+/**
+ * The connection cannot be made safely: forbidden destination (SSRF guard),
+ * invalid certificate, TLS failure, STARTTLS not offered, or settings that no
+ * longer pass validation. The account goes to ERROR; not retryable (retrying
+ * cannot fix it and must never fall back to a weaker connection).
+ * The message is generic: no address, host or credential.
+ */
+export class ProviderSecurityError extends Error {
+  constructor(
+    message: string,
+    readonly code: string
+  ) {
+    super(message);
+    this.name = "ProviderSecurityError";
+  }
+}
+
 /** Provider integration that exists only as a scaffold. Not retryable. */
 export class ProviderNotImplementedError extends Error {
   constructor(provider: EmailProvider, operation: string) {
@@ -92,5 +127,16 @@ export class ProviderTransientError extends Error {
   ) {
     super(message);
     this.name = "ProviderTransientError";
+  }
+}
+
+/**
+ * F5.4: a provider request cancelled by the worker shutdown (infrastructure/http-cancellation.ts). Transient: the
+ * job fails and BullMQ retries it; never an account error. The provider may still have processed the request.
+ */
+export class ProviderCancelledError extends ProviderTransientError {
+  constructor(message: string) {
+    super(message, null);
+    this.name = "ProviderCancelledError";
   }
 }

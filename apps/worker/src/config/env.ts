@@ -1,6 +1,27 @@
-import { encryptionKeyEnv, graphLifecycleUrl, optionalEnv, parseEnv, type OAuthClientConfig } from "@emailbot/shared";
+import {
+  CULQI_API_URL,
+  culqiKeyProblem,
+  encryptionKeyEnv,
+  EnvValidationError,
+  graphLifecycleUrl,
+  IMAP_TRIAL_ORGANIZATION_IDS,
+  imapOrganizationAllowlist,
+  optionalEnv,
+  parseEnv,
+  type OAuthClientConfig
+} from "@emailbot/shared";
 import { productionUrlProblem, PUBLIC_URL, REDIS_URL } from "@emailbot/validation";
 import { z } from "zod";
+import { DEFAULT_REDIS_COMMAND_TIMEOUT_MS, MAX_REDIS_COMMAND_TIMEOUT_MS, MIN_REDIS_COMMAND_TIMEOUT_MS } from "../infrastructure/app-redis.js";
+import {
+  DEFAULT_ATTACHMENT_TRANSFER_CONCURRENCY,
+  defaultAttachmentContentConcurrency,
+  MAX_ATTACHMENT_CONTENT_CONCURRENCY,
+  MAX_ATTACHMENT_TRANSFER_CONCURRENCY,
+  MIN_ATTACHMENT_CONTENT_CONCURRENCY,
+  MIN_ATTACHMENT_TRANSFER_CONCURRENCY
+} from "../infrastructure/attachment-transfers.js";
+import { DEFAULT_SHUTDOWN_TIMEOUT_MS, MIN_SHUTDOWN_TIMEOUT_MS } from "../infrastructure/shutdown.js";
 
 const envSchema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
@@ -25,6 +46,18 @@ const envSchema = z.object({
 
   WORKER_EVENTS_CONCURRENCY: z.coerce.number().int().min(1).max(100).default(5),
   WORKER_PROCESSING_CONCURRENCY: z.coerce.number().int().min(1).max(100).default(10),
+  /**
+   * IMAP A2: IMAP synchronizations run at once by one process, out of WORKER_EVENTS_CONCURRENCY (one events
+   * slot stays for Gmail / Microsoft only when WORKER_EVENTS_CONCURRENCY >= 2; see imapSyncSlotCount). Only
+   * used when IMAP synchronization is enabled.
+   */
+  WORKER_IMAP_SYNC_CONCURRENCY: z.coerce.number().int().min(1).max(100).default(2),
+  /**
+   * IMAP A2.1: IMAP jobs of the email-processing queue (recovery of incomplete emails) run at once by one process,
+   * out of WORKER_PROCESSING_CONCURRENCY (one slot stays for Gmail / Microsoft only when it is >= 2). Only used
+   * when IMAP synchronization is enabled.
+   */
+  WORKER_IMAP_PROCESSING_CONCURRENCY: z.coerce.number().int().min(1).max(100).default(2),
   /** Recovery polling (not the primary ingestion once Gmail push is enabled). 0 disables it. */
   WORKER_POLL_INTERVAL_MINUTES: z.coerce.number().int().min(0).max(1440).default(5),
   /**
@@ -44,6 +77,26 @@ const envSchema = z.object({
   WORKER_WATCH_RENEW_INTERVAL_MINUTES: z.coerce.number().int().min(5).max(1440).default(60),
   /** Attachments larger than this are recorded (metadata) but not stored. */
   WORKER_MAX_ATTACHMENT_BYTES: z.coerce.number().int().min(0).default(25 * 1024 * 1024),
+  /**
+   * F5.5: total limit of one attachment download or Storage upload that keeps progressing (a download with no byte
+   * for PROVIDER_HTTP_TIMEOUT_MS still fails then). See infrastructure/attachment-transfer.ts.
+   */
+  WORKER_ATTACHMENT_TIMEOUT_MS: z.coerce.number().int().min(10_000).max(600_000).default(120_000),
+  /**
+   * F5.6: attachment transfers (download + decoding + upload) at once in ONE worker process (not across instances).
+   * 1 to 16 (up to 25 attachment tasks may run at once with the default concurrency); invalid values stop the worker.
+   */
+  WORKER_ATTACHMENT_TRANSFER_CONCURRENCY: z.coerce
+    .number()
+    .int()
+    .min(MIN_ATTACHMENT_TRANSFER_CONCURRENCY)
+    .max(MAX_ATTACHMENT_TRANSFER_CONCURRENCY)
+    .default(DEFAULT_ATTACHMENT_TRANSFER_CONCURRENCY),
+  /**
+   * F5.6: decoded attachment contents held at once in ONE worker process (retry waits included). 1 to 32, at least
+   * WORKER_ATTACHMENT_TRANSFER_CONCURRENCY; unset: that value + 1. Invalid values stop the worker.
+   */
+  WORKER_ATTACHMENT_CONTENT_CONCURRENCY: optionalEnv(z.coerce.number().int().min(MIN_ATTACHMENT_CONTENT_CONCURRENCY).max(MAX_ATTACHMENT_CONTENT_CONCURRENCY)),
 
   /** Timeout of every call to Google / Microsoft (OAuth token refresh, Gmail, Graph, attachment downloads). */
   PROVIDER_HTTP_TIMEOUT_MS: z.coerce.number().int().min(1000).max(120_000).default(20_000),
@@ -57,9 +110,45 @@ const envSchema = z.object({
   WORKER_HEALTH_PORT: optionalEnv(z.coerce.number().int().min(1).max(65_535)),
   PORT: optionalEnv(z.coerce.number().int().min(1).max(65_535)),
   WORKER_HEALTH_HOST: z.string().min(1).default("0.0.0.0"),
-  SENTRY_DSN: optionalEnv(z.url())
+  /**
+   * F5.1: total shutdown budget (SIGTERM / SIGINT to process exit). The worker exits within it whatever is still
+   * pending; keep it below the platform's own grace period (Render: maxShutdownDelaySeconds, 120 s in
+   * deploy/render/render.yaml; the value applied to the service is not verified).
+   */
+  WORKER_SHUTDOWN_TIMEOUT_MS: z.coerce.number().int().min(MIN_SHUTDOWN_TIMEOUT_MS).max(600_000).default(DEFAULT_SHUTDOWN_TIMEOUT_MS),
+  /** F5.2: limit of each application Redis command (sync lock, health PING, realtime) and queue producer call. */
+  WORKER_REDIS_COMMAND_TIMEOUT_MS: z.coerce
+    .number()
+    .int()
+    .min(MIN_REDIS_COMMAND_TIMEOUT_MS)
+    .max(MAX_REDIS_COMMAND_TIMEOUT_MS)
+    .default(DEFAULT_REDIS_COMMAND_TIMEOUT_MS),
+  SENTRY_DSN: optionalEnv(z.url()),
+
+  /**
+   * Commercial V1 phase 2 (Culqi SANDBOX only): secret key used to re-read Culqi webhook events and
+   * subscriptions and to cancel replaced subscriptions. Integration keys only (sk_test_); a live key is refused.
+   * Unset = Culqi jobs are not processed (recorded as FAILED, retried when configured).
+   */
+  CULQI_SECRET_KEY: optionalEnv(z.string().min(1)),
+  CULQI_API_URL: optionalEnv(z.url())
 }).superRefine((env, ctx) => {
   const issue = (path: string, message: string) => ctx.addIssue({ code: "custom", path: [path], message });
+
+  // F5.6: every transfer holds a content permit, so fewer contents than transfers would leave transfer permits unused.
+  if (env.WORKER_ATTACHMENT_CONTENT_CONCURRENCY !== undefined && env.WORKER_ATTACHMENT_CONTENT_CONCURRENCY < env.WORKER_ATTACHMENT_TRANSFER_CONCURRENCY) {
+    issue("WORKER_ATTACHMENT_CONTENT_CONCURRENCY", "must be at least WORKER_ATTACHMENT_TRANSFER_CONCURRENCY");
+  }
+
+  // F5.5: an attachment transfer may not have a shorter limit than any other provider request.
+  if (env.WORKER_ATTACHMENT_TIMEOUT_MS < env.PROVIDER_HTTP_TIMEOUT_MS) {
+    issue("WORKER_ATTACHMENT_TIMEOUT_MS", "must be at least PROVIDER_HTTP_TIMEOUT_MS");
+  }
+
+  if (env.CULQI_SECRET_KEY !== undefined) {
+    const problem = culqiKeyProblem(env.CULQI_SECRET_KEY, "secret");
+    if (problem) issue("CULQI_SECRET_KEY", problem);
+  }
 
   // Every environment: subscriptions are created with the Microsoft account's delegated token.
   if (env.MICROSOFT_GRAPH_NOTIFICATION_URL !== undefined && !(env.MICROSOFT_CLIENT_ID && env.MICROSOFT_CLIENT_SECRET && env.MICROSOFT_REDIRECT_URI)) {
@@ -107,6 +196,10 @@ export interface WorkerConfig {
   oauth: { GMAIL: OAuthClientConfig | null; MICROSOFT: OAuthClientConfig | null };
   eventsConcurrency: number;
   processingConcurrency: number;
+  /** IMAP A2: requested IMAP synchronizations at once (see imapSyncSlotCount). */
+  imapSyncConcurrency: number;
+  /** IMAP A2.1: requested IMAP email-processing jobs at once (see imapSyncSlotCount). */
+  imapProcessingConcurrency: number;
   pollIntervalMinutes: number;
   /** null = Gmail push disabled (polling only). */
   gmailPubSubTopic: string | null;
@@ -114,9 +207,33 @@ export interface WorkerConfig {
   microsoftPush: { notificationUrl: string; lifecycleNotificationUrl: string } | null;
   watchRenewIntervalMinutes: number;
   maxAttachmentBytes: number;
+  /** F5.5: total limit (ms) of one attachment download / Storage upload, see infrastructure/attachment-transfer.ts. */
+  attachmentTimeoutMs: number;
+  /** F5.6: attachment transfers at once in this process, see infrastructure/attachment-transfers.ts. */
+  attachmentTransferConcurrency: number;
+  /** F5.6: decoded attachment contents held at once in this process, see infrastructure/attachment-transfers.ts. */
+  attachmentContentConcurrency: number;
+  /** F5.1: total shutdown budget (ms), see infrastructure/shutdown.ts. */
+  shutdownTimeoutMs: number;
+  /** F5.2: application Redis command / queue producer limit (ms), see infrastructure/app-redis.ts. */
+  redisCommandTimeoutMs: number;
   /** null = health endpoint disabled. */
   health: { port: number; host: string } | null;
   sentryDsn: string | null;
+  /**
+   * IMAP synchronization. FIXED to false in code (no environment variable can
+   * turn it on): IMAP accounts are never polled, synchronized or processed and
+   * the IMAP adapter is not even created until IMAP is launched by a code change.
+   */
+  imapSyncEnabled: boolean;
+  /**
+   * Organizations whose IMAP accounts may be polled, synchronized, processed or recovered when imapSyncEnabled is
+   * true (IMAP_TRIAL_ORGANIZATION_IDS in @emailbot/shared, validated). Fixed in code, never read from the
+   * environment; empty = nobody.
+   */
+  imapOrganizationIds: readonly string[];
+  /** Commercial V1 phase 2: Culqi sandbox; null = not configured. */
+  culqi: { secretKey: string; apiUrl: string } | null;
 }
 
 function oauth(
@@ -129,9 +246,31 @@ function oauth(
   return { clientId, clientSecret, redirectUri, tenant };
 }
 
+/** IMAP A2.1: queue concurrency needed so the IMAP slots always leave one slot to Gmail / Microsoft. */
+export const IMAP_MIN_QUEUE_CONCURRENCY = 2;
+
+/**
+ * IMAP A2 / A2.1: with IMAP synchronization enabled, each shared queue needs a concurrency of 2 or more: with 1,
+ * its only slot would be IMAP's (imapSyncSlotCount) and nothing would be reserved for Gmail / Microsoft. Throws
+ * EnvValidationError naming every offending variable. IMAP disabled: no requirement (concurrency 1 stays valid).
+ */
+export function assertImapWorkerConcurrency(config: Pick<WorkerConfig, "imapSyncEnabled" | "eventsConcurrency" | "processingConcurrency">): void {
+  if (!config.imapSyncEnabled) return;
+  const issues: string[] = [];
+  for (const [name, value] of [
+    ["WORKER_EVENTS_CONCURRENCY", config.eventsConcurrency],
+    ["WORKER_PROCESSING_CONCURRENCY", config.processingConcurrency]
+  ] as const) {
+    if (value < IMAP_MIN_QUEUE_CONCURRENCY) {
+      issues.push(`${name}: must be at least ${IMAP_MIN_QUEUE_CONCURRENCY} while IMAP synchronization is enabled (got ${value}), so IMAP never takes every slot of the queue`);
+    }
+  }
+  if (issues.length > 0) throw new EnvValidationError(issues);
+}
+
 export function loadWorkerConfig(source: NodeJS.ProcessEnv = process.env): WorkerConfig {
   const env = parseEnv(envSchema, source);
-  return {
+  const config: WorkerConfig = {
     env: env.NODE_ENV,
     logLevel: env.LOG_LEVEL ?? (env.NODE_ENV === "production" ? "info" : "debug"),
     supabaseUrl: env.SUPABASE_URL,
@@ -148,6 +287,8 @@ export function loadWorkerConfig(source: NodeJS.ProcessEnv = process.env): Worke
     },
     eventsConcurrency: env.WORKER_EVENTS_CONCURRENCY,
     processingConcurrency: env.WORKER_PROCESSING_CONCURRENCY,
+    imapSyncConcurrency: env.WORKER_IMAP_SYNC_CONCURRENCY,
+    imapProcessingConcurrency: env.WORKER_IMAP_PROCESSING_CONCURRENCY,
     pollIntervalMinutes: env.WORKER_POLL_INTERVAL_MINUTES,
     gmailPubSubTopic: env.GMAIL_PUBSUB_TOPIC ?? null,
     microsoftPush: env.MICROSOFT_GRAPH_NOTIFICATION_URL
@@ -155,9 +296,20 @@ export function loadWorkerConfig(source: NodeJS.ProcessEnv = process.env): Worke
       : null,
     watchRenewIntervalMinutes: env.WORKER_WATCH_RENEW_INTERVAL_MINUTES,
     maxAttachmentBytes: env.WORKER_MAX_ATTACHMENT_BYTES,
+    attachmentTimeoutMs: env.WORKER_ATTACHMENT_TIMEOUT_MS,
+    attachmentTransferConcurrency: env.WORKER_ATTACHMENT_TRANSFER_CONCURRENCY,
+    attachmentContentConcurrency: env.WORKER_ATTACHMENT_CONTENT_CONCURRENCY ?? defaultAttachmentContentConcurrency(env.WORKER_ATTACHMENT_TRANSFER_CONCURRENCY),
     health: (env.WORKER_HEALTH_PORT ?? env.PORT) !== undefined
       ? { port: (env.WORKER_HEALTH_PORT ?? env.PORT) as number, host: env.WORKER_HEALTH_HOST }
       : null,
-    sentryDsn: env.SENTRY_DSN ?? null
+    sentryDsn: env.SENTRY_DSN ?? null,
+    shutdownTimeoutMs: env.WORKER_SHUTDOWN_TIMEOUT_MS,
+    redisCommandTimeoutMs: env.WORKER_REDIS_COMMAND_TIMEOUT_MS,
+    // Not read from the environment on purpose (see WorkerConfig.imapSyncEnabled).
+    imapSyncEnabled: false,
+    imapOrganizationIds: imapOrganizationAllowlist(IMAP_TRIAL_ORGANIZATION_IDS),
+    culqi: env.CULQI_SECRET_KEY ? { secretKey: env.CULQI_SECRET_KEY, apiUrl: env.CULQI_API_URL ?? CULQI_API_URL } : null
   };
+  assertImapWorkerConcurrency(config);
+  return config;
 }

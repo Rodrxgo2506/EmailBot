@@ -62,8 +62,8 @@ const planOverview = () => ({
     subscriptionStatus: subscribed ? "ACTIVE" : null,
     limits: {},
     features: subscribed
-      ? { GMAIL: true, MICROSOFT: microsoftInPlan, ADVANCED_STATS: microsoftInPlan, PORTAL: microsoftInPlan, API: false, PRIORITY_SUPPORT: microsoftInPlan }
-      : { GMAIL: false, MICROSOFT: false, ADVANCED_STATS: false, PORTAL: false, API: false, PRIORITY_SUPPORT: false }
+      ? { GMAIL: true, MICROSOFT: microsoftInPlan, IMAP: microsoftInPlan, ADVANCED_STATS: microsoftInPlan, PORTAL: microsoftInPlan, API: false, PRIORITY_SUPPORT: microsoftInPlan }
+      : { GMAIL: false, MICROSOFT: false, IMAP: false, ADVANCED_STATS: false, PORTAL: false, API: false, PRIORITY_SUPPORT: false }
   },
   usage: {},
   subscription: null

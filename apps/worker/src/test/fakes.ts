@@ -1,6 +1,6 @@
 import type { EmailRuleRow } from "@emailbot/rules-engine";
 import type { EmailProcessingJob, NotificationJob } from "@emailbot/shared";
-import type { CustomerIdentifierType, CustomerStatus, NormalizedEmail, RealtimeEvent } from "@emailbot/types";
+import type { CustomerIdentifierType, CustomerStatus, EmailProvider, NormalizedEmail, RealtimeEvent } from "@emailbot/types";
 import { vi } from "vitest";
 import type {
   AccountStore,
@@ -24,6 +24,8 @@ import type { ChangeSet, ProviderAdapter, WorkerAccount } from "../providers/typ
 
 export const ORG = "11111111-1111-4111-8111-111111111111";
 export const OTHER_ORG = "22222222-2222-4222-8222-222222222222";
+/** Organizations the worker tests that turn IMAP on put in the trial allowlist (production: fixed in code, empty). */
+export const IMAP_TEST_ORGANIZATION_IDS: readonly string[] = [ORG, OTHER_ORG];
 
 export function makeAccount(overrides: Partial<WorkerAccount> = {}): WorkerAccount {
   return {
@@ -144,23 +146,57 @@ export class MemoryEmailStore implements EmailStore {
     this.stateHistory.push({ emailId, status: state.status });
   });
 
-  listIncompleteEmails = vi.fn(async ({ startedBefore, limit }: { startedBefore: string; limit: number }): Promise<IncompleteEmail[]> =>
-    this.rows
-      .map((row, index) => ({ row, id: `email-${index + 1}` }))
-      .filter(
-        ({ row }) =>
-          (row.processing_status === "RECEIVED" || row.processing_status === "PROCESSING") &&
-          String(row.processing_started_at) < startedBefore
-      )
-      .slice(0, limit)
-      .map(({ row, id }) => ({
+  /** Provider of each mailbox (email_accounts.provider); GMAIL when absent. */
+  accountProviders = new Map<string, EmailProvider>();
+
+  /** Provider-free order (processing_started_at, then id): the IMAP-only query's total order (F2.2). */
+  private static byKey(a: { startedAt: string; id: string }, b: { startedAt: string; id: string }): number {
+    if (a.startedAt !== b.startedAt) return a.startedAt < b.startedAt ? -1 : 1;
+    return a.id === b.id ? 0 : a.id < b.id ? -1 : 1;
+  }
+
+  /**
+   * Mirrors the store query: incomplete, stale, oldest first (stable), optionally IMAP only / every provider but IMAP;
+   * IMAP only (F2.2): ordered by (processing_started_at, id), after a page key, minus excluded organizations.
+   */
+  listIncompleteEmails = vi.fn(
+    async ({
+      startedBefore,
+      limit,
+      imap,
+      after,
+      excludeOrganizations
+    }: {
+      startedBefore: string;
+      limit: number;
+      imap?: "only" | "exclude";
+      after?: { startedAt: string; id: string };
+      excludeOrganizations?: string[];
+    }): Promise<IncompleteEmail[]> => {
+      const rows = this.rows
+        .map((row, index) => ({ row, id: `email-${index + 1}`, startedAt: String(row.processing_started_at), provider: this.accountProviders.get(row.email_account_id) ?? ("GMAIL" as EmailProvider) }))
+        .filter(
+          ({ row, provider, startedAt }) =>
+            (row.processing_status === "RECEIVED" || row.processing_status === "PROCESSING") &&
+            startedAt < startedBefore &&
+            (imap === undefined || (imap === "only") === (provider === "IMAP"))
+        );
+      const page =
+        imap === "only"
+          ? rows
+              .filter((entry) => !excludeOrganizations?.includes(entry.row.organization_id) && (!after || MemoryEmailStore.byKey(entry, after) > 0))
+              .sort((a, b) => MemoryEmailStore.byKey(a, b))
+          : rows.sort((a, b) => a.startedAt.localeCompare(b.startedAt));
+      return page.slice(0, limit).map(({ row, id, provider, startedAt }) => ({
         id,
         organizationId: row.organization_id,
         emailAccountId: row.email_account_id,
-        provider: "GMAIL" as const,
+        provider,
         providerMessageId: row.provider_message_id,
-        processingAttempts: Number(row.processing_attempts ?? 0)
-      }))
+        processingAttempts: Number(row.processing_attempts ?? 0),
+        ...(imap === "only" ? { processingStartedAt: startedAt } : {})
+      }));
+    }
   );
 
   loadEnabledRules = vi.fn(async (organizationId: string) => {
@@ -356,10 +392,13 @@ export const SUBSCRIBED: CommercialAccess = { allowed: true, access: "SUBSCRIPTI
  */
 export function makeAccountStore(
   accounts: WorkerAccount[],
-  access: Map<string, CommercialAccess> = new Map()
+  access: Map<string, CommercialAccess> = new Map(),
+  /** IMAP M1: organizations WITHOUT the plan feature IMAP (default: every organization has it). */
+  imapNotEntitled: Set<string> = new Set()
 ): AccountStore & Record<string, ReturnType<typeof vi.fn>> {
   return {
     commercialAccess: vi.fn(async (ids: string[]) => new Map(ids.map((id) => [id, access.get(id) ?? SUBSCRIBED]))),
+    imapEntitled: vi.fn(async (organizationId: string) => !imapNotEntitled.has(organizationId)),
     getAccount: vi.fn(async (id: string) => accounts.find((account) => account.id === id) ?? null),
     findActiveAccountsByAddress: vi.fn(async (provider: string, address: string) =>
       accounts.filter((a) => a.provider === provider && a.emailAddress === address && a.status === "ACTIVE")
@@ -374,9 +413,11 @@ export function makeAccountStore(
     ),
     updateSyncState: vi.fn(async () => undefined),
     // Compare-and-set on the in-memory account (the database does the same with .eq(sync_cursor)).
-    advanceSyncCursor: vi.fn(async (id: string, state: { from: string | null; to: string | null; lastSyncedAt: string }) => {
+    advanceSyncCursor: vi.fn(async (id: string, state: { from: string | null; to: string | null; lastSyncedAt: string; requireActive?: boolean }) => {
       const account = accounts.find((candidate) => candidate.id === id);
       if (!account || account.syncCursor !== state.from) return false;
+      // IMAP M1 D1: the database adds .eq(status, ACTIVE) to the same UPDATE.
+      if (state.requireActive && account.status !== "ACTIVE") return false;
       account.syncCursor = state.to;
       account.lastSyncedAt = state.lastSyncedAt;
       return true;

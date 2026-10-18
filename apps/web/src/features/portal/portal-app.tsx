@@ -24,14 +24,17 @@ export function PortalApp({ api, realtime }: { api?: PortalApi; realtime?: Porta
   const [connector] = useState<PortalRealtime | null>(() => (realtime !== undefined ? realtime : api ? null : createPortalRealtime(env.apiUrl)));
   return (
     <PortalProvider api={client} realtime={connector}>
-      <Routes>
-        <Route path="login" element={<PortalLoginPage />} />
-        <Route element={<PortalLayout />}>
-          <Route index element={<PortalInboxPage />} />
-          <Route path="email/:deliveryId" element={<PortalEmailPage />} />
-        </Route>
-        <Route path="*" element={<Navigate to="/portal" replace />} />
-      </Routes>
+      {/* EmailBot brand palette (index.css): same tokens, scoped to the portal. */}
+      <div className="portal-theme min-h-screen bg-background text-foreground">
+        <Routes>
+          <Route path="login" element={<PortalLoginPage />} />
+          <Route element={<PortalLayout />}>
+            <Route index element={<PortalInboxPage />} />
+            <Route path="email/:deliveryId" element={<PortalEmailPage />} />
+          </Route>
+          <Route path="*" element={<Navigate to="/portal" replace />} />
+        </Routes>
+      </div>
     </PortalProvider>
   );
 }

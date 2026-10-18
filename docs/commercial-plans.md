@@ -27,6 +27,7 @@ automáticos, prorrateos, créditos, reembolsos, SUNAT / facturación electróni
 | `RETENTION_DAYS` | 30 | 90 | 365 |
 | `GMAIL` | sí | sí | sí |
 | `MICROSOFT` | no | sí | sí |
+| `IMAP` (correo externo; aún desactivado) | no | sí | sí |
 | `ADVANCED_STATS` | no | sí | sí |
 | `PORTAL` | no | sí | sí |
 | `API` | no | no | sí |
@@ -124,7 +125,7 @@ Con acceso se aplican los límites duros: `403 PLAN_LIMIT_REACHED` / `PLAN_FEATU
 |---|---|
 | `POST /email-accounts/oauth/:provider/start` | suscripción; feature `GMAIL` / `MICROSOFT`; `EMAIL_ACCOUNTS` (salvo que pueda ser la re-autorización de un buzón que ya cuenta) |
 | `GET /oauth/:provider/callback` | de nuevo suscripción y feature, antes de canjear el código; `EMAIL_ACCOUNTS` con la dirección real, **atómico** (ver abajo) |
-| `POST /email-accounts/imap` | `EMAIL_ACCOUNTS` (IMAP sigue desactivado) |
+| `POST /email-accounts/imap` | IMAP sigue desactivado (503). Preparado (E1): feature `IMAP` + `EMAIL_ACCOUNTS` compartido, decididos en `public.connect_imap_email_account` bajo el mismo bloqueo por organización que OAuth |
 | `POST /rules` | `RULES` |
 | `POST /bots` (ACTIVE), `PATCH /bots/:id` (→ ACTIVE) | `BOTS` (bots activos) |
 | `POST /customers` (ACTIVE), `PATCH /customers/:id` (→ ACTIVE) | `CUSTOMERS` (clientes activos) |
@@ -234,11 +235,14 @@ suscripción.
 - Fase 2: la única acción a sustituir es la del botón «Elegir / Mejorar» (`PlanCta` `CHOOSE` en
   `apps/web/src/features/plans/plans-model.ts`), que pasará del aviso al checkout.
 
-**Flujo objetivo con Culqi (fase 2):**
-1. `/planes` → `/checkout?plan=PRO&period=MONTHLY`.
-2. Pago confirmado por webhook.
-3. `/register?purchase=…` → crear la cuenta y la organización.
-4. `private.activate_subscription(..., origin CULQI, external_event_id = id del evento de Culqi)`.
+**Fase 2: Culqi (implementada SOLO en sandbox, rama `feat/culqi-subscriptions-sandbox`):**
+- Detalle completo en [billing-culqi.md](billing-culqi.md).
+- Flujo: usuario autenticado → «Elegir / Mejorar» → Culqi Custom Checkout (token) → `POST /api/billing/subscriptions`
+  (cliente, tarjeta y suscripción en Culqi) → pago confirmado por webhook o reconciliación →
+  `private.activate_subscription(..., origin CULQI)` con una clave idempotente por ciclo de cobro.
+- Upgrades (BÁSICO → PRO / BUSINESS, PRO → BUSINESS), sin downgrade ni prorrateo.
+- Las llaves live se rechazan.
+- Comprar antes de registrarse (`/register?purchase=…`) sigue pendiente: hoy se paga ya con cuenta y organización.
 
 No hay endpoints de pago simulado.
 

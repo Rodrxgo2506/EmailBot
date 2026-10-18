@@ -12,9 +12,8 @@ import { formatPen, PLAN_FEATURE_LABELS } from "@/lib/labels";
  * entitlements without a product behind them yet (docs/commercial-plans.md),
  * so they are not sold here either.
  *
- * Online purchase does not exist yet: every "choose / upgrade" action opens
- * the "Próximamente" notice (PlanCta kind CHOOSE). The payments phase replaces
- * that single action with the checkout; the page does not change.
+ * Every "choose / upgrade / pay by card" action opens ChoosePlanDialog: the
+ * card checkout when billing is enabled, the "Próximamente" notice otherwise.
  */
 
 /** Limits shown, with the wording of the offer (what the API counts). */
@@ -113,13 +112,22 @@ export function comparisonGroups(plans: readonly PlanCatalogEntry[]): Comparison
 }
 
 /** The viewer: anonymous, or a member whose organization has (or lacks) a plan. */
-export type Viewer = { authenticated: false } | { authenticated: true; currentPlan: CommercialPlan | null };
+export type Viewer =
+  | { authenticated: false }
+  | {
+      authenticated: true;
+      currentPlan: CommercialPlan | null;
+      /** The current plan can be moved to card payments (canPayCurrentPlanByCard, features/billing). */
+      canPayCurrentByCard?: boolean;
+    };
 
 export type PlanCta =
   /** Anonymous visitor: the existing sign-up. */
   | { kind: "REGISTER"; label: string; to: "/register" }
   /** The organization's plan: shown, not actionable. */
   | { kind: "CURRENT"; label: string }
+  /** The organization's plan, not paid by card yet (legacy / manual): the checkout moves it to card payments. */
+  | { kind: "PAY_BY_CARD"; label: string }
   /** Choose / upgrade: today the "Próximamente" notice; later the checkout. */
   | { kind: "CHOOSE"; label: string }
   /** A plan below the current one (downgrades are handled by the EmailBot team). */
@@ -128,10 +136,37 @@ export type PlanCta =
 export function planCta(plan: PlanCatalogEntry, viewer: Viewer, catalog: readonly PlanCatalogEntry[]): PlanCta {
   if (!viewer.authenticated) return { kind: "REGISTER", label: "Crear cuenta", to: "/register" };
   if (viewer.currentPlan === null) return { kind: "CHOOSE", label: `Elegir ${plan.name}` };
-  if (plan.code === viewer.currentPlan) return { kind: "CURRENT", label: "Tu plan actual" };
+  if (plan.code === viewer.currentPlan) {
+    return viewer.canPayCurrentByCard ? { kind: "PAY_BY_CARD", label: payByCardLabel(plan) } : { kind: "CURRENT", label: "Tu plan actual" };
+  }
   const current = catalog.find((entry) => entry.code === viewer.currentPlan);
   if (current && plan.sortOrder < current.sortOrder) return { kind: "LOWER", label: "Incluido en tu plan" };
   return { kind: "CHOOSE", label: `Mejorar a ${plan.name}` };
+}
+
+/** "Pagar Básico con tarjeta": same plan, not an upgrade. */
+export function payByCardLabel(plan: PlanCatalogEntry): string {
+  return `Pagar ${plan.name} con tarjeta`;
+}
+
+export interface MyPlanOption {
+  plan: PlanCatalogEntry;
+  /** PAY_BY_CARD: the current plan moved to card payments; UPGRADE: a higher plan; CHOOSE: no plan yet. */
+  action: "PAY_BY_CARD" | "UPGRADE" | "CHOOSE";
+  label: string;
+}
+
+/**
+ * Settings > Mi plan: the current plan first when it can be moved to card payments, then the plans above it
+ * (every plan without commercial access). Each one opens the same checkout (ChoosePlanDialog).
+ */
+export function myPlanOptions(catalog: readonly PlanCatalogEntry[], currentPlan: CommercialPlan | null, canPayCurrentByCard: boolean): MyPlanOption[] {
+  const current = catalog.find((entry) => entry.code === currentPlan) ?? null;
+  if (!current) return catalog.map((plan) => ({ plan, action: "CHOOSE", label: `Elegir ${plan.name}` }));
+  return [
+    ...(canPayCurrentByCard ? [{ plan: current, action: "PAY_BY_CARD" as const, label: payByCardLabel(current) }] : []),
+    ...upgradeOptions(catalog, currentPlan).map((plan) => ({ plan, action: "UPGRADE" as const, label: `Mejorar a ${plan.name}` }))
+  ];
 }
 
 /** Plans above the current one (all of them without a plan); [] = the most complete plan already. */

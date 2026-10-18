@@ -81,4 +81,13 @@ describe("worker health endpoint configuration", () => {
     expect(() => loadWorkerConfig({ ...local, TOKEN_ENCRYPTION_KEY: Buffer.alloc(32).toString("base64") })).toThrow(/TOKEN_ENCRYPTION_KEY: is not random enough/);
     expect(() => loadWorkerConfig({ ...local, TOKEN_ENCRYPTION_KEY: "short" })).toThrow(/TOKEN_ENCRYPTION_KEY: must be the standard base64/);
   });
+
+  it("Culqi (phase 2): optional, sandbox keys only; a live secret key refuses to start (the key is never echoed)", () => {
+    expect(loadWorkerConfig(local).culqi).toBeNull();
+    expect(loadWorkerConfig({ ...local, CULQI_SECRET_KEY: "sk_test_abcdefgh12345678" }).culqi).toEqual({ secretKey: "sk_test_abcdefgh12345678", apiUrl: "https://api.culqi.com" });
+    const live = () => loadWorkerConfig({ ...local, CULQI_SECRET_KEY: "sk_live_abcdefgh12345678" });
+    expect(live).toThrow(/CULQI_SECRET_KEY: live keys are not enabled in this phase/);
+    expect(live).not.toThrow(/sk_live_abcdefgh12345678/);
+    expect(() => loadWorkerConfig({ ...local, CULQI_SECRET_KEY: "pk_test_abcdefgh12345678" })).toThrow(/CULQI_SECRET_KEY: must be a Culqi secret key/);
+  });
 });

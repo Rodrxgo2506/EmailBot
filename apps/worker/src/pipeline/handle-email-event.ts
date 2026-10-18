@@ -1,6 +1,7 @@
 import {
   generateClientState,
   hashClientState,
+  imapAllowedForOrganization,
   isGraphSubscriptionId,
   MICROSOFT_SUBSCRIPTION_LIFETIME_MS,
   readMicrosoftSubscription,
@@ -14,11 +15,14 @@ import {
   type SyncReason
 } from "@emailbot/shared";
 import { ProviderHttpError } from "../providers/http.js";
+import { formatImapCursor, parseImapCursor, parseImapMessageId } from "../providers/imap/cursor.js";
+import { IMAP_RUN_BUDGET, imapRunBudgetExhausted, withImapRunBudget } from "../providers/imap/deadline.js";
 import type { MicrosoftSubscriptionClient } from "../providers/microsoft/subscriptions.js";
 import type { ProviderRegistry } from "../providers/registry.js";
-import { ProviderAuthError, ProviderTransientError, type ProviderContext, type WorkerAccount } from "../providers/types.js";
+import { ProviderAuthError, ProviderSecurityError, ProviderTransientError, type ProviderContext, type WorkerAccount } from "../providers/types.js";
+import { handleCulqiEvent, reconcileCulqiSubscription, reconcileDueCulqiSubscriptions, type BillingDeps, type BillingOutcome } from "./billing.js";
 import { hasCommercialAccess, withCommercialAccess } from "./commercial-access.js";
-import type { AccountStore, AuditRecorder, EmailStore, JobProducer, Logger, SubscriptionMaintenance, SyncLock } from "./ports.js";
+import type { AccountStore, AuditRecorder, EmailStore, IncompleteEmail, JobProducer, Logger, SubscriptionMaintenance, SyncLock } from "./ports.js";
 import { AttachmentsPendingError, type ProcessEmailOutcome } from "./process-email.js";
 
 /*
@@ -66,8 +70,35 @@ export interface HandleEventDeps {
   microsoftSubscriptions?: MicrosoftSubscriptionClient;
   /** Commercial V1.2: periodic expiration of subscriptions (EXPIRE_SUBSCRIPTIONS). */
   subscriptions?: SubscriptionMaintenance;
+  /**
+   * IMAP synchronization (worker config, fixed false until IMAP is launched).
+   * Absent / false: IMAP accounts are never polled, synchronized or processed.
+   */
+  imapSyncEnabled?: boolean;
+  /**
+   * Trial allowlist (worker config, fixed in code): even with imapSyncEnabled, only IMAP accounts of these
+   * organizations are polled, synchronized or recovered. Absent / empty: none (fail closed).
+   */
+  imapOrganizationIds?: readonly string[];
+  /**
+   * IMAP A2: IMAP synchronization runs allowed at once in this process (a share of the events concurrency, so
+   * IMAP never takes every slot Gmail / Microsoft need). Busy: syncAccount throws ImapSlotsBusyError and the
+   * job runner delays the job (no attempt used). Absent: no limit (tests, scripts).
+   */
+  imapSlots?: ImapSyncSlots;
+  /** IMAP A2: run budget (default IMAP_RUN_BUDGET; shorter only in tests). */
+  imapRunBudget?: { softMs: number; hardMs: number };
+  /** Commercial V1 phase 2 (Culqi sandbox): CULQI_EVENT / CULQI_RECONCILE. */
+  billing?: Omit<BillingDeps, "logger" | "now">;
   now?: () => number;
   logger: Logger;
+}
+
+/** In-process counter of running IMAP synchronizations (infrastructure/imap-slots.ts). */
+export interface ImapSyncSlots {
+  /** Takes a slot if one is free. */
+  tryAcquire(): boolean;
+  release(): void;
 }
 
 export interface HandleEventOutcome {
@@ -78,13 +109,31 @@ export interface HandleEventOutcome {
   processed?: number;
   /** Subscriptions expired by EXPIRE_SUBSCRIPTIONS. */
   expired?: number;
+  /** CULQI_EVENT / CULQI_RECONCILE result. */
+  billing?: BillingOutcome;
+  /** CULQI_RECONCILE_DUE: subscriptions re-read, stale checkouts closed, failures (retried next run). */
+  billingReconcile?: { reconciled: number; expired: number; failed: number };
 }
 
 const POLL_BATCH = 500;
 
 /** An email still RECEIVED / PROCESSING this long after it started was abandoned by its job. */
 export const RECOVERY_STALE_MS = 15 * 60 * 1000;
+/** Incomplete emails of every provider but IMAP recovered per run (unchanged; IMAP never takes a place of it, F2). */
 export const RECOVERY_BATCH = 100;
+/**
+ * F2: incomplete emails of IMAP mailboxes recovered per run, in a batch of their own (only while IMAP
+ * synchronization is enabled). Their jobs run in this process's IMAP processing slots (2 by default, up to
+ * 9 minutes each) and the sweep runs every 10 minutes: 20 is ample for several workers while keeping the IMAP
+ * backlog on email-processing small. An email that keeps failing reaches MAX_PROCESSING_ATTEMPTS and leaves the
+ * batch (FAILED). F2.2: filled by selectImapRecovery (bounded scan, organizations shared fairly).
+ */
+export const IMAP_RECOVERY_BATCH = 20;
+/** F2.2: rows read per page of the IMAP recovery scan, and at most per run (no persistent cursor). */
+export const IMAP_RECOVERY_PAGE = 50;
+export const IMAP_RECOVERY_SCAN_MAX = 500;
+/** F2.2: organizations left out of the scan (blocked or settled) at most; each page query lists them. */
+export const IMAP_RECOVERY_MAX_EXCLUDED_ORGANIZATIONS = 100;
 /**
  * Every run (first attempt, BullMQ retries, recovery runs) increments
  * processing_attempts. Past this, the email is marked FAILED instead of being
@@ -102,11 +151,38 @@ export const RECOVERY_MAX_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 export const RECOVERY_DEFAULT_WINDOW_MS = 24 * 60 * 60 * 1000;
 /** Messages processed concurrently inside one sync run. */
 export const MESSAGE_CONCURRENCY = 3;
+/**
+ * IMAP M1 (decision B): every IMAP run lists at most this many new messages (the rest continue in a
+ * CONTINUATION run from the last one processed) and ignores messages received more than
+ * RECOVERY_MAX_WINDOW_MS ago (counted and reported, never imported).
+ */
+export const IMAP_MAX_MESSAGES_PER_SYNC = MAX_RECOVERY_MESSAGES;
+/**
+ * IMAP M1 (D1): skip reasons meaning "this mailbox must not be processed now" (paused, disconnected, organization
+ * suspended, no commercial access, IMAP no longer in the plan, IMAP disabled). The IMAP run stops at once and keeps
+ * its cursor, so those messages are processed after a resume. Gmail / Microsoft keep counting them as skipped.
+ */
+const IMAP_HALT_REASONS: ReadonlySet<string> = new Set([
+  "account_not_found",
+  "account_inactive",
+  "organization_inactive",
+  "subscription_inactive",
+  "imap_disabled",
+  "imap_not_entitled"
+]);
 /** Lease of the per-account sync lock (renewed by nothing: a run is bounded well below it). */
 export const SYNC_LOCK_TTL_MS = 15 * 60 * 1000;
 /** Gmail watches last 7 days, Graph subscriptions ~70 h; both are renewed when less than this remains. */
 export const WATCH_RENEW_MARGIN_MS = 24 * 60 * 60 * 1000;
 export const WATCH_RENEW_BATCH = 100;
+
+/** IMAP A2: every IMAP slot of this process is busy: the job runner delays the job (no attempt used, nothing touched). */
+export class ImapSlotsBusyError extends Error {
+  constructor(readonly emailAccountId: string) {
+    super("Every IMAP synchronization slot of this worker is busy");
+    this.name = "ImapSlotsBusyError";
+  }
+}
 
 /** Another sync of the same account is running: retried with backoff (BullMQ). */
 export class SyncBusyError extends Error {
@@ -134,7 +210,7 @@ export function recoverySince(lastSyncedAt: string | null | undefined, now: numb
 
 /** Errors that must stop the whole run (credentials); everything else is per message. */
 function isAccountFatal(error: unknown): boolean {
-  return error instanceof ProviderAuthError || error instanceof SecretBoxError;
+  return error instanceof ProviderAuthError || error instanceof ProviderSecurityError || error instanceof SecretBoxError;
 }
 
 /**
@@ -146,31 +222,62 @@ function isAccountFatal(error: unknown): boolean {
  * is not advanced and the run is retried; already-stored messages are
  * deduplicated by the database on the retry.
  */
-async function processMessages(account: WorkerAccount, messageIds: string[], deps: HandleEventDeps): Promise<{ processed: number; skipped: number }> {
+async function processMessages(
+  account: WorkerAccount,
+  messageIds: string[],
+  deps: HandleEventDeps,
+  options: { recovery?: boolean } = {}
+): Promise<MessagesOutcome> {
   const processMessage = deps.processMessage;
+  // IMAP only: messages listed by a history-gap recovery may be stored already under their old UIDVALIDITY.
+  const recovery = options.recovery === true && account.provider === "IMAP" ? ({ recovery: true } as const) : {};
   if (!processMessage) throw new Error("processMessage is not configured");
+  const haltOnState = account.provider === "IMAP";
+  const imap = account.provider === "IMAP";
+  // IMAP A2: which messages are durably handled, so the cursor can move past a contiguous prefix only.
+  const done: boolean[] = messageIds.map(() => false);
+  let budgetExhausted = false;
   let processed = 0;
   let skipped = 0;
   const failures: unknown[] = [];
   let fatal: unknown = null;
+  let halted: string | null = null;
   let next = 0;
 
   const workerLoop = async () => {
-    while (fatal === null && next < messageIds.length) {
-      const providerMessageId = messageIds[next++] as string;
+    while (fatal === null && halted === null && next < messageIds.length) {
+      // IMAP A2: past the run's soft budget (or at worker shutdown) no new message is started.
+      if (imap && imapRunBudgetExhausted()) {
+        budgetExhausted = true;
+        break;
+      }
+      const index = next++;
+      const providerMessageId = messageIds[index] as string;
       try {
         const outcome = await processMessage({
           organizationId: account.organizationId,
           emailAccountId: account.id,
           provider: account.provider,
-          providerMessageId
+          providerMessageId,
+          ...recovery
         });
-        if (outcome.status === "skipped") skipped += 1;
-        else processed += 1;
+        // IMAP (M1 D1): the mailbox may not be processed any more: stop, never count it as handled.
+        if (outcome.status === "skipped" && haltOnState && IMAP_HALT_REASONS.has(outcome.reason)) halted ??= outcome.reason;
+        else if (outcome.status === "skipped") {
+          skipped += 1;
+          done[index] = true;
+        } else {
+          processed += 1;
+          done[index] = true;
+        }
       } catch (error) {
-        if (error instanceof AttachmentsPendingError) processed += 1;
-        else if (error instanceof ProviderHttpError && error.status === 404) skipped += 1;
-        else if (isAccountFatal(error)) fatal = error;
+        if (error instanceof AttachmentsPendingError) {
+          processed += 1;
+          done[index] = true;
+        } else if (error instanceof ProviderHttpError && error.status === 404) {
+          skipped += 1;
+          done[index] = true;
+        } else if (isAccountFatal(error)) fatal = error;
         else failures.push(error);
       }
     }
@@ -178,14 +285,28 @@ async function processMessages(account: WorkerAccount, messageIds: string[], dep
   await Promise.all(Array.from({ length: Math.min(MESSAGE_CONCURRENCY, messageIds.length) }, workerLoop));
 
   if (fatal !== null) throw fatal;
-  if (failures.length > 0) {
+  // Gmail / Microsoft: unchanged (any failure: the cursor is not advanced, the run is retried).
+  if (failures.length > 0 && !imap) {
     deps.logger.warn(
       { event: "gmail.sync.failed", emailAccountId: account.id, failed: failures.length, err: serializeError(failures[0]) },
       "some messages could not be processed; the cursor is not advanced"
     );
     throw failures[0];
   }
-  return { processed, skipped };
+  const pending = done.indexOf(false);
+  return { processed, skipped, halted, failures, budgetExhausted, firstPending: pending < 0 ? messageIds.length : pending };
+}
+
+interface MessagesOutcome {
+  processed: number;
+  skipped: number;
+  halted: string | null;
+  /** IMAP only: failed messages (Gmail / Microsoft throw instead, unchanged). */
+  failures: unknown[];
+  /** IMAP A2: the run budget stopped the batch before every message was started. */
+  budgetExhausted: boolean;
+  /** Index of the first message not durably handled (messageIds.length when all were). */
+  firstPending: number;
 }
 
 /**
@@ -196,6 +317,12 @@ export async function syncAccount(account: WorkerAccount, deps: HandleEventDeps,
   const empty: SyncResult = { found: 0, processed: 0, skipped: 0, historyGap: false, hasMore: false, cursorAdvanced: false };
   // Inactive account / organization: nothing is listed and the cursor does not move, so no mail is lost or processed.
   if (account.status !== "ACTIVE" || account.organizationStatus !== "ACTIVE") return empty;
+  // IMAP synchronization disabled (worker config) or the organization outside the trial allowlist: no connection is
+  // opened, no credential is decrypted, the cursor does not move.
+  if (account.provider === "IMAP" && !imapAllowedForOrganization(deps.imapSyncEnabled, deps.imapOrganizationIds, account.organizationId)) {
+    deps.logger.info({ emailAccountId: account.id, provider: account.provider, reason }, "IMAP synchronization is disabled; account skipped");
+    return empty;
+  }
   // Commercial V1.2: same without commercial access (checked now, not when the job was queued);
   // the cursor stays where it is, so the mailbox resumes from it once the organization pays again.
   const allowed = await hasCommercialAccess(deps.accounts, deps.logger, {
@@ -206,7 +333,26 @@ export async function syncAccount(account: WorkerAccount, deps: HandleEventDeps,
     jobType: reason
   });
   if (!allowed) return empty;
+  // IMAP M1 (decision A): the plan must still include IMAP. Not an account error: nothing is listed, the cursor stays
+  // and synchronization resumes from it once the plan allows IMAP again.
+  if (account.provider === "IMAP" && !(await deps.accounts.imapEntitled(account.organizationId))) {
+    deps.logger.info({ event: "imap.not_entitled", emailAccountId: account.id, organizationId: account.organizationId, reason }, "IMAP not in the plan; account skipped");
+    return empty;
+  }
 
+  // IMAP A2: a bounded share of this process's events concurrency, and a run budget below the sync lock.
+  // Gmail / Microsoft: no slot, no budget (unchanged).
+  if (account.provider !== "IMAP") return syncLocked(account, deps, reason);
+  if (deps.imapSlots && !deps.imapSlots.tryAcquire()) throw new ImapSlotsBusyError(account.id);
+  try {
+    return await withImapRunBudget(deps.imapRunBudget ?? IMAP_RUN_BUDGET, () => syncLocked(account, deps, reason));
+  } finally {
+    deps.imapSlots?.release();
+  }
+}
+
+/** syncAccount after its checks: lock, list, process, cursor. */
+async function syncLocked(account: WorkerAccount, deps: HandleEventDeps, reason: SyncReason): Promise<SyncResult> {
   const now = deps.now ?? Date.now;
   const lockToken = deps.lock ? await deps.lock.acquire(account.id, SYNC_LOCK_TTL_MS) : "unlocked";
   if (lockToken === null) throw new SyncBusyError(account.id);
@@ -217,7 +363,13 @@ export async function syncAccount(account: WorkerAccount, deps: HandleEventDeps,
   try {
     const adapter = deps.providers[account.provider];
     const context = deps.createContext(account);
-    const changes = await adapter.listNewMessageIds(context, { maxMessages: MAX_MESSAGES_PER_SYNC });
+    const imap = account.provider === "IMAP";
+    // IMAP M1 (decision B): bounded catch-up (300 per run, continued from the last message processed) and a 7-day
+    // window. Gmail / Microsoft: unchanged.
+    const changes = await adapter.listNewMessageIds(
+      context,
+      imap ? { maxMessages: IMAP_MAX_MESSAGES_PER_SYNC, since: new Date(now() - RECOVERY_MAX_WINDOW_MS) } : { maxMessages: MAX_MESSAGES_PER_SYNC }
+    );
 
     let messageIds = changes.messageIds;
     let nextCursor = changes.nextCursor;
@@ -247,15 +399,42 @@ export async function syncAccount(account: WorkerAccount, deps: HandleEventDeps,
       );
     }
 
-    const { processed, skipped } = await processMessages(account, messageIds, deps);
+    const batch = await processMessages(account, messageIds, deps, { recovery: historyGap });
+    const { processed, skipped, halted } = batch;
 
-    // Only now, with every message durably handled, the cursor moves.
+    // IMAP (M1 D1): the mailbox stopped being processable during the batch (paused, disconnected, no access, IMAP
+    // left the plan): the cursor is NOT moved, so the remaining messages are processed after a resume (the ones
+    // already stored are deduplicated by provider message id).
+    if (halted !== null) {
+      deps.logger.warn({ event: "imap.sync.halted", ...log, reason: halted, found: messageIds.length, processed, skipped }, "IMAP sync stopped; cursor unchanged");
+      return { found: messageIds.length, processed, skipped, historyGap, hasMore: false, cursorAdvanced: false };
+    }
+
+    // IMAP A2: a message failed (e.g. its deadline) or the run budget stopped the batch: the cursor only moves past
+    // the contiguous prefix of durably handled messages, never past a pending, failed or unstarted one.
+    if (imap && batch.firstPending < messageIds.length) {
+      return await advanceImapPrefix(account, deps, {
+        messageIds,
+        batch,
+        outOfWindowUids: changes.outOfWindowUids ?? [],
+        historyGap,
+        log,
+        now
+      });
+    }
+
+    // Only now, with every message durably handled, the cursor moves (IMAP: only while the mailbox is still ACTIVE).
     const cursorAdvanced = await deps.accounts.advanceSyncCursor(account.id, {
       from: account.syncCursor,
       to: nextCursor ?? account.syncCursor,
-      lastSyncedAt: new Date(now()).toISOString()
+      lastSyncedAt: new Date(now()).toISOString(),
+      ...(imap ? { requireActive: true } : {})
     });
-    if (!cursorAdvanced) deps.logger.warn({ ...log }, "cursor moved by another sync meanwhile; not overwritten");
+    if (!cursorAdvanced) deps.logger.warn({ ...log }, "cursor not advanced (moved by another sync meanwhile, or the mailbox is no longer active)");
+
+    // IMAP (decision B): messages older than the window were skipped on purpose; say so, never claim them imported.
+    const outOfWindow = changes.outOfWindow ?? 0;
+    if (imap && outOfWindow > 0 && cursorAdvanced) await reportOutOfWindow(account, deps, log, outOfWindow);
 
     const hasMore = changes.hasMore === true;
     if (hasMore && cursorAdvanced) await deps.enqueueSync(account, "CONTINUATION");
@@ -276,6 +455,70 @@ export async function syncAccount(account: WorkerAccount, deps: HandleEventDeps,
       await deps.lock.release(account.id, lockToken).catch((error: unknown) => deps.logger.warn({ err: serializeError(error) }, "could not release sync lock"));
     }
   }
+}
+
+/** IMAP (decision B): messages older than the window were skipped on purpose; say so, never claim them imported. */
+async function reportOutOfWindow(account: WorkerAccount, deps: HandleEventDeps, log: Record<string, unknown>, count: number): Promise<void> {
+  deps.logger.warn(
+    { event: "imap.sync.outside_window", ...log, count, windowDays: RECOVERY_MAX_WINDOW_MS / 86_400_000 },
+    "IMAP messages older than the window were not imported"
+  );
+  await deps.audit
+    ?.recordAccountEvent({
+      organizationId: account.organizationId,
+      emailAccountId: account.id,
+      action: "PROCESS",
+      event: "imap.sync.outside_window",
+      description: `${count} message(s) received more than ${RECOVERY_MAX_WINDOW_MS / 86_400_000} days ago were not imported`,
+      metadata: { provider: account.provider, count, windowDays: RECOVERY_MAX_WINDOW_MS / 86_400_000 }
+    })
+    .catch((error: unknown) => deps.logger.warn({ err: serializeError(error) }, "could not record the skipped IMAP messages"));
+}
+
+/**
+ * IMAP A2: an incomplete batch (a message failed, or the run budget stopped it). The cursor moves to the UID just
+ * before the first message not durably handled (compare-and-set, only while the mailbox is ACTIVE): everything
+ * behind it was processed, skipped on purpose or out of the window; nothing pending is ever jumped. Messages
+ * processed after the first pending one are deduplicated by the next run. Then a failure is rethrown (BullMQ
+ * retry with backoff, from the new cursor) and a budget stop continues in a CONTINUATION run.
+ */
+async function advanceImapPrefix(
+  account: WorkerAccount,
+  deps: HandleEventDeps,
+  run: { messageIds: string[]; batch: MessagesOutcome; outOfWindowUids: number[]; historyGap: boolean; log: Record<string, unknown>; now: () => number }
+): Promise<SyncResult> {
+  const { batch, messageIds, log } = run;
+  const pending = parseImapMessageId(messageIds[batch.firstPending] as string);
+  const current = parseImapCursor(account.syncCursor);
+  let cursorAdvanced = false;
+  let behindCursor = 0;
+  if (pending) {
+    const uid = pending.uid - 1;
+    if (!current || current.uidValidity !== pending.uidValidity || uid > current.uid) {
+      cursorAdvanced = await deps.accounts.advanceSyncCursor(account.id, {
+        from: account.syncCursor,
+        to: formatImapCursor({ uidValidity: pending.uidValidity, uid }),
+        lastSyncedAt: new Date(run.now()).toISOString(),
+        requireActive: true
+      });
+      if (cursorAdvanced) behindCursor = run.outOfWindowUids.filter((outside) => outside <= uid).length;
+    }
+  }
+  if (behindCursor > 0) await reportOutOfWindow(account, deps, log, behindCursor);
+  const result = { found: messageIds.length, processed: batch.processed, skipped: batch.skipped, historyGap: run.historyGap };
+  if (batch.failures.length > 0) {
+    deps.logger.warn(
+      { event: "gmail.sync.failed", ...log, failed: batch.failures.length, completedPrefix: batch.firstPending, cursorAdvanced, err: serializeError(batch.failures[0]) },
+      "some messages could not be processed; the cursor only moved past the messages before the first pending one"
+    );
+    throw batch.failures[0];
+  }
+  deps.logger.warn(
+    { event: "imap.sync.budget_exhausted", ...log, found: messageIds.length, completedPrefix: batch.firstPending, cursorAdvanced },
+    "IMAP run budget reached; the rest continues in another run"
+  );
+  await deps.enqueueSync(account, "CONTINUATION");
+  return { ...result, hasMore: true, cursorAdvanced };
 }
 
 /**
@@ -536,7 +779,13 @@ export async function handleEmailEvent(job: EmailEventJob, deps: HandleEventDeps
 
     case "RECOVER_INCOMPLETE": {
       const startedBefore = new Date(Date.now() - RECOVERY_STALE_MS).toISOString();
-      const stale = await deps.emails.listIncompleteEmails({ startedBefore, limit: RECOVERY_BATCH });
+      // F2: every provider but IMAP keeps the whole batch, selected as before; IMAP mailboxes get a batch of their own
+      // (only while IMAP synchronization is enabled: disabled, their jobs would only be skipped), so incomplete IMAP
+      // emails can never fill the batch and hold back the recovery of Gmail / Microsoft ones.
+      const stale = [
+        ...(await deps.emails.listIncompleteEmails({ startedBefore, limit: RECOVERY_BATCH, imap: "exclude" })),
+        ...(deps.imapSyncEnabled === true ? await selectImapRecovery(deps, startedBefore, job.type) : [])
+      ];
       // Without commercial access an incomplete email is left as it is (no attempt consumed, nothing queued).
       const incomplete = await withCommercialAccess(stale, deps.accounts, deps.logger, "recover_incomplete", job.type);
       let enqueued = 0;
@@ -568,10 +817,33 @@ export async function handleEmailEvent(job: EmailEventJob, deps: HandleEventDeps
 
     case "POLL_ACCOUNTS": {
       // Recovery polling: catches missed / lost pushes, expired watches and accounts without push.
-      const active = await deps.accounts.listActiveOAuthAccounts(POLL_BATCH);
-      const accounts = await withCommercialAccess(active, deps.accounts, deps.logger, "poll", job.type);
+      const oauth = await deps.accounts.listActiveOAuthAccounts(POLL_BATCH);
+      // IMAP has no push: polling is its only ingestion, and only while IMAP synchronization is enabled, and only for
+      // the organizations of the trial allowlist (fixed in code).
+      const imap = (deps.imapSyncEnabled === true && deps.accounts.listActiveImapAccounts ? await deps.accounts.listActiveImapAccounts(POLL_BATCH) : []).filter(
+        (account) => imapAllowedForOrganization(deps.imapSyncEnabled, deps.imapOrganizationIds, account.organizationId)
+      );
+      const accounts = await withCommercialAccess([...oauth, ...imap], deps.accounts, deps.logger, "poll", job.type);
       for (const account of accounts) await deps.enqueueSync(account, "POLL");
       return { accounts: accounts.length, enqueued: accounts.length };
+    }
+
+    case "CULQI_RECONCILE_DUE": {
+      if (!deps.billing) return { accounts: 0, enqueued: 0, billingReconcile: { reconciled: 0, expired: 0, failed: 0 } };
+      const billingReconcile = await reconcileDueCulqiSubscriptions({ ...deps.billing, logger: deps.logger, ...(deps.now ? { now: deps.now } : {}) });
+      return { accounts: 0, enqueued: 0, billingReconcile };
+    }
+
+    case "CULQI_EVENT":
+    case "CULQI_RECONCILE": {
+      if (!deps.billing) {
+        deps.logger.error({ event: "billing.culqi.not_configured", jobType: job.type }, "billing store not wired in this worker");
+        return { accounts: 0, enqueued: 0, billing: "not_configured" };
+      }
+      const billingDeps: BillingDeps = { ...deps.billing, logger: deps.logger, ...(deps.now ? { now: deps.now } : {}) };
+      const billing =
+        job.type === "CULQI_EVENT" ? await handleCulqiEvent(job.eventId, billingDeps) : await reconcileCulqiSubscription(job.billingSubscriptionId, billingDeps);
+      return { accounts: 0, enqueued: 0, billing };
     }
 
     case "EXPIRE_SUBSCRIPTIONS": {
@@ -582,4 +854,91 @@ export async function handleEmailEvent(job: EmailEventJob, deps: HandleEventDeps
       return { accounts: 0, enqueued: 0, expired };
     }
   }
+}
+
+/**
+ * F2.2: the IMAP recovery batch of one RECOVER_INCOMPLETE run (IMAP only; Gmail / Microsoft never get here).
+ *
+ * F2 took the 20 oldest incomplete IMAP emails. Emails of organizations without commercial access are never queued
+ * and those whose plan no longer includes IMAP are skipped by processEmail - neither consumes an attempt - so 20 of
+ * them could block the batch for everybody, indefinitely; and one organization with many stuck emails took every
+ * place until they reached MAX_PROCESSING_ATTEMPTS. Now, with no schema change and no persistent cursor:
+ *   - a bounded scan: pages of IMAP_RECOVERY_PAGE candidates, oldest first by (processing_started_at, id), each
+ *     strictly after the previous page's last key, at most IMAP_RECOVERY_SCAN_MAX rows per run;
+ *   - each organization is checked once per run with the shared commercial-access rule and for IMAP in its plan;
+ *     a blocked one is left out of the following pages. Its emails are untouched (nothing marked, no attempt) and
+ *     are selected again by a later run once the organization may be processed;
+ *   - an organization with IMAP_RECOVERY_BATCH candidates is settled and left out of the following pages too;
+ *   - the batch is filled round robin over the organizations, in the order of their oldest candidate, oldest first
+ *     within each one (max-min fair): when 4 or more organizations have 5 or more candidates none gets more than 5 of
+ *     the 20 places; places the others cannot use (they have fewer candidates) go to those with more emails;
+ *   - emails of allowed organizations that already reached MAX_PROCESSING_ATTEMPTS are returned too (outside the 20
+ *     places) and become FAILED as before.
+ * The scan stops at IMAP_RECOVERY_BATCH organizations, at the read limit, at the end of the candidates or at
+ * IMAP_RECOVERY_MAX_EXCLUDED_ORGANIZATIONS settled organizations; whatever it did not reach is read by later runs.
+ * Not a guarantee of fairness: organizations whose oldest candidate lies beyond the read limit (behind many blocked
+ * or settled organizations) wait for a later run, and with more than 20 competing organizations those with the
+ * oldest candidates are served first.
+ */
+async function selectImapRecovery(deps: HandleEventDeps, startedBefore: string, jobType: string): Promise<IncompleteEmail[]> {
+  const candidates = new Map<string, IncompleteEmail[]>();
+  const exhausted: IncompleteEmail[] = [];
+  const blocked = new Set<string>();
+  const settled = new Set<string>();
+  const checked = new Set<string>();
+  let after: { startedAt: string; id: string } | undefined;
+  let scanned = 0;
+  let pages = 0;
+  while (scanned < IMAP_RECOVERY_SCAN_MAX && candidates.size < IMAP_RECOVERY_BATCH && blocked.size + settled.size <= IMAP_RECOVERY_MAX_EXCLUDED_ORGANIZATIONS) {
+    const limit = Math.min(IMAP_RECOVERY_PAGE, IMAP_RECOVERY_SCAN_MAX - scanned);
+    const page = await deps.emails.listIncompleteEmails({ startedBefore, limit, imap: "only", ...(after ? { after } : {}), excludeOrganizations: [...blocked, ...settled] });
+    pages += 1;
+    scanned += page.length;
+    const unchecked = [...new Set(page.map((email) => email.organizationId).filter((id) => !checked.has(id)))];
+    if (unchecked.length > 0) {
+      // Organizations outside the IMAP trial allowlist (fixed in code) are excluded first, without any other lookup.
+      const trial = unchecked.filter((organizationId) => imapAllowedForOrganization(deps.imapSyncEnabled, deps.imapOrganizationIds, organizationId));
+      for (const organizationId of unchecked) {
+        if (!trial.includes(organizationId)) {
+          checked.add(organizationId);
+          blocked.add(organizationId);
+        }
+      }
+      // The shared commercial-access rule, unchanged (denials logged as before), then IMAP in the organization's plan.
+      const allowed = trial.length > 0
+        ? new Set((await withCommercialAccess(trial.map((organizationId) => ({ organizationId })), deps.accounts, deps.logger, "recover_incomplete", jobType)).map((item) => item.organizationId))
+        : new Set<string>();
+      for (const organizationId of trial) {
+        checked.add(organizationId);
+        if (!allowed.has(organizationId) || !(await deps.accounts.imapEntitled(organizationId))) blocked.add(organizationId);
+      }
+    }
+    for (const email of page) {
+      if (blocked.has(email.organizationId) || settled.has(email.organizationId)) continue;
+      if (email.processingAttempts >= MAX_PROCESSING_ATTEMPTS) {
+        exhausted.push(email);
+        continue;
+      }
+      const list = candidates.get(email.organizationId) ?? [];
+      list.push(email);
+      candidates.set(email.organizationId, list);
+      if (list.length >= IMAP_RECOVERY_BATCH) settled.add(email.organizationId);
+    }
+    const last = page[page.length - 1];
+    if (page.length < limit || !last?.processingStartedAt) break;
+    after = { startedAt: last.processingStartedAt, id: last.id };
+  }
+  const selected: IncompleteEmail[] = [];
+  const organizations = [...candidates.keys()];
+  for (let round = 0; selected.length < IMAP_RECOVERY_BATCH && organizations.some((id) => (candidates.get(id)?.length ?? 0) > round); round++) {
+    for (const organizationId of organizations) {
+      const email = candidates.get(organizationId)?.[round];
+      if (email && selected.length < IMAP_RECOVERY_BATCH) selected.push(email);
+    }
+  }
+  deps.logger.info(
+    { event: "imap.recovery.selected", pages, scanned, organizations: organizations.length, blocked: blocked.size, selected: selected.length, exhausted: exhausted.length, readLimitReached: scanned >= IMAP_RECOVERY_SCAN_MAX },
+    "IMAP recovery batch selected"
+  );
+  return [...selected, ...exhausted];
 }

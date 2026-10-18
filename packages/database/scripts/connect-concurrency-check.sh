@@ -54,7 +54,9 @@ done
 echo "PostgreSQL $(psql_db -c 'show server_version'): migrations applied to $DB"
 
 # Control: identical function without the organization lock (only in this throwaway database).
-sed -e 's/public\.connect_oauth_email_account/public.connect_nolock/g' -e 's/^  for no key update;$/  ;/' "$MIGRATION" | psql_db >/dev/null || exit 2
+# tr: a Windows checkout may hold the migration with CRLF; the anchored patterns need LF (the file is only read).
+tr -d '\r' < "$MIGRATION" \
+  | sed -e 's/public\.connect_oauth_email_account/public.connect_nolock/g' -e 's/^  for no key update;$/  ;/' | psql_db >/dev/null || exit 2
 [ "$(psql_db -c "select position('for no key update' in prosrc) > 0 from pg_proc where proname = 'connect_nolock'")" = "f" ] || { echo "control still locks"; exit 2; }
 
 new_org() {

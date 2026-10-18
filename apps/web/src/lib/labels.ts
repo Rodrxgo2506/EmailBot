@@ -87,8 +87,31 @@ export const ACCOUNT_ERROR_LABELS: Record<string, string> = {
   MISSING_REFRESH_TOKEN: "Falta el token de renovación. Reconecta la cuenta.",
   PROVIDER_NOT_CONFIGURED: "El proveedor no está configurado en el servidor.",
   IMAP_SYNC_NOT_IMPLEMENTED: "La sincronización IMAP aún no está disponible. Las credenciales se guardaron cifradas.",
+  IMAP_ACTIVATION_PENDING: "Buzón conectado y en pausa. Reanúdalo para empezar a sincronizar el correo nuevo.",
   PROVIDER_NOT_IMPLEMENTED: "Esta integración todavía no está disponible."
 };
+
+/**
+ * IMAP M1.6: the permanent IMAP errors the worker writes before leaving a mailbox in ERROR
+ * (packages/shared/src/imap-client.ts classifyImapFailure, apps/worker/src/providers/imap/*,
+ * apps/worker/src/credentials/token-manager.ts). Only used for IMAP mailboxes: the worker's English
+ * text is never shown for them, and these messages carry no server, user or certificate detail.
+ */
+export const IMAP_ACCOUNT_ERROR_LABELS: Record<string, string> = {
+  IMAP_AUTH_FAILED: "El servidor IMAP rechazó el usuario o la contraseña.",
+  IMAP_CREDENTIALS_MISSING: "No hay un acceso IMAP guardado que se pueda usar.",
+  IMAP_HOST_FORBIDDEN: "El servidor IMAP configurado no es un destino permitido.",
+  IMAP_TLS_FAILED: "No se pudo verificar el certificado o la conexión segura (TLS) del servidor IMAP.",
+  IMAP_STARTTLS_UNAVAILABLE: "El servidor IMAP no ofrece una conexión segura (STARTTLS).",
+  IMAP_RESPONSE_TOO_LARGE: "El servidor IMAP envió una respuesta más grande de lo permitido.",
+  IMAP_SETTINGS_INVALID: "La configuración IMAP guardada no es válida."
+};
+
+/** Any other (or missing) error code of an IMAP mailbox in ERROR. */
+export const IMAP_ACCOUNT_ERROR_FALLBACK = "La sincronización de este buzón IMAP se detuvo por un error.";
+
+/** IMAP mailbox in ERROR: it is never resumed, only connected again (the API tests the connection with its limits). */
+export const IMAP_RECONNECT_HINT = "Reconecta el buzón para validar de nuevo la conexión. Hasta entonces no se sincroniza.";
 
 export const BOT_STATUS_LABELS: Record<BotStatus, string> = {
   ACTIVE: "Activo",
@@ -148,6 +171,7 @@ export const PLAN_LIMIT_LABELS: Record<PlanLimitKey, string> = {
 export const PLAN_FEATURE_LABELS: Record<PlanFeatureKey, string> = {
   GMAIL: "Gmail",
   MICROSOFT: "Microsoft (Outlook / 365)",
+  IMAP: "Correo externo (IMAP)",
   ADVANCED_STATS: "Estadísticas avanzadas",
   PORTAL: "Portal de clientes",
   API: "API",

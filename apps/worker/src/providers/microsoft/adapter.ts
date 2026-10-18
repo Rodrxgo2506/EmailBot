@@ -52,7 +52,8 @@ function initialDeltaUrl(since: string | null): string {
   return url.toString();
 }
 
-export function createMicrosoftAdapter(fetchImpl: typeof fetch = fetch): ProviderAdapter {
+/** `attachmentFetch`: attachment downloads (F5.5: streamed, with their own limits); every other call uses `fetchImpl`. */
+export function createMicrosoftAdapter(fetchImpl: typeof fetch = fetch, attachmentFetch: typeof fetch = fetchImpl): ProviderAdapter {
   return {
     provider: "MICROSOFT",
 
@@ -98,7 +99,7 @@ export function createMicrosoftAdapter(fetchImpl: typeof fetch = fetch): Provide
         await providerGet(
           context,
           `${GRAPH}/me/messages/${encodeURIComponent(providerMessageId)}/attachments/${encodeURIComponent(providerAttachmentId)}`,
-          fetchImpl
+          attachmentFetch
         )
       );
       return decodeBase64Url(body.contentBytes);

@@ -1,6 +1,9 @@
 import { resolve } from "node:path";
 import { config as loadDotenv } from "dotenv";
 import {
+  createCulqiClient,
+  CULQI_RECONCILE_DUE_INTERVAL_MS,
+  CULQI_RECONCILE_DUE_SCHEDULER_ID,
   encryptionKeyFingerprint,
   EXPIRE_SUBSCRIPTIONS_INTERVAL_MS,
   EXPIRE_SUBSCRIPTIONS_SCHEDULER_ID,
@@ -15,29 +18,40 @@ import {
   type EmailProcessingJob,
   type NotificationJob
 } from "@emailbot/shared";
-import { createClient } from "@supabase/supabase-js";
-import { UnrecoverableError, Worker, type Job } from "bullmq";
+import { Worker, type Job } from "bullmq";
 import { Redis } from "ioredis";
 import { pino } from "pino";
 import { loadWorkerConfig } from "./config/env.js";
 import { createProviderContext } from "./credentials/token-manager.js";
+import { createAppRedis } from "./infrastructure/app-redis.js";
+import { boundedDownloadFetch, encodedAttachmentLimit } from "./infrastructure/attachment-transfer.js";
+import { createAttachmentContents, createAttachmentTransfers } from "./infrastructure/attachment-transfers.js";
 import { closeServer, createHealthServer, listen, type WorkerHealthState } from "./infrastructure/health.js";
+import { cancellableFetch, createRequestCancellation } from "./infrastructure/http-cancellation.js";
+import { createImapSyncSlots, imapSyncSlotCount } from "./infrastructure/imap-slots.js";
+import { createJobProcessors } from "./infrastructure/job-processors.js";
 import { createWorkerQueues } from "./infrastructure/queues.js";
-import { captureWorkerException, flushWorkerSentry, initWorkerSentry, jobType, reportJobFailure, type FailedJob } from "./infrastructure/sentry.js";
-import { createRedisSyncLock } from "./infrastructure/sync-lock.js";
+import { createJobTracker, createShutdown, shutdownLimits } from "./infrastructure/shutdown.js";
+import { createWorkerSupabase, createWorkerUploadClient } from "./infrastructure/supabase-client.js";
+import { captureWorkerException, flushWorkerSentry, initWorkerSentry, jobType, reportJobFailure } from "./infrastructure/sentry.js";
+import { createAppRedisSyncLock } from "./infrastructure/sync-lock.js";
 import {
   createAccountStore,
+  createAppRealtimePublisher,
   createAttachmentStorage,
   createAuditRecorder,
   createEmailStore,
-  createRealtimePublisher,
   createRoutingStore,
-  createSubscriptionMaintenance
+  createSubscriptionMaintenance,
+  createBillingStore
 } from "./infrastructure/supabase-stores.js";
-import { handleAccountFailure, NonRetryableError } from "./pipeline/failures.js";
-import { handleEmailEvent, SyncBusyError, type HandleEventDeps } from "./pipeline/handle-email-event.js";
+import type { HandleEventDeps } from "./pipeline/handle-email-event.js";
 import { deliverNotification } from "./pipeline/notify.js";
-import { processEmail, type ProcessEmailDeps } from "./pipeline/process-email.js";
+import type { ProcessEmailDeps } from "./pipeline/process-email.js";
+import { createImapSyncAdapter } from "./providers/imap/adapter.js";
+import type { ImapClient } from "./providers/imap/connection.js";
+import { abortImapOperations } from "./providers/imap/deadline.js";
+import { ImapConnectionPool } from "./providers/imap/pool.js";
 import { createMicrosoftSubscriptionClient } from "./providers/microsoft/subscriptions.js";
 import { createProviderRegistry } from "./providers/registry.js";
 import type { WorkerAccount } from "./providers/types.js";
@@ -54,18 +68,38 @@ const logger = pino({
 initWorkerSentry({ dsn: config.sentryDsn, environment: config.env, release: sentryRelease(process.env) });
 
 // SERVICE ROLE client: the worker processes every tenant; it scopes all
-// writes with ids read from the database.
-const supabase = createClient(config.supabaseUrl, config.supabaseServiceRoleKey, {
-  auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
-  global: { fetch: fetchWithTimeout(globalThis.fetch, config.supabaseHttpTimeoutMs) }
-});
-// Google / Microsoft: OAuth refresh, Gmail, Graph and attachment downloads.
-const providerFetch = fetchWithTimeout(globalThis.fetch, config.providerHttpTimeoutMs);
+// writes with ids read from the database. F5.3: PostgREST reads are not retried by the client (supabase-client.ts).
+const supabase = createWorkerSupabase(config.supabaseUrl, config.supabaseServiceRoleKey, config.supabaseHttpTimeoutMs);
+// Google / Microsoft: OAuth refresh, Gmail, Graph and attachment downloads. Each request is limited by
+// PROVIDER_HTTP_TIMEOUT_MS; F5.4: the shutdown's cancel phase also cancels the ones in flight (http-cancellation.ts).
+const providerRequests = createRequestCancellation();
+const providerFetch = cancellableFetch(fetchWithTimeout(globalThis.fetch, config.providerHttpTimeoutMs), providerRequests.signal);
+// F5.5: attachment downloads are streamed: no byte for PROVIDER_HTTP_TIMEOUT_MS fails as before, a transfer that keeps
+// progressing may last WORKER_ATTACHMENT_TIMEOUT_MS, and a body over the attachment size limit is cut at once.
+const attachmentFetch = cancellableFetch(
+  boundedDownloadFetch(globalThis.fetch, {
+    idleMs: config.providerHttpTimeoutMs,
+    totalMs: config.attachmentTimeoutMs,
+    maxBytes: encodedAttachmentLimit(config.maxAttachmentBytes)
+  }),
+  providerRequests.signal
+);
+// F5.5: attachment uploads to Storage only (own limit, cancelled by the shutdown); PostgREST keeps `supabase`.
+const uploadClient = createWorkerUploadClient(config.supabaseUrl, config.supabaseServiceRoleKey, config.attachmentTimeoutMs, providerRequests.signal);
+// F5.6: attachment transfers at once in this process (memory); waiting tasks are refused by the shutdown's cancel phase.
+const attachmentTransfers = createAttachmentTransfers(config.attachmentTransferConcurrency, providerRequests.signal);
+// F5.6: decoded attachment contents held at once in this process (retry waits included); same shutdown cancellation.
+const attachmentContents = createAttachmentContents(config.attachmentContentConcurrency, providerRequests.signal);
 
-// BullMQ workers require maxRetriesPerRequest = null.
+// BullMQ workers require maxRetriesPerRequest = null (BullMQ workers and queues only).
 const connection = new Redis(config.redisUrl, { maxRetriesPerRequest: null });
-const publisherConnection = new Redis(config.redisUrl, { maxRetriesPerRequest: null });
+// F5.2: the application's own commands run on bounded clients (infrastructure/app-redis.ts): the sync lock and the
+// health PING on one, realtime publishing on its own (the shutdown interrupts it without touching the lock).
+const appRedis = createAppRedis(config.redisUrl, config.redisCommandTimeoutMs);
+const publisherRedis = createAppRedis(config.redisUrl, config.redisCommandTimeoutMs);
+const publisherConnection = publisherRedis.client;
 connection.on("error", (error) => logger.error({ err: serializeError(error) }, "redis error"));
+appRedis.client.on("error", (error) => logger.error({ err: serializeError(error) }, "redis application client error"));
 publisherConnection.on("error", (error) => logger.error({ err: serializeError(error) }, "redis publisher error"));
 
 // Health endpoint (only when a port is configured): /livez answers right away,
@@ -74,7 +108,8 @@ const health: WorkerHealthState = { initialized: false, failed: false, stopping:
 const healthServer = config.health
   ? createHealthServer({
       state: health,
-      pingRedis: async () => connection.status === "ready" && (await connection.ping()) === "PONG"
+      // BullMQ's connection is checked without a command (no PING queued on it while Redis is away).
+      pingRedis: async () => connection.status === "ready" && appRedis.client.status === "ready" && (await appRedis.client.ping()) === "PONG"
     })
   : null;
 if (healthServer && config.health) {
@@ -87,11 +122,13 @@ if (healthServer && config.health) {
   }
 }
 
-const queues = createWorkerQueues(connection);
+const queues = createWorkerQueues(connection, { producerTimeoutMs: config.redisCommandTimeoutMs });
 const accounts = createAccountStore(supabase);
 const emails = createEmailStore(supabase);
-const realtime = createRealtimePublisher(publisherConnection);
-const providers = createProviderRegistry(providerFetch);
+const realtime = createAppRealtimePublisher(publisherRedis);
+// IMAP: the pool and the real adapter exist only when IMAP synchronization is enabled (fixed false today).
+const imapPool = config.imapSyncEnabled ? new ImapConnectionPool<ImapClient>() : null;
+const providers = createProviderRegistry(providerFetch, { ...(imapPool ? { imap: createImapSyncAdapter({ pool: imapPool }) } : {}), attachmentFetch });
 const secretBox = SecretBox.fromBase64(config.tokenEncryptionKey);
 
 const createContext = (account: WorkerAccount) =>
@@ -104,13 +141,17 @@ const processDeps: Omit<ProcessEmailDeps, "logger"> = {
   emails,
   routing: createRoutingStore(supabase),
   audit: auditRecorder,
-  storage: createAttachmentStorage(supabase),
+  storage: createAttachmentStorage(supabase, uploadClient),
   realtime,
   producer: queues.producer,
   providers,
   createContext,
   attachmentsBucket: config.attachmentsBucket,
-  maxAttachmentBytes: config.maxAttachmentBytes
+  maxAttachmentBytes: config.maxAttachmentBytes,
+  attachmentTransfers,
+  attachmentContents,
+  imapSyncEnabled: config.imapSyncEnabled,
+  imapOrganizationIds: config.imapOrganizationIds
 };
 
 const eventDeps: Omit<HandleEventDeps, "logger"> = {
@@ -121,117 +162,99 @@ const eventDeps: Omit<HandleEventDeps, "logger"> = {
   createContext,
   enqueueSync: (account, reason) => queues.enqueueSync(account, reason),
   enqueueWatch: (account) => queues.enqueueWatch(account),
-  lock: createRedisSyncLock(connection),
+  lock: createAppRedisSyncLock(appRedis),
   audit: auditRecorder,
   watchTopic: config.gmailPubSubTopic,
   microsoftPush: config.microsoftPush,
   microsoftSubscriptions: createMicrosoftSubscriptionClient(providerFetch),
-  subscriptions: createSubscriptionMaintenance(supabase)
+  subscriptions: createSubscriptionMaintenance(supabase),
+  imapSyncEnabled: config.imapSyncEnabled,
+  imapOrganizationIds: config.imapOrganizationIds,
+  // IMAP A2: IMAP runs never take every events slot (at least one stays for Gmail / Microsoft).
+  ...(config.imapSyncEnabled ? { imapSlots: createImapSyncSlots(imapSyncSlotCount(config.eventsConcurrency, config.imapSyncConcurrency)) } : {}),
+  // Commercial V1 phase 2: Culqi SANDBOX only (live keys are refused by the configuration).
+  billing: {
+    store: createBillingStore(supabase),
+    culqi: config.culqi ? createCulqiClient({ secretKey: config.culqi.secretKey, fetch: providerFetch, baseUrl: config.culqi.apiUrl }) : null
+  }
 };
 
-/**
- * Maps domain failures to BullMQ semantics (UnrecoverableError = no retry).
- * Unexpected failures are reported to Sentry once, on the job's final attempt.
- */
-async function runWithFailureHandling<T>(
-  job: FailedJob,
-  account: { id: string; organizationId: string } | null,
-  jobLogger: typeof logger,
-  run: () => Promise<T>
-): Promise<T> {
-  try {
-    return await run();
-  } catch (error) {
-    // Another run holds the account: expected, retried with backoff (no error report).
-    if (error instanceof SyncBusyError) throw error;
-    try {
-      return await handleAccountFailure(error, account, { accounts, realtime, logger: jobLogger });
-    } catch (handled) {
-      if (handled instanceof NonRetryableError) throw new UnrecoverableError(handled.message);
-      reportJobFailure(handled, job, { queue: job.queueName, type: jobType(job.data) });
-      throw handled;
-    }
-  }
-}
+// Processors (job-processors.ts): failure mapping, Sentry, and the IMAP A2 / A2.1 "slots busy" delay.
+// IMAP A2.1: IMAP email-processing jobs (recovery of incomplete emails) get their own slots and a budget.
+const processors = createJobProcessors({
+  eventDeps,
+  processDeps,
+  accounts,
+  realtime,
+  logger,
+  reportJobFailure,
+  jobType,
+  ...(config.imapSyncEnabled
+    ? { imapProcessingSlots: createImapSyncSlots(imapSyncSlotCount(config.processingConcurrency, config.imapProcessingConcurrency)) }
+    : {})
+});
 
-const eventsWorker = new Worker<EmailEventJob>(
-  QUEUE_NAMES.emailEvents,
-  async (job: Job<EmailEventJob>) => {
-    const jobLogger = logger.child({ queue: QUEUE_NAMES.emailEvents, jobId: job.id, type: job.data.type });
-    const account =
-      job.data.type === "SYNC_ACCOUNT" || job.data.type === "WATCH_ACCOUNT"
-        ? { id: job.data.emailAccountId, organizationId: job.data.organizationId }
-        : null;
-    return runWithFailureHandling(job, account, jobLogger, () =>
-      handleEmailEvent(job.data, {
-        ...eventDeps,
-        // Every ingestion path (push, recovery polling, manual sync) uses the same pipeline.
-        processMessage: (message) => processEmail(message, { ...processDeps, logger: jobLogger }, { attempt: 1 }),
-        logger: jobLogger
-      })
-    );
-  },
-  { connection, concurrency: config.eventsConcurrency }
-);
+// F5.1: every processor is counted while it runs, so the shutdown knows when the jobs in flight are done.
+const jobs = createJobTracker();
 
-const processingWorker = new Worker<EmailProcessingJob>(
-  QUEUE_NAMES.emailProcessing,
-  async (job: Job<EmailProcessingJob>) => {
-    const jobLogger = logger.child({
-      queue: QUEUE_NAMES.emailProcessing,
-      jobId: job.id,
-      organizationId: job.data.organizationId,
-      emailAccountId: job.data.emailAccountId
-    });
-    const outcome = await runWithFailureHandling(
-      job,
-      { id: job.data.emailAccountId, organizationId: job.data.organizationId },
-      jobLogger,
-      // Whether an email is resumed is decided by its processing_status in the
-      // database (migration 9), not by BullMQ's attempt counters; `attempt`
-      // only seeds processing_attempts of a newly stored email.
-      () => processEmail(job.data, { ...processDeps, logger: jobLogger }, { attempt: job.attemptsMade + 1 })
-    );
-    jobLogger.debug({ outcome: outcome.status, ...(outcome.status === "skipped" ? { reason: outcome.reason } : {}) }, "job done");
-    return outcome;
-  },
-  { connection, concurrency: config.processingConcurrency }
-);
+const eventsWorker = new Worker<EmailEventJob>(QUEUE_NAMES.emailEvents, jobs.wrap(processors.events), { connection, concurrency: config.eventsConcurrency });
+
+const processingWorker = new Worker<EmailProcessingJob>(QUEUE_NAMES.emailProcessing, jobs.wrap(processors.processing), {
+  connection,
+  concurrency: config.processingConcurrency
+});
 
 const notificationsWorker = new Worker<NotificationJob>(
   QUEUE_NAMES.notifications,
-  async (job: Job<NotificationJob>) => {
+  jobs.wrap(async (job: Job<NotificationJob>) => {
     const jobLogger = logger.child({ queue: QUEUE_NAMES.notifications, jobId: job.id, organizationId: job.data.organizationId });
     return deliverNotification(job.data, { emails, realtime, accounts, logger: jobLogger });
-  },
+  }),
   { connection, concurrency: 5 }
 );
 
 const workers = [eventsWorker, processingWorker, notificationsWorker];
-let shuttingDown = false;
-async function shutdown(signal: string) {
-  if (shuttingDown) return;
-  shuttingDown = true;
-  health.stopping = true;
-  logger.info({ signal }, "shutting down worker");
-  try {
-    await Promise.all(workers.map((worker) => worker.close()));
-    await queues.close();
-    connection.disconnect();
-    publisherConnection.disconnect();
-    if (healthServer) await closeServer(healthServer);
-    await flushWorkerSentry();
-    process.exit(0);
-  } catch (error) {
-    logger.error({ err: serializeError(error) }, "error during shutdown");
-    process.exit(1);
-  }
-}
+// F5.1: bounded, phased shutdown (infrastructure/shutdown.ts): stop fetching jobs and IMAP operations, a grace
+// period for the jobs in flight, then the realtime publisher is interrupted, the workers closed (forced only if a job
+// is still running: it stays active in Redis and is retried once its lock expires), everything released, and the
+// process exits within WORKER_SHUTDOWN_TIMEOUT_MS whatever is still pending.
+const shutdown = createShutdown(
+  {
+    logger,
+    workers,
+    tracker: jobs,
+    markStopping: () => {
+      health.stopping = true;
+    },
+    // IMAP A2: running IMAP operations are closed (transient: retried later, no cursor moves past unprocessed mail).
+    abortImap: abortImapOperations,
+    // After the grace period: realtime publishing (a job waiting on it fails and is retried, never marked completed)
+    // and, F5.4, the provider HTTP requests in flight (cancelled jobs fail as transient and are retried).
+    interruptBlockedClients: () => {
+      publisherConnection.disconnect();
+      providerRequests.abort();
+    },
+    release: [
+      // After the workers stopped: no job holds an IMAP connection any more.
+      ...(imapPool ? [{ name: "imap pool", run: () => imapPool.closeAll() }] : []),
+      { name: "queues", run: () => queues.close() },
+      ...(healthServer ? [{ name: "health server", run: () => closeServer(healthServer) }] : [])
+    ],
+    disconnect: () => {
+      connection.disconnect();
+      appRedis.client.disconnect();
+      publisherConnection.disconnect();
+    },
+    flush: flushWorkerSentry,
+    exit: (code) => process.exit(code)
+  },
+  shutdownLimits(config.shutdownTimeoutMs)
+);
 
 // Registered before the (possibly slow) initialization below, so a platform
 // can always stop the worker cleanly.
-process.on("SIGINT", () => void shutdown("SIGINT"));
-process.on("SIGTERM", () => void shutdown("SIGTERM"));
+process.on("SIGINT", () => shutdown.onSignal("SIGINT"));
+process.on("SIGTERM", () => shutdown.onSignal("SIGTERM"));
 
 for (const worker of workers) {
   worker.on("failed", (job, error) => {
@@ -270,6 +293,17 @@ try {
     { every: EXPIRE_SUBSCRIPTIONS_INTERVAL_MS },
     { name: "EXPIRE_SUBSCRIPTIONS", data: { type: "EXPIRE_SUBSCRIPTIONS" }, opts: { removeOnComplete: true, removeOnFail: 100 } }
   );
+
+  // Commercial V1 phase 2 (Culqi sandbox): renewals and stale checkouts are reconciled with Culqi every hour.
+  if (config.culqi) {
+    await queues.emailEvents.upsertJobScheduler(
+      CULQI_RECONCILE_DUE_SCHEDULER_ID,
+      { every: CULQI_RECONCILE_DUE_INTERVAL_MS },
+      { name: "CULQI_RECONCILE_DUE", data: { type: "CULQI_RECONCILE_DUE" }, opts: { removeOnComplete: true, removeOnFail: 100 } }
+    );
+  } else {
+    await queues.emailEvents.removeJobScheduler(CULQI_RECONCILE_DUE_SCHEDULER_ID);
+  }
 
   // Resumes emails left RECEIVED / PROCESSING by jobs that exhausted their retries (migration 9).
   await queues.emailEvents.upsertJobScheduler(

@@ -1,4 +1,4 @@
-import type { EmailAccount, EmailProviderAvailability } from "@emailbot/types";
+import type { EmailAccount, EmailProviderAvailability, ImapSecurity } from "@emailbot/types";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { queryKeys } from "@/lib/query-keys";
@@ -6,12 +6,13 @@ import { useOrganizationId } from "@/providers/organization-provider";
 
 export type OAuthProviderSlug = "gmail" | "microsoft";
 
+/** Body of POST /api/email-accounts/imap: the API's strict imapAccountCreateSchema (993 + TLS or 143 + STARTTLS only). */
 export interface ImapAccountInput {
   emailAddress: string;
   displayName?: string;
   host: string;
   port: number;
-  secure: boolean;
+  security: ImapSecurity;
   username: string;
   password: string;
 }

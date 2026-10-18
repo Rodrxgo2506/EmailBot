@@ -1,6 +1,7 @@
-import { KeyRound, Mail } from "lucide-react";
-import { useState, type FormEvent } from "react";
+import { AlertCircle, ArrowRight, Info, KeyRound, Loader2 } from "lucide-react";
+import { useRef, useState, type FormEvent } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
+import { BrandLogo } from "@/components/brand-logo";
 import { Button } from "@/components/ui/button";
 import { Input, Label } from "@/components/ui/form-controls";
 import { LegalLinks } from "@/features/legal/legal-layout";
@@ -15,69 +16,120 @@ export function PortalLoginPage() {
   const [accessId, setAccessId] = useState("");
   const [error, setError] = useState<string | null>(null);
   const expired = params.get("expired") === "1";
+  const pending = login.isPending;
+  const inputRef = useRef<HTMLInputElement>(null);
+  // Set synchronously, so a second Enter before the next render cannot send the Access ID twice.
+  const submitting = useRef(false);
+
+  /** The field keeps (or gets back) the focus with the message, ready to be corrected and sent again. */
+  const fail = (message: string) => {
+    setError(message);
+    inputRef.current?.focus();
+  };
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
+    if (submitting.current) return;
     setError(null);
     if (!accessId.trim()) {
-      setError("Ingresa tu Access ID.");
+      fail("Ingresa tu Access ID.");
       return;
     }
+    submitting.current = true;
     try {
       await login.mutateAsync(accessId.trim());
       setAccessId("");
       navigate("/portal", { replace: true });
     } catch (loginError) {
-      setError(portalErrorMessage(loginError, "login"));
+      fail(portalErrorMessage(loginError, "login"));
+    } finally {
+      submitting.current = false;
     }
   };
 
   return (
-    <main className="flex min-h-screen items-center justify-center bg-muted/30 px-4 py-10">
-      <div className="w-full max-w-sm">
-        <div className="mb-6 flex items-center justify-center gap-2">
-          <span className="flex size-9 items-center justify-center rounded-lg bg-primary text-primary-foreground">
-            <Mail className="size-5" />
-          </span>
-          <span className="text-lg font-semibold tracking-tight">EmailBot</span>
+    <main className="flex min-h-screen items-center justify-center bg-background bg-[radial-gradient(60rem_32rem_at_50%_-10%,color-mix(in_oklch,var(--primary)_9%,transparent),transparent)] px-4 py-10 sm:py-14">
+      <div className="w-full max-w-md">
+        <div className="mb-7 flex flex-col items-center gap-3 text-center">
+          <BrandLogo className="h-20 sm:h-24" />
+          <p className="max-w-xs text-sm leading-relaxed text-muted-foreground sm:text-base">Gestiona y automatiza tus correos de forma simple y segura.</p>
         </div>
-        <form onSubmit={(event) => void submit(event)} className="space-y-4 rounded-xl border bg-background p-6 shadow-sm" noValidate>
-          <div className="space-y-1 text-center">
-            <h1 className="text-xl font-semibold">Accede a tus correos</h1>
-            <p className="text-sm text-muted-foreground">Ingresa el Access ID que te entregaron.</p>
+
+        <form onSubmit={(event) => void submit(event)} className="rounded-2xl border bg-card p-6 shadow-card sm:p-8" noValidate aria-busy={pending}>
+          <div className="space-y-1.5 text-center">
+            <h1 className="text-2xl font-bold tracking-tight">Accede a tus correos</h1>
+            <p className="text-sm text-muted-foreground">Ingresa el Access ID que te entregaron para continuar.</p>
           </div>
+
           {expired && !error ? (
-            <p role="status" className="rounded-md border bg-muted px-3 py-2 text-sm">
-              Tu sesión terminó. Vuelve a ingresar con tu Access ID.
+            <p role="status" className="mt-6 flex items-start gap-3 rounded-xl border border-primary/20 bg-accent px-4 py-3 text-sm text-foreground">
+              <Info aria-hidden className="mt-0.5 size-5 shrink-0 text-primary" />
+              <span>Tu sesión terminó. Vuelve a ingresar con tu Access ID.</span>
             </p>
           ) : null}
-          <div className="space-y-2">
-            <Label htmlFor="portal-access-id">Access ID</Label>
-            <Input
-              id="portal-access-id"
-              name="accessId"
-              autoComplete="off"
-              autoCapitalize="characters"
-              spellCheck={false}
-              placeholder="SP-XXXXXXXXXXXX"
-              className="font-mono tracking-wider"
-              value={accessId}
-              onChange={(event) => setAccessId(event.target.value)}
-              aria-invalid={error ? true : undefined}
-            />
+
+          <div className="mt-6 space-y-2">
+            <Label htmlFor="portal-access-id" className="font-semibold">
+              Access ID
+            </Label>
+            <div className="relative">
+              <span aria-hidden className="pointer-events-none absolute inset-y-1.5 left-1.5 flex w-9 items-center justify-center rounded-md bg-muted text-muted-foreground">
+                <KeyRound className="size-4" />
+              </span>
+              <Input
+                ref={inputRef}
+                id="portal-access-id"
+                name="accessId"
+                autoComplete="off"
+                autoCapitalize="characters"
+                spellCheck={false}
+                placeholder="SP-XXXXXXXXXXXX"
+                className="h-12 rounded-xl bg-card pl-13 font-mono text-base tracking-wider shadow-xs transition-[border-color,box-shadow] focus-visible:border-primary focus-visible:ring-4 focus-visible:ring-ring/20 aria-invalid:focus-visible:ring-destructive/20"
+                value={accessId}
+                onChange={(event) => setAccessId(event.target.value)}
+                // Read-only (not disabled) while signing in: the field keeps the keyboard focus.
+                readOnly={pending}
+                aria-invalid={error ? true : undefined}
+                aria-describedby={error ? "portal-access-id-error" : undefined}
+              />
+            </div>
           </div>
+
           {error ? (
-            <p role="alert" className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-              {error}
+            <p
+              id="portal-access-id-error"
+              role="alert"
+              className="mt-4 flex items-start gap-2.5 rounded-xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive"
+            >
+              <AlertCircle aria-hidden className="mt-0.5 size-4 shrink-0" />
+              <span>{error}</span>
             </p>
           ) : null}
-          <Button type="submit" className="w-full" disabled={login.isPending}>
-            <KeyRound /> {login.isPending ? "Ingresando…" : "Ingresar"}
+
+          <Button type="submit" className="relative mt-5 h-12 w-full rounded-xl text-base font-semibold shadow-sm [&_svg]:size-5" disabled={pending} aria-busy={pending}>
+            {pending ? (
+              <>
+                <Loader2 aria-hidden className="animate-spin" /> Ingresando…
+              </>
+            ) : (
+              <>
+                Ingresar <ArrowRight aria-hidden className="absolute right-5" />
+              </>
+            )}
           </Button>
+
+          <div className="mt-6 flex items-center gap-3 text-xs text-muted-foreground">
+            <span aria-hidden className="h-px flex-1 bg-border" />
+            <span>¿No tienes un Access ID?</span>
+            <span aria-hidden className="h-px flex-1 bg-border" />
+          </div>
+          <p className="mt-3 text-center text-sm text-muted-foreground">Solicítalo a quien te dio acceso.</p>
         </form>
-        <p className="mt-4 text-center text-xs text-muted-foreground">Si no tienes un Access ID, solicítalo a quien te dio acceso.</p>
-        <p className="mt-2 text-center text-xs text-muted-foreground">Al ingresar aceptas los Términos de Servicio y la Política de Privacidad.</p>
-        <LegalLinks className="mt-2 justify-center text-xs" />
+
+        <footer className="mt-6 space-y-2 text-center">
+          <p className="text-xs text-muted-foreground">Al ingresar aceptas los Términos de Servicio y la Política de Privacidad.</p>
+          <LegalLinks className="justify-center text-xs" />
+        </footer>
       </div>
     </main>
   );

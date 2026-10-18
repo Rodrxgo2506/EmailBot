@@ -9,6 +9,8 @@ export const queryKeys = {
   org: (organizationId: string) => ["org", organizationId] as const,
   current: (organizationId: string) => ["org", organizationId, "current"] as const,
   plan: (organizationId: string) => ["org", organizationId, "plan"] as const,
+  billingConfig: (organizationId: string) => ["org", organizationId, "billing", "config"] as const,
+  billingCurrent: (organizationId: string) => ["org", organizationId, "billing", "current"] as const,
   emails: (organizationId: string) => ["org", organizationId, "emails"] as const,
   emailList: (organizationId: string, params: Record<string, unknown>) =>
     ["org", organizationId, "emails", "list", params] as const,

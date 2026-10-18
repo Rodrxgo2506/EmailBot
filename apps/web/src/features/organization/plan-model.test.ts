@@ -30,7 +30,7 @@ const overview = (plan: "FREE" | "BASIC" | "PRO" | "BUSINESS" = "PRO"): Organiza
     access: plan === "FREE" ? "LEGACY" : "SUBSCRIPTION",
     subscriptionStatus: plan === "FREE" ? null : "ACTIVE",
     limits: { EMAIL_ACCOUNTS: 125, RULES: 30, BOTS: 10, MONTHLY_EMAILS: 15000, MEMBERS: 5, CUSTOMERS: 2500, STORAGE_BYTES: 5 * GB, RETENTION_DAYS: 90 },
-    features: { GMAIL: true, MICROSOFT: true, ADVANCED_STATS: true, PORTAL: true, API: false, PRIORITY_SUPPORT: true }
+    features: { GMAIL: true, MICROSOFT: true, IMAP: true, ADVANCED_STATS: true, PORTAL: true, API: false, PRIORITY_SUPPORT: true }
   },
   usage: { EMAIL_ACCOUNTS: 125, RULES: 4, BOTS: 0, MONTHLY_EMAILS: 15200, MEMBERS: 2, CUSTOMERS: 1234, STORAGE_BYTES: 1536 * 1024 ** 2 }
 });

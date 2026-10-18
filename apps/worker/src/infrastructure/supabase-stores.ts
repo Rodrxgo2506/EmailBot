@@ -1,11 +1,15 @@
 import type { EmailRuleRow } from "@emailbot/rules-engine";
 import { REALTIME_REDIS_CHANNEL } from "@emailbot/types";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import type { Redis } from "ioredis";
+import { HttpTimeoutError } from "@emailbot/shared";
+import type { AppRedis } from "./app-redis.js";
+import { RequestCancelledError } from "./http-cancellation.js";
 import type {
   AccountStore,
   AttachmentStorage,
   AuditRecorder,
+  BillingStore,
+  BillingSubscriptionRow,
   CommercialAccess,
   EmailStore,
   IdentifierCandidate,
@@ -106,6 +110,21 @@ export function createAccountStore(db: SupabaseClient): AccountStore {
       return rows.map((row) => ({ id: row.id, organizationId: row.organization_id }));
     },
 
+    async listActiveImapAccounts(limit) {
+      const rows = check(
+        await db
+          .from("email_accounts")
+          .select("id,organization_id,organizations!inner(status)")
+          .eq("status", "ACTIVE")
+          .eq("organizations.status", "ACTIVE")
+          .eq("provider", "IMAP")
+          .order("last_synced_at", { ascending: true, nullsFirst: true })
+          .limit(limit),
+        "listActiveImapAccounts"
+      ) as Row[];
+      return rows.map((row) => ({ id: row.id, organizationId: row.organization_id }));
+    },
+
     async updateSyncState(id, state) {
       check(
         await db
@@ -128,6 +147,8 @@ export function createAccountStore(db: SupabaseClient): AccountStore {
         .update({ sync_cursor: state.to, last_synced_at: state.lastSyncedAt, last_error_code: null, last_error_message: null })
         .eq("id", id);
       query = state.from === null ? query.is("sync_cursor", null) : query.eq("sync_cursor", state.from);
+      // IMAP (M1 D1): in the same UPDATE, only while the mailbox is still ACTIVE (paused / disconnected meanwhile: unchanged).
+      if (state.requireActive) query = query.eq("status", "ACTIVE");
       const rows = check(await query.select("id"), "advanceSyncCursor") as Row[];
       return rows.length > 0;
     },
@@ -197,8 +218,24 @@ export function createAccountStore(db: SupabaseClient): AccountStore {
             last_error_message: error.message.slice(0, 2000),
             ...(error.status ? { status: error.status } : {})
           })
-          .eq("id", id),
+          .eq("id", id)
+          // IMAP (M1 D2): never a DISCONNECTED IMAP mailbox (a late job cannot make it ERROR and count again).
+          // Gmail / Microsoft rows always match (provider <> IMAP): unchanged behaviour.
+          .or("provider.neq.IMAP,status.neq.DISCONNECTED"),
         "markError"
+      );
+    },
+
+    async imapEntitled(organizationId) {
+      // Same source and rule as public.activate_imap_email_account / connect_imap_email_account (fail closed).
+      const rows = check(await db.rpc("organization_entitlements", { p_organization_id: organizationId }), "organizationEntitlements") as Row[] | null;
+      return (rows ?? []).some(
+        (row) =>
+          row.key === "IMAP" &&
+          row.kind === "FEATURE" &&
+          row.enabled === true &&
+          (row.access === "SUBSCRIPTION" || row.access === "LEGACY") &&
+          ["BASIC", "PRO", "BUSINESS"].includes(String(row.effective_plan))
       );
     }
   };
@@ -213,8 +250,241 @@ export function createSubscriptionMaintenance(db: SupabaseClient): SubscriptionM
   };
 }
 
+const BILLING_COLUMNS =
+  "id,organization_id,status,environment,external_subscription_id,external_plan_id,external_customer_id,external_card_id,cancel_reason,created_at," +
+  "review_required_at,last_reconciled_at,price:plan_prices(billing_period,amount_cents,currency,plan:plan_catalog(code))";
+
+function toBillingRow(row: Row): BillingSubscriptionRow {
+  const price = Array.isArray(row.price) ? row.price[0] : row.price;
+  return {
+    id: row.id,
+    organizationId: row.organization_id,
+    status: row.status,
+    environment: row.environment === "live" ? "live" : "test",
+    externalSubscriptionId: row.external_subscription_id ?? null,
+    externalPlanId: row.external_plan_id,
+    externalCustomerId: row.external_customer_id ?? null,
+    externalCardId: row.external_card_id ?? null,
+    billingPeriod: price?.billing_period === "YEARLY" ? "YEARLY" : "MONTHLY",
+    // Fail closed: an unreadable price never matches a charge.
+    amountCents: Number.isFinite(Number(price?.amount_cents)) ? Number(price.amount_cents) : -1,
+    currency: typeof price?.currency === "string" ? price.currency : "",
+    cancelReason: row.cancel_reason ?? null,
+    createdAt: row.created_at,
+    planCode: (Array.isArray(price?.plan) ? price.plan[0]?.code : price?.plan?.code) ?? null,
+    reviewRequiredAt: row.review_required_at ?? null,
+    lastReconciledAt: row.last_reconciled_at ?? null
+  };
+}
+
+/** Commercial V1 phase 2 (Culqi sandbox): billing_* tables (service role) and the three billing functions. */
+export function createBillingStore(db: SupabaseClient): BillingStore {
+  const provider = "CULQI";
+  return {
+    async getWebhookEvent(eventId) {
+      const row = check(
+        await db.from("billing_webhook_events").select("status,attempts").eq("provider", provider).eq("external_event_id", eventId).maybeSingle(),
+        "getWebhookEvent"
+      ) as Row | null;
+      return row ? { status: row.status, attempts: Number(row.attempts) } : null;
+    },
+
+    async updateWebhookEvent(eventId, patch) {
+      const update: Row = {};
+      if (patch.status !== undefined) update.status = patch.status;
+      if (patch.eventType !== undefined) update.event_type = patch.eventType;
+      if (patch.lastError !== undefined) update.last_error = patch.lastError === null ? null : patch.lastError.slice(0, 500);
+      if (patch.externalSubscriptionId !== undefined) update.external_subscription_id = patch.externalSubscriptionId;
+      if (patch.externalChargeId !== undefined) update.external_charge_id = patch.externalChargeId;
+      if (patch.attempts !== undefined) update.attempts = patch.attempts;
+      if (patch.processed) update.processed_at = new Date().toISOString();
+      check(await db.from("billing_webhook_events").update(update).eq("provider", provider).eq("external_event_id", eventId), "updateWebhookEvent");
+    },
+
+    async getBillingSubscription(id) {
+      const row = check(await db.from("billing_subscriptions").select(BILLING_COLUMNS).eq("id", id).maybeSingle(), "getBillingSubscription") as Row | null;
+      return row ? toBillingRow(row) : null;
+    },
+
+    async findBillingSubscriptionByExternalId(externalSubscriptionId) {
+      const row = check(
+        await db.from("billing_subscriptions").select(BILLING_COLUMNS).eq("external_subscription_id", externalSubscriptionId).maybeSingle(),
+        "findBillingSubscription"
+      ) as Row | null;
+      return row ? toBillingRow(row) : null;
+    },
+
+    async activate(input) {
+      const rows = check(
+        await db.rpc("billing_activate_culqi_subscription", {
+          p_billing_subscription_id: input.billingSubscriptionId,
+          p_activation_key: input.activationKey,
+          p_event_type: input.eventType,
+          p_period_start: input.periodStart,
+          p_period_end: input.periodEnd,
+          p_current_period: input.currentPeriod,
+          p_external_charge_id: input.externalChargeId,
+          p_provider_status: input.providerStatus,
+          p_request_id: input.requestId
+        }),
+        "activateCulqiSubscription"
+      ) as Row[] | null;
+      const row = rows?.[0] ?? {};
+      return { outcome: String(row.outcome), subscriptionId: row.subscription_id ?? null, supersededExternalIds: (row.superseded_external_ids as string[] | null) ?? [] };
+    },
+
+    async recordChargeFailure(input) {
+      return String(
+        check(
+          await db.rpc("billing_record_culqi_charge_failure", {
+            p_billing_subscription_id: input.billingSubscriptionId,
+            p_external_event_id: input.externalEventId,
+            p_event_type: input.eventType,
+            p_external_charge_id: input.externalChargeId,
+            p_failure_code: input.failureCode,
+            p_failure_message: input.failureMessage,
+            p_provider_status: input.providerStatus,
+            p_request_id: input.requestId
+          }),
+          "recordCulqiChargeFailure"
+        )
+      );
+    },
+
+    async setStatus(input) {
+      return String(
+        check(
+          await db.rpc("billing_set_culqi_status", {
+            p_billing_subscription_id: input.billingSubscriptionId,
+            p_status: input.status,
+            p_provider_status: input.providerStatus,
+            p_cancel_reason: input.cancelReason,
+            p_failure_code: input.failureCode,
+            p_failure_message: input.failureMessage,
+            p_request_id: input.requestId
+          }),
+          "setCulqiStatus"
+        )
+      );
+    },
+
+    async listUnconfirmedCancellations(organizationId) {
+      const rows = check(
+        await db
+          .from("billing_subscriptions")
+          .select("id,external_subscription_id")
+          .eq("organization_id", organizationId)
+          .eq("cancel_reason", "UPGRADED")
+          .is("provider_canceled_at", null)
+          .not("external_subscription_id", "is", null),
+        "listUnconfirmedCancellations"
+      ) as Row[];
+      return rows.map((row) => ({ id: row.id as string, externalSubscriptionId: row.external_subscription_id as string }));
+    },
+
+    async markProviderCanceled(id) {
+      check(await db.from("billing_subscriptions").update({ provider_canceled_at: new Date().toISOString() }).eq("id", id), "markProviderCanceled");
+    },
+
+    async listDueForReconciliation({ endBefore, endAfter, limit }) {
+      const rows = check(
+        await db
+          .from("billing_subscriptions")
+          .select(BILLING_COLUMNS)
+          .eq("provider", provider)
+          .in("status", ["ACTIVE", "PAST_DUE"])
+          .not("external_subscription_id", "is", null)
+          .lte("current_period_end", endBefore)
+          .gte("current_period_end", endAfter)
+          .order("current_period_end", { ascending: true })
+          .limit(limit),
+        "listDueForReconciliation"
+      ) as Row[];
+      return rows.map(toBillingRow);
+    },
+
+    async listStalePending({ withSubscriptionCreatedBefore, withoutSubscriptionCreatedBefore, limit }) {
+      const [withSubscription, withoutSubscription] = await Promise.all([
+        db
+          .from("billing_subscriptions")
+          .select(BILLING_COLUMNS)
+          .eq("provider", provider)
+          .eq("status", "PENDING")
+          .not("external_subscription_id", "is", null)
+          .lte("created_at", withSubscriptionCreatedBefore)
+          .order("created_at", { ascending: true })
+          .limit(limit),
+        db
+          .from("billing_subscriptions")
+          .select(BILLING_COLUMNS)
+          .eq("provider", provider)
+          .eq("status", "PENDING")
+          .is("external_subscription_id", null)
+          .lte("created_at", withoutSubscriptionCreatedBefore)
+          .order("created_at", { ascending: true })
+          .limit(limit)
+      ]);
+      return [...(check(withSubscription, "listStalePending") as Row[]), ...(check(withoutSubscription, "listStalePending") as Row[])].map(toBillingRow);
+    },
+
+    async listReviewRequired({ createdAfter, reconciledBefore, limit }) {
+      const rows = check(
+        await db
+          .from("billing_subscriptions")
+          .select(BILLING_COLUMNS)
+          .eq("provider", provider)
+          .eq("status", "REVIEW_REQUIRED")
+          .gte("created_at", createdAfter)
+          .or(`last_reconciled_at.is.null,last_reconciled_at.lte.${reconciledBefore}`)
+          .order("last_reconciled_at", { ascending: true, nullsFirst: true })
+          .limit(limit),
+        "listReviewRequired"
+      ) as Row[];
+      return rows.map(toBillingRow);
+    },
+
+    async recordReconciliation(id, { at, charge }) {
+      const patch: Record<string, unknown> = { last_reconciled_at: at };
+      if (charge) {
+        patch.last_charge_id = charge.chargeId;
+        patch.last_outcome_type = charge.outcomeType?.slice(0, 100) ?? null;
+        patch.last_outcome_code = charge.outcomeCode?.slice(0, 100) ?? null;
+        patch.last_decline_code = charge.declineCode?.slice(0, 100) ?? null;
+      }
+      check(await db.from("billing_subscriptions").update(patch).eq("id", id).in("status", ["PENDING", "REVIEW_REQUIRED"]), "recordReconciliation");
+    },
+
+    async markReviewRequired(input) {
+      return String(
+        check(
+          await db.rpc("billing_mark_culqi_review_required", {
+            p_billing_subscription_id: input.billingSubscriptionId,
+            p_review_code: input.reviewCode,
+            p_request_id: input.requestId
+          }),
+          "markCulqiReviewRequired"
+        )
+      );
+    }
+  };
+}
+
 export function createEmailStore(db: SupabaseClient): EmailStore {
   return {
+    async findEmailIdByInternetMessageId(emailAccountId, internetMessageId, receivedAt) {
+      const rows = check(
+        await db
+          .from("emails")
+          .select("id")
+          .eq("email_account_id", emailAccountId)
+          .eq("internet_message_id", internetMessageId)
+          .eq("received_at", receivedAt)
+          .limit(1),
+        "findEmailIdByInternetMessageId"
+      ) as Row[];
+      return rows[0]?.id ?? null;
+    },
+
     async findEmail(emailAccountId, providerMessageId) {
       const row = check(
         await db
@@ -247,22 +517,42 @@ export function createEmailStore(db: SupabaseClient): EmailStore {
       check(await db.from("emails").update(columns).eq("id", emailId), "updateProcessingState");
     },
 
-    async listIncompleteEmails({ startedBefore, limit }) {
-      const rows = check(
-        await db
-          .from("emails")
-          .select(
-            "id,organization_id,email_account_id,provider_message_id,processing_attempts,email_accounts!inner(provider,status),organizations!inner(status)"
-          )
-          .in("processing_status", ["RECEIVED", "PROCESSING"])
-          .lt("processing_started_at", startedBefore)
-          .eq("email_accounts.status", "ACTIVE")
-          // Suspended organizations keep their incomplete emails untouched (not retried towards FAILED).
-          .eq("organizations.status", "ACTIVE")
-          .order("processing_started_at", { ascending: true })
-          .limit(limit),
-        "listIncompleteEmails"
-      ) as Row[];
+    async listIncompleteEmails({ startedBefore, limit, imap, after, excludeOrganizations }) {
+      let query = db
+        .from("emails")
+        .select(
+          imap === "only"
+            ? "id,organization_id,email_account_id,provider_message_id,processing_attempts,processing_started_at,email_accounts!inner(provider,status),organizations!inner(status)"
+            : "id,organization_id,email_account_id,provider_message_id,processing_attempts,email_accounts!inner(provider,status),organizations!inner(status)"
+        )
+        .in("processing_status", ["RECEIVED", "PROCESSING"])
+        .lt("processing_started_at", startedBefore)
+        .eq("email_accounts.status", "ACTIVE")
+        // Suspended organizations keep their incomplete emails untouched (not retried towards FAILED).
+        .eq("organizations.status", "ACTIVE");
+      // F2: IMAP mailboxes get their own recovery batch (handle-email-event.ts), so they never fill this one.
+      if (imap === "exclude") query = query.neq("email_accounts.provider", "IMAP");
+      if (imap === "only") {
+        // F2.2: a page of the bounded IMAP recovery scan: a total order (id breaks ties), rows strictly after the previous
+        // page's last key, minus the organizations already settled for this run (blocked or with enough candidates).
+        query = query.eq("email_accounts.provider", "IMAP");
+        if (after) query = query.or(`processing_started_at.gt."${after.startedAt}",and(processing_started_at.eq."${after.startedAt}",id.gt.${after.id})`);
+        if (excludeOrganizations && excludeOrganizations.length > 0) query = query.not("organization_id", "in", `(${excludeOrganizations.join(",")})`);
+        const page = check(
+          await query.order("processing_started_at", { ascending: true }).order("id", { ascending: true }).limit(limit),
+          "listIncompleteEmails"
+        ) as Row[];
+        return page.map((row) => ({
+          id: row.id,
+          organizationId: row.organization_id,
+          emailAccountId: row.email_account_id,
+          provider: row.email_accounts.provider,
+          providerMessageId: row.provider_message_id,
+          processingAttempts: row.processing_attempts,
+          processingStartedAt: row.processing_started_at
+        }));
+      }
+      const rows = check(await query.order("processing_started_at", { ascending: true }).limit(limit), "listIncompleteEmails") as Row[];
       return rows.map((row) => ({
         id: row.id,
         organizationId: row.organization_id,
@@ -502,14 +792,23 @@ export function createAuditRecorder(db: SupabaseClient): AuditRecorder {
   };
 }
 
-export function createAttachmentStorage(db: SupabaseClient): AttachmentStorage {
+/**
+ * `uploads`: the client used for uploads only (F5.5: its own limit and the shutdown cancellation, see
+ * supabase-client.ts); the existence check uses `db`. Uploads overwrite (upsert) the deterministic path, so a
+ * repeated upload never creates a second object.
+ */
+export function createAttachmentStorage(db: SupabaseClient, uploads: SupabaseClient = db): AttachmentStorage {
   return {
     async upload(bucket, path, content, contentType) {
-      const { error } = await db.storage.from(bucket).upload(path, content, {
+      const { error } = await uploads.storage.from(bucket).upload(path, content, {
         contentType: contentType ?? "application/octet-stream",
         upsert: true
       });
-      if (error) throw new Error(`Storage upload failed: ${error.message}`);
+      if (!error) return;
+      // F5.5: a timeout or a shutdown cancellation keeps its type (storage-js wraps it): the caller treats them apart.
+      const original = (error as { originalError?: unknown }).originalError;
+      if (original instanceof HttpTimeoutError || original instanceof RequestCancelledError) throw original;
+      throw new Error(`Storage upload failed: ${error.message}`);
     },
     async exists(bucket, path) {
       const { data, error } = await db.storage.from(bucket).exists(path);
@@ -522,7 +821,17 @@ export function createAttachmentStorage(db: SupabaseClient): AttachmentStorage {
   };
 }
 
-export function createRealtimePublisher(redis: Redis): RealtimePublisher {
+/** The one Redis command the publisher needs (an ioredis client, or index.ts's bounded application client). */
+export interface RealtimeRedis {
+  publish(channel: string, message: string): Promise<number>;
+}
+
+/** F5.2: publishing on a bounded application client (index.ts); a failure or timeout rejects (never a success). */
+export function createAppRealtimePublisher(app: AppRedis): RealtimePublisher {
+  return createRealtimePublisher({ publish: (channel, message) => app.run("realtime publish", (redis) => redis.publish(channel, message)) });
+}
+
+export function createRealtimePublisher(redis: RealtimeRedis): RealtimePublisher {
   return {
     async publish(event) {
       await redis.publish(REALTIME_REDIS_CHANNEL, JSON.stringify(event));

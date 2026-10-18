@@ -21,9 +21,10 @@ const LIMITS = {
 } as const;
 
 const FEATURES = {
-  BASIC: { GMAIL: true, MICROSOFT: false, ADVANCED_STATS: false, PORTAL: false, API: false, PRIORITY_SUPPORT: false },
-  PRO: { GMAIL: true, MICROSOFT: true, ADVANCED_STATS: true, PORTAL: true, API: false, PRIORITY_SUPPORT: true },
-  BUSINESS: { GMAIL: true, MICROSOFT: true, ADVANCED_STATS: true, PORTAL: true, API: true, PRIORITY_SUPPORT: true }
+  // IMAP (20261014120000): PRO and BUSINESS only.
+  BASIC: { GMAIL: true, MICROSOFT: false, IMAP: false, ADVANCED_STATS: false, PORTAL: false, API: false, PRIORITY_SUPPORT: false },
+  PRO: { GMAIL: true, MICROSOFT: true, IMAP: true, ADVANCED_STATS: true, PORTAL: true, API: false, PRIORITY_SUPPORT: true },
+  BUSINESS: { GMAIL: true, MICROSOFT: true, IMAP: true, ADVANCED_STATS: true, PORTAL: true, API: true, PRIORITY_SUPPORT: true }
 } as const;
 
 type EntitlementRow = { plan: string | null; effective_plan: string | null; access: string; key: string | null; kind: string | null; limit_value: string | null; enabled: boolean | null };
@@ -328,7 +329,8 @@ describe("catalog privileges", () => {
         ["PRO", "39.90", 3990],
         ["BUSINESS", "89.90", 8990]
       ]);
-      expect(await count(tx, "select key, kind, limit_value, enabled from public.plan_entitlements")).toBe(42);
+      // 3 plans x (8 limits + 7 features); IMAP added by 20261014120000.
+      expect(await count(tx, "select key, kind, limit_value, enabled from public.plan_entitlements")).toBe(45);
     });
   });
 });

@@ -56,6 +56,11 @@ rate limiting. No usarlo como health check de Render (igual que `/health/ready`)
 | PATCH / DELETE | `/api/organizations/current/members/:id` | `members:manage` |
 | GET | `/api/organizations/current/plan` | miembro — entitlements (`access`: `SUBSCRIPTION` / `LEGACY` / `NONE`), uso y suscripción actual (también con la organización suspendida o sin suscripción) |
 | GET | `/api/plans` | **público** (sin sesión) — catálogo activo `{ items: PlanCatalogEntry[] }`: planes, precios (`amount` decimal en texto + `amountCents`) y entitlements; cacheable 5 min, 60 req/min por IP |
+| GET | `/api/billing/config` | miembro — `{ enabled, environment }`: pago con tarjeta (Culqi, **solo sandbox**) disponible |
+| GET | `/api/billing/checkout?plan&billingPeriod` | `organization:update` — precio del catálogo + llave **pública** de Culqi; valida upgrade, mapeo y checkout pendiente ([detalle](billing-culqi.md)) |
+| POST | `/api/billing/subscriptions` | `organization:update` — `{ plan, billingPeriod, tokenId, acceptTerms: true, customer }` (estricto: nunca importe, moneda ni datos de tarjeta) → `202` `PENDING`; el plan se activa al confirmarse el pago; 10 req / 10 min por IP |
+| GET | `/api/billing/subscriptions/current` | miembro — última suscripción de Culqi de la organización (estado) |
+| POST | `/webhooks/culqi` | Culqi — solo el `id` del evento (se relee desde Culqi); `?token=` obligatorio (`CULQI_WEBHOOK_TOKEN`; ausente o incorrecto → `401`); `404` sin Culqi configurado |
 
 **Planes y suscripción (Comercial V1 / V1.1, [detalle](commercial-plans.md))**: EmailBot es de pago. Sin una suscripción
 activa (ni acceso de legado) toda acción comercial responde `403 SUBSCRIPTION_REQUIRED` (`details: { subscriptionStatus }`).
@@ -73,7 +78,7 @@ bloquea por el plan.
 | GET | `/api/email-accounts/providers` | `email-accounts:read` → `{ providers: { GMAIL, MICROSOFT, IMAP } }` (booleanos: proveedor configurado en el servidor) |
 | POST | `/api/email-accounts/oauth/:provider/start` (`gmail`/`microsoft`) | `email-accounts:manage` → `{ authorizationUrl }` |
 | GET | `/api/oauth/:provider/callback` | público (state firmado) → redirige a `WEB_APP_URL/accounts?oauth=…` |
-| POST | `/api/email-accounts/imap` | `email-accounts:manage` — **deshabilitado**: 503 `IMAP_NOT_AVAILABLE` (no se guardan credenciales) |
+| POST | `/api/email-accounts/imap` | `email-accounts:manage` — **deshabilitado**: 503 `IMAP_NOT_AVAILABLE` (no se guardan credenciales). Preparado para cuando se active (IMAP E1): cuerpo estricto `{ emailAddress, displayName?, host, port, security: TLS (993) / STARTTLS (143), username, password }`; 400 si el puerto/modo no coinciden o el host no es un nombre DNS público; 403 `PLAN_FEATURE_UNAVAILABLE` (solo PRO y BUSINESS) / `PLAN_LIMIT_REACHED`; 422 `IMAP_HOST_FORBIDDEN` / `IMAP_ADDRESS_FORBIDDEN` / `IMAP_DNS_*` (SSRF); 409 `EMAIL_ACCOUNT_ALREADY_CONNECTED`; 201 creada / 200 reconectada, siempre en pausa |
 | PATCH | `/api/email-accounts/:id` (`status: ACTIVE/PAUSED`, `displayName`) | `email-accounts:manage` |
 | POST | `/api/email-accounts/:id/disconnect` | `email-accounts:manage` |
 | POST | `/api/email-accounts/:id/sync` | `email-accounts:sync` |
