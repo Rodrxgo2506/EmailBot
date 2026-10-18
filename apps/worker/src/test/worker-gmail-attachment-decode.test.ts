@@ -233,7 +233,7 @@ describe("F5.7: Gmail attachments decoded incrementally from the bytes of the bo
         }
       }
     }
-  });
+  }, 20_000); // ~0.43 s alone, 1.6-1.9 s under the full CI test step (Linux, Node 22, 4 CPUs): same limit as tests 2-8
 
   it("2. through the real chain: small and near-limit attachments, received in odd-sized slow chunks, are stored byte-identical, downloaded and uploaded once", async () => {
     const env = pipeline();
