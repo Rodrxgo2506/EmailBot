@@ -174,22 +174,34 @@ describe("A2: contiguous-prefix cursor (IMAP)", () => {
 
   it("9. pause during the run (M1 kept): the run halts and the cursor does not move, even with a finished prefix", async () => {
     const account = imapAccount();
-    const { deps, stored } = harness(account, { uidValidity: 7, uids: [1, 2, 3, 4, 5, 6] }, { 2: { delayMs: 30 } });
+    const { deps, stored, started } = harness(account, { uidValidity: 7, uids: [1, 2, 3, 4, 5, 6] });
     const pausing = deps.processMessage!;
+    // The order is fixed by promises, not timers (a timer race let every message finish before the pause on CI):
+    // 1 is stored, then 2, then the user pauses once (the resume below must not pause again); 3+ only go on after it.
     let paused = false;
+    let firstStored!: () => void;
+    const first = new Promise<void>((resolve) => (firstStored = resolve));
+    let releaseLater!: () => void;
+    const later = new Promise<void>((resolve) => (releaseLater = resolve));
     deps.processMessage = vi.fn(async (job: EmailProcessingJob) => {
+      const uid = parseImapMessageId(job.providerMessageId)!.uid;
+      if (uid === 2) await first;
+      if (uid > 2 && !paused) await later;
       const outcome = await pausing(job);
-      // The user pauses once, right after message 2 (the resume below must not pause again).
-      if (job.providerMessageId === "7:2" && !paused) {
+      if (uid === 1) firstStored();
+      if (uid === 2 && !paused) {
         paused = true;
         account.status = "PAUSED";
+        releaseLater();
       }
       return outcome;
     });
     const result = await syncAccount(account, deps, "POLL");
-    expect(result.cursorAdvanced).toBe(false);
+    // The finished prefix (1, 2) does not move the cursor: the run halted on the pause.
+    expect(result).toMatchObject({ cursorAdvanced: false, processed: 2, skipped: 0 });
     expect(account.syncCursor).toBe("imap:v1:7:0");
-    expect(stored.size).toBeLessThan(6);
+    expect([...stored.keys()].sort()).toEqual(["7:1", "7:2"]);
+    expect(started).not.toContain(6); // no message is started once the run has halted
     // Resume: everything else is processed, nothing twice.
     account.status = "ACTIVE";
     await syncAccount(account, deps, "POLL");
