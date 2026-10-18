@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/feedback";
 import { ApiError } from "@/lib/api-client";
 import { cn } from "@/lib/utils";
-import { PORTAL_LOGIN_PATH } from "./portal-context";
+import { PORTAL_LOGIN_PATH, usePortalLeave } from "./portal-context";
 import { usePortalInboxRealtime, usePortalLogout, usePortalMe } from "./portal-queries";
 
 /**
@@ -17,14 +17,17 @@ export function PortalLayout() {
   const navigate = useNavigate();
   const me = usePortalMe();
   const logout = usePortalLogout();
+  const leave = usePortalLeave();
   usePortalInboxRealtime(me.data !== undefined);
 
   const signOut = async () => {
     try {
       await logout.mutateAsync();
     } catch {
-      // The local state is cleared anyway (onSettled); the server session expires on its own.
+      // The local state is dropped anyway (below); the server session expires on its own.
     }
+    // Whatever the answer: the portal data is cleared once the login page is rendered (PortalProvider).
+    leave();
     navigate(PORTAL_LOGIN_PATH, { replace: true });
   };
 

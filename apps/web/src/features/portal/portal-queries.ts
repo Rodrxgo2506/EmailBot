@@ -64,12 +64,11 @@ export function usePortalLogin() {
 
 export function usePortalLogout() {
   const api = usePortalApi();
-  const client = useQueryClient();
   return useMutation({
     mutationFn: () => api.logout(),
-    meta: PUBLIC_MUTATION,
-    // The session is server-side: whatever the answer, the local portal state is dropped.
-    onSettled: () => client.clear()
+    // The session is server-side: whatever the answer, the local portal state is dropped once the login page is
+    // rendered (PortalLayout -> usePortalLeave), not here while the portal pages are still mounted.
+    meta: PUBLIC_MUTATION
   });
 }
 

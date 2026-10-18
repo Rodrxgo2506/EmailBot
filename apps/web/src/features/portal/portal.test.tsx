@@ -425,6 +425,36 @@ describe("portal session lifecycle", () => {
     expect(screen.queryByText("Tu código de acceso")).not.toBeInTheDocument();
   });
 
+  it("logout: no portal request after it (the session is revoked), no 'session ended' notice, and nothing is kept for the next sign-in", async () => {
+    const api = fakeApi();
+    renderPortal("/portal", api);
+    await screen.findByText("Tu código de acceso");
+    const unauthorized = () => Promise.reject(new ApiError(401, "UNAUTHORIZED", "La sesión no es válida."));
+    const authenticated = ["me", "inbox", "filters", "email", "syncStatus"] as const;
+    const answers = authenticated.map((name) => api[name].getMockImplementation());
+    // The API revokes the session on logout: from then on every portal request would be answered 401.
+    api.logout.mockImplementation(async () => {
+      for (const name of authenticated) api[name].mockImplementation(unauthorized);
+    });
+    const calls = () => authenticated.map((name) => api[name].mock.calls.length);
+    const before = calls();
+    fireEvent.click(screen.getByRole("button", { name: /cerrar sesión/i }));
+    await screen.findByLabelText("Access ID");
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+    expect(calls()).toEqual(before);
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    // A new session loads everything from the API again (the previous session's data was dropped).
+    authenticated.forEach((name, index) => api[name].mockImplementation(answers[index]!));
+    api.inbox.mockImplementation(async () => page([item({ subject: "Correo de la nueva sesión" })]));
+    typeAccessId("SP-7KQ9X82MP4Z7");
+    fireEvent.click(screen.getByRole("button", { name: /ingresar/i }));
+    expect(await screen.findByText("Correo de la nueva sesión")).toBeInTheDocument();
+    expect(screen.queryByText("Tu código de acceso")).not.toBeInTheDocument();
+    expect(api.me.mock.calls.length).toBe(before[0]! + 1);
+  });
+
   it("any 401 (expired, revoked, customer or organization suspended) redirects once to login with a generic notice", async () => {
     const unauthorized = () => Promise.reject(new ApiError(401, "UNAUTHORIZED", "La sesión no es válida."));
     const api = fakeApi({ me: vi.fn(unauthorized), inbox: vi.fn(unauthorized), filters: vi.fn(unauthorized) });
