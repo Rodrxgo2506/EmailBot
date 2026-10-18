@@ -40,7 +40,7 @@ afterEach(async () => {
 });
 
 async function setup(options: { enabled?: boolean } = {}) {
-  ctx = await createTestApp({ users: [owner, admin, viewer], config: { imapAccountsEnabled: options.enabled ?? true } });
+  ctx = await createTestApp({ users: [owner, admin, viewer], config: { imapAccountsEnabled: options.enabled ?? true, imapOrganizationIds: [ORG_A] } });
   ctx.repos.emailAccounts.get.mockResolvedValue(imapAccount());
   return ctx;
 }
@@ -205,7 +205,7 @@ describe("M1.4 (H1): an IMAP mailbox in ERROR cannot be resumed; it must be conn
       const open = vi.fn(async () => {
         throw new Error("must not connect");
       });
-      ctx = await createTestApp({ users: [owner], config: { imapAccountsEnabled: true }, imapResolver: resolver, imapProbeOpen: open as never });
+      ctx = await createTestApp({ users: [owner], config: { imapAccountsEnabled: true, imapOrganizationIds: [ORG_A] }, imapResolver: resolver, imapProbeOpen: open as never });
       const { privileged, repos, queue } = ctx;
       repos.emailAccounts.get.mockResolvedValue(imapAccount({ status: "ERROR", lastErrorCode, lastErrorMessage: "x" }));
       const sockets = vi.spyOn(net.Socket.prototype, "connect");

@@ -10,7 +10,7 @@ import { ImapDeadlineError, resetImapAbortForTests, runningImapOperations } from
 import { imapMessageScopeStats, withImapMessageScope } from "../providers/imap/message-scope.js";
 import { ImapConnectionPool } from "../providers/imap/pool.js";
 import type { ProviderAdapter, ProviderContext } from "../providers/types.js";
-import { makeAccount, makeAccountStore, makeAdapter, makeAudit, makeProducer, makeRealtime, makeRuleRow, MemoryEmailStore, MemoryRoutingStore, silentLogger } from "./fakes.js";
+import { IMAP_TEST_ORGANIZATION_IDS, makeAccount, makeAccountStore, makeAdapter, makeAudit, makeProducer, makeRealtime, makeRuleRow, MemoryEmailStore, MemoryRoutingStore, silentLogger } from "./fakes.js";
 import { localImapOptions, SLOW_LOGIN, startSlowImapServer, type SlowServerOptions } from "./slow-imap-server.js";
 
 /*
@@ -154,7 +154,7 @@ describe("A2.1 audit: late results of the IMAP adapter", () => {
       attachmentsBucket: "email-attachments",
       maxAttachmentBytes: 1_000_000,
       storageRetryDelayMs: 0,
-      imapSyncEnabled: true
+      imapSyncEnabled: true, imapOrganizationIds: IMAP_TEST_ORGANIZATION_IDS
     };
     const runner = createJobProcessors({
       eventDeps: {} as never,

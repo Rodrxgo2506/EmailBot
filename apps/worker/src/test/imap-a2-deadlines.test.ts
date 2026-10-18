@@ -16,7 +16,7 @@ import { ProviderAuthError, ProviderTransientError, type ProviderContext } from 
 import { SYNC_LOCK_TTL_MS, syncAccount, type HandleEventDeps } from "../pipeline/handle-email-event.js";
 import type { ProcessEmailOutcome } from "../pipeline/process-email.js";
 import type { EmailProcessingJob } from "@emailbot/shared";
-import { makeAccount, makeAccountStore, makeAdapter, makeProducer, makeRealtime, silentLogger } from "./fakes.js";
+import { IMAP_TEST_ORGANIZATION_IDS, makeAccount, makeAccountStore, makeAdapter, makeProducer, makeRealtime, silentLogger } from "./fakes.js";
 import { vi } from "vitest";
 import { localImapOptions, SLOW_LOGIN, startSlowImapServer, type SlowServer, type SlowServerOptions } from "./slow-imap-server.js";
 
@@ -250,7 +250,7 @@ describe("A2: a deadline inside a real sync run (real ImapFlow)", () => {
       enqueueSync: vi.fn(async () => undefined),
       processMessage,
       logger: silentLogger,
-      imapSyncEnabled: true
+      imapSyncEnabled: true, imapOrganizationIds: IMAP_TEST_ORGANIZATION_IDS
     };
     const { error } = await timed(syncAccount(account, deps, "POLL"));
     expectDeadline(error, "fetch");

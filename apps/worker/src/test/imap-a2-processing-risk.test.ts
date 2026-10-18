@@ -13,6 +13,7 @@ import { ImapConnectionPool } from "../providers/imap/pool.js";
 import type { ProviderAdapter, WorkerAccount } from "../providers/types.js";
 import { claimThrowawayValkey, cleanupSteps, releaseClaimedValkey, resetClaimedValkey, type CleanupSteps } from "./a2-bullmq-target.js";
 import {
+  IMAP_TEST_ORGANIZATION_IDS,
   makeAccount,
   makeAccountStore,
   makeAdapter,
@@ -173,7 +174,7 @@ describe.runIf(enabled)("A2 residual risk: slow IMAP jobs on the email-processin
       attachmentsBucket: "email-attachments",
       maxAttachmentBytes: 1000,
       storageRetryDelayMs: 0,
-      imapSyncEnabled: true
+      imapSyncEnabled: true, imapOrganizationIds: IMAP_TEST_ORGANIZATION_IDS
     };
     const eventDeps: Omit<HandleEventDeps, "logger"> = {
       accounts: store,
@@ -182,7 +183,7 @@ describe.runIf(enabled)("A2 residual risk: slow IMAP jobs on the email-processin
       providers,
       createContext,
       enqueueSync: (account, reason) => queues.enqueueSync(account, reason),
-      imapSyncEnabled: true
+      imapSyncEnabled: true, imapOrganizationIds: IMAP_TEST_ORGANIZATION_IDS
     };
     const logger = { ...silentLogger, child: () => ({ ...silentLogger, child: () => silentLogger }) };
     const processors = createJobProcessors({

@@ -45,6 +45,8 @@ export function testConfig(overrides: Partial<ApiConfig> = {}): ApiConfig {
     gmailPubSubOidc: null,
     microsoftGraphPushEnabled: false,
     imapAccountsEnabled: false,
+    // Production: the trial allowlist fixed in code (empty today). Tests that turn IMAP on name their organization.
+    imapOrganizationIds: [],
     // A random IMAP limit key per test app (production: IMAP_RATE_LIMIT_SECRET; absent = IMAP refuses).
     imapRateLimitSecret: randomBytes(32).toString("base64"),
     transactionalEmail: null,

@@ -6,7 +6,7 @@ import { assertImapWorkerConcurrency, IMAP_MIN_QUEUE_CONCURRENCY, loadWorkerConf
 import { createJobProcessors } from "../infrastructure/job-processors.js";
 import type { ProcessEmailDeps } from "../pipeline/process-email.js";
 import type { ProviderAdapter, WorkerAccount } from "../providers/types.js";
-import { makeAccount, makeAccountStore, makeAdapter, makeAudit, makeEmail, makeProducer, makeRealtime, makeRuleRow, MemoryEmailStore, MemoryRoutingStore, silentLogger } from "./fakes.js";
+import { IMAP_TEST_ORGANIZATION_IDS, makeAccount, makeAccountStore, makeAdapter, makeAudit, makeEmail, makeProducer, makeRealtime, makeRuleRow, MemoryEmailStore, MemoryRoutingStore, silentLogger } from "./fakes.js";
 
 /*
  * IMAP A2.1: with IMAP synchronization enabled, both shared queues need a concurrency of 2 or more (with 1 the
@@ -18,7 +18,7 @@ import { makeAccount, makeAccountStore, makeAdapter, makeAudit, makeEmail, makeP
 
 const base = { SUPABASE_SERVICE_ROLE_KEY: "service-role-secret-value", TOKEN_ENCRYPTION_KEY: randomBytes(32).toString("base64"), SUPABASE_URL: "http://127.0.0.1:54321" };
 const ones = { ...base, WORKER_EVENTS_CONCURRENCY: "1", WORKER_PROCESSING_CONCURRENCY: "1" };
-const withImap = (env: Record<string, string>) => ({ ...loadWorkerConfig(env), imapSyncEnabled: true });
+const withImap = (env: Record<string, string>) => ({ ...loadWorkerConfig(env), imapSyncEnabled: true, imapOrganizationIds: IMAP_TEST_ORGANIZATION_IDS });
 
 describe("A2.1: minimum queue concurrency while IMAP synchronization is enabled", () => {
   it("1. IMAP disabled (as fixed in the code) with both global concurrencies at 1: accepted, values unchanged", () => {
@@ -83,7 +83,8 @@ describe("A2.1: minimum queue concurrency while IMAP synchronization is enabled"
       attachmentsBucket: config.attachmentsBucket,
       maxAttachmentBytes: config.maxAttachmentBytes,
       storageRetryDelayMs: 0,
-      imapSyncEnabled: config.imapSyncEnabled
+      imapSyncEnabled: config.imapSyncEnabled,
+      imapOrganizationIds: config.imapOrganizationIds
     };
     const runner = createJobProcessors({
       eventDeps: {} as never,

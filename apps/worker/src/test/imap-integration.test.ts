@@ -12,7 +12,7 @@ import { createImapConnector, openImapClient, type ImapClient } from "../provide
 import { ImapConnectionPool } from "../providers/imap/pool.js";
 import { ProviderAuthError, ProviderSecurityError, ProviderTransientError, type ProviderContext, type WorkerAccount } from "../providers/types.js";
 import { integrationScriptCommand } from "./imap-integration-paths.js";
-import { makeAccount, makeAccountStore, makeAdapter, makeAudit, makeProducer, makeRealtime, makeRuleRow, MemoryEmailStore, MemoryRoutingStore, silentLogger } from "./fakes.js";
+import { IMAP_TEST_ORGANIZATION_IDS, makeAccount, makeAccountStore, makeAdapter, makeAudit, makeProducer, makeRealtime, makeRuleRow, MemoryEmailStore, MemoryRoutingStore, silentLogger } from "./fakes.js";
 
 /*
  * IMAP E2 - REAL integration tests against a local, throwaway Dovecot 2.4.5
@@ -377,7 +377,7 @@ ${pdf}
       maxAttachmentBytes: 1000,
       logger: silentLogger,
       storageRetryDelayMs: 0,
-      imapSyncEnabled: true
+      imapSyncEnabled: true, imapOrganizationIds: IMAP_TEST_ORGANIZATION_IDS
     };
     const outcomes: string[] = [];
     let crashOnce = true;
@@ -400,7 +400,7 @@ ${pdf}
       },
       lock: { acquire: vi.fn(async () => "token"), release: vi.fn(async () => undefined) },
       logger: silentLogger,
-      imapSyncEnabled: true
+      imapSyncEnabled: true, imapOrganizationIds: IMAP_TEST_ORGANIZATION_IDS
     };
     const start = account.syncCursor;
     const startUid = Number(String(start).split(":")[3]);
@@ -455,7 +455,7 @@ ${pdf}
       maxAttachmentBytes: 1000,
       logger: silentLogger,
       storageRetryDelayMs: 0,
-      imapSyncEnabled: true
+      imapSyncEnabled: true, imapOrganizationIds: IMAP_TEST_ORGANIZATION_IDS
     };
     let stored = 0;
     const deps: HandleEventDeps = {
@@ -474,7 +474,7 @@ ${pdf}
       lock: { acquire: vi.fn(async () => "token"), release: vi.fn(async () => undefined) },
       audit: makeAudit(),
       logger: silentLogger,
-      imapSyncEnabled: true
+      imapSyncEnabled: true, imapOrganizationIds: IMAP_TEST_ORGANIZATION_IDS
     };
 
     const first = await syncAccount(account, deps, "POLL");

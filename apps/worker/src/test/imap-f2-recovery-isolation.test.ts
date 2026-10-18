@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { createEmailStore } from "../infrastructure/supabase-stores.js";
 import { handleEmailEvent, IMAP_RECOVERY_BATCH, MAX_PROCESSING_ATTEMPTS, RECOVERY_BATCH, RECOVERY_STALE_MS } from "../pipeline/handle-email-event.js";
 import type { CommercialAccess } from "../pipeline/ports.js";
-import { makeAccountStore, makeAdapter, makeProducer, MemoryEmailStore, ORG, silentLogger } from "./fakes.js";
+import { IMAP_TEST_ORGANIZATION_IDS, makeAccountStore, makeAdapter, makeProducer, MemoryEmailStore, ORG, silentLogger } from "./fakes.js";
 
 /*
  * F2: the recovery of incomplete emails (RECOVER_INCOMPLETE, every 10 minutes) used ONE global batch of the 100
@@ -38,7 +38,7 @@ function seed({ imap = 150, gmail = 1, microsoft = 1 }: Seed = {}) {
   return emails;
 }
 
-async function sweep(emails: MemoryEmailStore, options: { imapSyncEnabled: boolean; access?: Map<string, CommercialAccess> }) {
+async function sweep(emails: MemoryEmailStore, options: { imapSyncEnabled: boolean; imapOrganizationIds?: readonly string[]; access?: Map<string, CommercialAccess> }) {
   const producer = makeProducer();
   const outcome = await handleEmailEvent(
     { type: "RECOVER_INCOMPLETE" },
@@ -50,7 +50,8 @@ async function sweep(emails: MemoryEmailStore, options: { imapSyncEnabled: boole
       createContext: () => ({}) as never,
       enqueueSync: vi.fn(),
       logger: silentLogger,
-      imapSyncEnabled: options.imapSyncEnabled
+      imapSyncEnabled: options.imapSyncEnabled,
+      ...(options.imapOrganizationIds ? { imapOrganizationIds: options.imapOrganizationIds } : {})
     }
   );
   const calls = producer.enqueueProcessing.mock.calls as unknown as Array<[EmailProcessingJob, { jobId: string }]>;
@@ -69,7 +70,7 @@ describe("F2: incomplete IMAP emails can no longer fill the global recovery batc
   });
 
   it("1 + 2 + 3. with more IMAP emails than the global batch, Gmail AND Microsoft are recovered", async () => {
-    const { jobs, byProvider, outcome } = await sweep(seed({ imap: 150 }), { imapSyncEnabled: true });
+    const { jobs, byProvider, outcome } = await sweep(seed({ imap: 150 }), { imapSyncEnabled: true, imapOrganizationIds: IMAP_TEST_ORGANIZATION_IDS });
     expect(byProvider("GMAIL").map((job) => job.providerMessageId)).toEqual(["gmail-1"]);
     expect(byProvider("MICROSOFT").map((job) => job.providerMessageId)).toEqual(["microsoft-1"]);
     expect(outcome).toEqual({ accounts: 2 + IMAP_RECOVERY_BATCH, enqueued: 2 + IMAP_RECOVERY_BATCH });
@@ -77,23 +78,23 @@ describe("F2: incomplete IMAP emails can no longer fill the global recovery batc
   });
 
   it("4. IMAP is still recovered, within its own limit, oldest first", async () => {
-    const { byProvider } = await sweep(seed({ imap: 150 }), { imapSyncEnabled: true });
+    const { byProvider } = await sweep(seed({ imap: 150 }), { imapSyncEnabled: true, imapOrganizationIds: IMAP_TEST_ORGANIZATION_IDS });
     expect(IMAP_RECOVERY_BATCH).toBe(20);
     expect(byProvider("IMAP").map((job) => job.providerMessageId)).toEqual(Array.from({ length: IMAP_RECOVERY_BATCH }, (_, n) => `7:${n + 1}`));
   });
 
   it("Gmail / Microsoft keep their whole batch even when they alone exceed it (100, as before) and IMAP still gets its 20", async () => {
-    const { byProvider } = await sweep(seed({ imap: 150, gmail: 80, microsoft: 80 }), { imapSyncEnabled: true });
+    const { byProvider } = await sweep(seed({ imap: 150, gmail: 80, microsoft: 80 }), { imapSyncEnabled: true, imapOrganizationIds: IMAP_TEST_ORGANIZATION_IDS });
     expect(byProvider("GMAIL").length + byProvider("MICROSOFT").length).toBe(RECOVERY_BATCH);
     expect(byProvider("IMAP")).toHaveLength(IMAP_RECOVERY_BATCH);
   });
 
   it("5. no job is duplicated and no email is skipped: same ids on a repeated sweep, the IMAP batch moves on as emails finish", async () => {
     const emails = seed({ imap: 45 });
-    const first = await sweep(emails, { imapSyncEnabled: true });
+    const first = await sweep(emails, { imapSyncEnabled: true, imapOrganizationIds: IMAP_TEST_ORGANIZATION_IDS });
     const ids = first.jobs.map((job) => job.jobId);
     expect(new Set(ids).size).toBe(ids.length); // one job per email
-    const again = await sweep(emails, { imapSyncEnabled: true });
+    const again = await sweep(emails, { imapSyncEnabled: true, imapOrganizationIds: IMAP_TEST_ORGANIZATION_IDS });
     expect(again.jobs.map((job) => job.jobId)).toEqual(ids); // same deterministic ids: BullMQ keeps one job each
     // Nothing was marked or dropped: every IMAP email is still incomplete and will be selected later.
     expect(emails.rows.filter((row) => row.email_account_id === "imap-1" && row.processing_status === "PROCESSING")).toHaveLength(45);
@@ -102,9 +103,9 @@ describe("F2: incomplete IMAP emails can no longer fill the global recovery batc
       for (let n = from; n < to; n++) emails.rows[n]!.processing_status = "PROCESSED";
     };
     finish(0, 20);
-    expect((await sweep(emails, { imapSyncEnabled: true })).byProvider("IMAP").map((job) => job.providerMessageId)).toEqual(Array.from({ length: 20 }, (_, n) => `7:${n + 21}`));
+    expect((await sweep(emails, { imapSyncEnabled: true, imapOrganizationIds: IMAP_TEST_ORGANIZATION_IDS })).byProvider("IMAP").map((job) => job.providerMessageId)).toEqual(Array.from({ length: 20 }, (_, n) => `7:${n + 21}`));
     finish(20, 40);
-    expect((await sweep(emails, { imapSyncEnabled: true })).byProvider("IMAP").map((job) => job.providerMessageId)).toEqual(["7:41", "7:42", "7:43", "7:44", "7:45"]);
+    expect((await sweep(emails, { imapSyncEnabled: true, imapOrganizationIds: IMAP_TEST_ORGANIZATION_IDS })).byProvider("IMAP").map((job) => job.providerMessageId)).toEqual(["7:41", "7:42", "7:43", "7:44", "7:45"]);
   });
 
   it("6. eligibility is unchanged: fresh or finished emails are not taken; exhausted ones become FAILED in both batches", async () => {
@@ -117,7 +118,7 @@ describe("F2: incomplete IMAP emails can no longer fill the global recovery batc
     push("imap-1", "7:901", { processing_status: "FAILED" });
     push("gmail-1", "gmail-exhausted", { processing_attempts: MAX_PROCESSING_ATTEMPTS });
     push("imap-1", "7:902", { processing_attempts: MAX_PROCESSING_ATTEMPTS });
-    const { jobs } = await sweep(emails, { imapSyncEnabled: true });
+    const { jobs } = await sweep(emails, { imapSyncEnabled: true, imapOrganizationIds: IMAP_TEST_ORGANIZATION_IDS });
     expect(jobs.map((job) => job.providerMessageId).sort()).toEqual(["7:1", "7:2", "gmail-1"]);
     const status = (id: string) => emails.rows.find((row) => row.provider_message_id === id)?.processing_status;
     expect(status("gmail-exhausted")).toBe("FAILED");
@@ -130,7 +131,7 @@ describe("F2: incomplete IMAP emails can no longer fill the global recovery batc
     const emails = seed({ imap: 2, gmail: 1, microsoft: 1 });
     for (const row of emails.rows) if (row.email_account_id !== "microsoft-1") row.organization_id = OTHER_ORG;
     const access = new Map<string, CommercialAccess>([[OTHER_ORG, { allowed: false, access: "NONE", subscriptionStatus: "EXPIRED" }]]);
-    const { jobs } = await sweep(emails, { imapSyncEnabled: true, access });
+    const { jobs } = await sweep(emails, { imapSyncEnabled: true, imapOrganizationIds: IMAP_TEST_ORGANIZATION_IDS, access });
     expect(jobs.map((job) => job.providerMessageId)).toEqual(["microsoft-1"]);
     expect(emails.updateProcessingState).not.toHaveBeenCalled();
   });

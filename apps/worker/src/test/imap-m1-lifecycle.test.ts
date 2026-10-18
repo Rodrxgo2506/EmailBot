@@ -9,7 +9,7 @@ import { createImapSyncAdapter } from "../providers/imap/adapter.js";
 import type { ImapClient } from "../providers/imap/connection.js";
 import { ImapConnectionPool } from "../providers/imap/pool.js";
 import { ProviderAuthError, ProviderSecurityError, ProviderTransientError, type ProviderContext, type WorkerAccount } from "../providers/types.js";
-import { makeAccount, makeAccountStore, makeAdapter, makeAudit, makeProducer, makeRealtime, makeRuleRow, MemoryEmailStore, MemoryRoutingStore, ORG, silentLogger } from "./fakes.js";
+import { IMAP_TEST_ORGANIZATION_IDS, makeAccount, makeAccountStore, makeAdapter, makeAudit, makeProducer, makeRealtime, makeRuleRow, MemoryEmailStore, MemoryRoutingStore, ORG, silentLogger } from "./fakes.js";
 
 /*
  * IMAP M1 in the worker (IMAP synchronization enabled in the TEST deps only; production keeps
@@ -153,7 +153,7 @@ function pipeline(server: FakeImapServer, account: WorkerAccount, options: { aft
     maxAttachmentBytes: 1000,
     logger: silentLogger,
     storageRetryDelayMs: 0,
-    imapSyncEnabled: true
+    imapSyncEnabled: true, imapOrganizationIds: IMAP_TEST_ORGANIZATION_IDS
   };
   let handled = 0;
   const logger = { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() };
@@ -176,7 +176,7 @@ function pipeline(server: FakeImapServer, account: WorkerAccount, options: { aft
     audit,
     logger,
     now: () => NOW,
-    imapSyncEnabled: true
+    imapSyncEnabled: true, imapOrganizationIds: IMAP_TEST_ORGANIZATION_IDS
   };
   const storedUids = () => emails.rows.map((row) => String(row.provider_message_id)).sort((a, b) => Number(a.split(":")[1]) - Number(b.split(":")[1]));
   return { accounts, emails, deps, access, notEntitled, pool, audit, logger, storedUids };
@@ -394,7 +394,7 @@ describe("Gmail / Microsoft: zero behaviour change", () => {
         processMessage: vi.fn(async () => ({ status: "skipped" as const, reason: "account_inactive" as const })),
         lock: { acquire: vi.fn(async () => "token"), release: vi.fn(async () => undefined) },
         logger: silentLogger,
-        imapSyncEnabled: true
+        imapSyncEnabled: true, imapOrganizationIds: IMAP_TEST_ORGANIZATION_IDS
       };
       const result = await syncAccount(account, deps, "POLL");
       expect(adapter.listNewMessageIds, provider).toHaveBeenCalledWith(expect.anything(), { maxMessages: 200 });

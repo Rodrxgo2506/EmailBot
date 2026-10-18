@@ -150,7 +150,8 @@ const processDeps: Omit<ProcessEmailDeps, "logger"> = {
   maxAttachmentBytes: config.maxAttachmentBytes,
   attachmentTransfers,
   attachmentContents,
-  imapSyncEnabled: config.imapSyncEnabled
+  imapSyncEnabled: config.imapSyncEnabled,
+  imapOrganizationIds: config.imapOrganizationIds
 };
 
 const eventDeps: Omit<HandleEventDeps, "logger"> = {
@@ -168,6 +169,7 @@ const eventDeps: Omit<HandleEventDeps, "logger"> = {
   microsoftSubscriptions: createMicrosoftSubscriptionClient(providerFetch),
   subscriptions: createSubscriptionMaintenance(supabase),
   imapSyncEnabled: config.imapSyncEnabled,
+  imapOrganizationIds: config.imapOrganizationIds,
   // IMAP A2: IMAP runs never take every events slot (at least one stays for Gmail / Microsoft).
   ...(config.imapSyncEnabled ? { imapSlots: createImapSyncSlots(imapSyncSlotCount(config.eventsConcurrency, config.imapSyncConcurrency)) } : {}),
   // Commercial V1 phase 2: Culqi SANDBOX only (live keys are refused by the configuration).

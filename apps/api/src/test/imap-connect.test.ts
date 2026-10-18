@@ -69,7 +69,7 @@ const fakeImapOpen = (): ImapProbeOpen =>
   });
 
 async function setup(resolver: ImapResolver = publicResolver()) {
-  ctx = await createTestApp({ users: [owner, admin, viewer], config: { imapAccountsEnabled: true }, imapResolver: resolver, imapProbeOpen: fakeImapOpen(), rateLimitRedis: new FakeRedis() });
+  ctx = await createTestApp({ users: [owner, admin, viewer], config: { imapAccountsEnabled: true, imapOrganizationIds: [ORG_A] }, imapResolver: resolver, imapProbeOpen: fakeImapOpen(), rateLimitRedis: new FakeRedis() });
   ctx.repos.emailAccounts.list.mockResolvedValue([]);
   return { ...ctx, resolver };
 }

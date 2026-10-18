@@ -11,4 +11,5 @@ export * from "./graph-subscriptions.js";
 export * from "./imap-destination.js";
 export * from "./imap-cursor.js";
 export * from "./imap-client.js";
+export * from "./imap-activation.js";
 export * from "./culqi.js";

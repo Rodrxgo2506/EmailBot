@@ -2,6 +2,7 @@ import {
   buildAuthorizationUrl,
   createOAuthState,
   exchangeAuthorizationCode,
+  imapAllowedForOrganization,
   imapCredentialContext,
   serializeError,
   verifyOAuthState,
@@ -50,14 +51,16 @@ function providerConfig(config: ApiConfig, provider: OAuthProvider): OAuthProvid
  * Single source of which providers NEW accounts can be connected with: an
  * OAuth provider needs its server configuration (client id, secret, redirect
  * URI), so Microsoft becomes available just by configuring it and deploying;
- * IMAP stays refused until its synchronization exists (config.imapAccountsEnabled).
+ * IMAP stays refused until its synchronization exists (config.imapAccountsEnabled) and, even then,
+ * for every organization outside the trial allowlist fixed in code (config.imapOrganizationIds).
+ * `organizationId` is the organization verified for the request (membership checked); null = none: IMAP false.
  * Existing accounts of any provider can always be listed, disconnected and deleted.
  */
-export function providerAvailability(config: ApiConfig): EmailProviderAvailability {
+export function providerAvailability(config: ApiConfig, organizationId: string | null): EmailProviderAvailability {
   return {
     GMAIL: providerConfig(config, "GMAIL") !== null,
     MICROSOFT: providerConfig(config, "MICROSOFT") !== null,
-    IMAP: config.imapAccountsEnabled
+    IMAP: imapAllowedForOrganization(config.imapAccountsEnabled, config.imapOrganizationIds, organizationId)
   };
 }
 
@@ -85,9 +88,13 @@ export function emailAccountRoutes(deps: AppDeps) {
      * preParsing, i.e. BEFORE the body (and its password) is read or parsed. Anonymous
      * and unauthorized callers keep their 401 / 403; while IMAP is disabled every other
      * caller gets 503 whatever the body (malformed, oversized, another content type).
+     * The check uses the organization verified just before (requireOrganization): an organization
+     * outside the trial allowlist gets the same 503 as when IMAP is off (nothing tells it a trial exists).
      */
-    const imapAvailable = async () => {
-      if (!providerAvailability(deps.config).IMAP) throw serviceUnavailable("IMAP accounts are not available yet", "IMAP_NOT_AVAILABLE");
+    const imapAvailable = async (request: FastifyRequest) => {
+      if (!providerAvailability(deps.config, getOrganization(request).id).IMAP) {
+        throw serviceUnavailable("IMAP accounts are not available yet", "IMAP_NOT_AVAILABLE");
+      }
     };
     const beforeBody = (hook: (request: FastifyRequest, reply: FastifyReply) => Promise<unknown>) =>
       async (request: FastifyRequest, reply: FastifyReply, payload: unknown) => {
@@ -121,9 +128,9 @@ export function emailAccountRoutes(deps: AppDeps) {
     }
 
     /** Providers new accounts can be connected with (the web app only offers these). */
-    app.get("/email-accounts/providers", read, async (_request, reply) => {
+    app.get("/email-accounts/providers", read, async (request, reply) => {
       reply.header("cache-control", "no-store");
-      return { providers: providerAvailability(deps.config) };
+      return { providers: providerAvailability(deps.config, getOrganization(request).id) };
     });
 
     app.get("/email-accounts", read, async (request) => {
@@ -301,7 +308,7 @@ export function emailAccountRoutes(deps: AppDeps) {
 
     /** Connection test only: nothing is stored, no password is kept, nothing is queued or imported. */
     app.post("/email-accounts/imap/test", imapTestGuards, async (request) => {
-      if (!providerAvailability(deps.config).IMAP) {
+      if (!providerAvailability(deps.config, getOrganization(request).id).IMAP) {
         throw serviceUnavailable("IMAP accounts are not available yet", "IMAP_NOT_AVAILABLE");
       }
       const input = parseWith(imapConnectionTestSchema, request.body);
@@ -320,10 +327,10 @@ export function emailAccountRoutes(deps: AppDeps) {
      * no older message is ever imported, none received after the test is lost.
      */
     app.post("/email-accounts/imap", imapGuards, async (request, reply) => {
-      if (!providerAvailability(deps.config).IMAP) {
+      const organizationId = getOrganization(request).id;
+      if (!providerAvailability(deps.config, organizationId).IMAP) {
         throw serviceUnavailable("IMAP accounts are not available yet", "IMAP_NOT_AVAILABLE");
       }
-      const organizationId = getOrganization(request).id;
       const input = parseWith(imapAccountCreateSchema, request.body);
       // Early, friendly refusals; the database checks plan and limit again in the same transaction as the write.
       const entitlements = await assertImapConnectable(request, input.emailAddress);
@@ -450,8 +457,9 @@ export function emailAccountRoutes(deps: AppDeps) {
           throw conflict("The account is disconnected; connect it again", "RECONNECT_REQUIRED");
         }
         if (input.status === "ACTIVE" && current.provider === "IMAP") {
-          // IMAP disabled (config.imapAccountsEnabled: false, fixed in code): unchanged refusal, nothing contacted.
-          if (!providerAvailability(deps.config).IMAP) {
+          // IMAP disabled (config.imapAccountsEnabled: false, fixed in code) or this organization outside the trial
+          // allowlist: unchanged refusal, nothing contacted.
+          if (!providerAvailability(deps.config, organizationId).IMAP) {
             throw conflict("IMAP synchronization is not available yet", "IMAP_SYNC_NOT_IMPLEMENTED");
           }
           return activateImapMailbox(request, current, input.displayName);
@@ -511,6 +519,10 @@ export function emailAccountRoutes(deps: AppDeps) {
         const account = await getAuth(request).repos.emailAccounts.get(organizationId, id);
         if (!account) throw notFound("Email account");
         if (account.status !== "ACTIVE") throw conflict("Only active accounts can be synchronized", "ACCOUNT_NOT_ACTIVE");
+        // IMAP off, or this organization outside the trial allowlist: the worker would skip it; nothing is queued.
+        if (account.provider === "IMAP" && !providerAvailability(deps.config, organizationId).IMAP) {
+          throw conflict("IMAP synchronization is not available yet", "IMAP_SYNC_NOT_IMPLEMENTED");
+        }
         // Commercial V1.2: the worker would skip it anyway; say why instead of queuing a no-op.
         await requestEntitlements(request).get();
 

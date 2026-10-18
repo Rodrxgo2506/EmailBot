@@ -12,7 +12,7 @@ import { abortImapOperations, resetImapAbortForTests, runningImapOperations } fr
 import { ImapConnectionPool } from "../providers/imap/pool.js";
 import type { ProviderAdapter, WorkerAccount } from "../providers/types.js";
 import { claimThrowawayValkey, cleanupSteps, releaseClaimedValkey, resetClaimedValkey, type CleanupSteps } from "./a2-bullmq-target.js";
-import { makeAccount, makeAccountStore, makeAdapter, makeAudit, makeEmail, makeProducer, makeRealtime, makeRuleRow, MemoryEmailStore, MemoryRoutingStore, silentLogger } from "./fakes.js";
+import { IMAP_TEST_ORGANIZATION_IDS, makeAccount, makeAccountStore, makeAdapter, makeAudit, makeEmail, makeProducer, makeRealtime, makeRuleRow, MemoryEmailStore, MemoryRoutingStore, silentLogger } from "./fakes.js";
 import { localImapOptions, SLOW_LOGIN, startSlowImapServer, type SlowServer } from "./slow-imap-server.js";
 
 /*
@@ -155,7 +155,7 @@ describe.runIf(enabled)("A2.1: IMAP recovery jobs cannot take the email-processi
       attachmentsBucket: "email-attachments",
       maxAttachmentBytes: 1_000_000,
       storageRetryDelayMs: 0,
-      imapSyncEnabled: true
+      imapSyncEnabled: true, imapOrganizationIds: IMAP_TEST_ORGANIZATION_IDS
     };
     const productionSlots = createImapSyncSlots(IMAP_SLOTS);
     let maxInUse = 0;

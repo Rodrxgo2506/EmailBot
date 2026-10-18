@@ -14,6 +14,7 @@ import { ImapConnectionPool } from "../providers/imap/pool.js";
 import type { ProviderAdapter, WorkerAccount } from "../providers/types.js";
 import { claimThrowawayValkey, cleanupSteps, releaseClaimedValkey, resetClaimedValkey, type CleanupSteps } from "./a2-bullmq-target.js";
 import {
+  IMAP_TEST_ORGANIZATION_IDS,
   makeAccount,
   makeAccountStore,
   makeAdapter,
@@ -148,7 +149,7 @@ describe.runIf(enabled)("A2: IMAP cannot take the events slots of Gmail / Micros
       attachmentsBucket: "email-attachments",
       maxAttachmentBytes: 1000,
       storageRetryDelayMs: 0,
-      imapSyncEnabled: true
+      imapSyncEnabled: true, imapOrganizationIds: IMAP_TEST_ORGANIZATION_IDS
     };
     const slots: (ImapSyncSlots & { inUse(): number }) | undefined = withSlots ? createImapSyncSlots(imapSyncSlotCount(EVENTS_CONCURRENCY, 2)) : undefined;
     const eventDeps: Omit<HandleEventDeps, "logger"> = {
@@ -158,7 +159,7 @@ describe.runIf(enabled)("A2: IMAP cannot take the events slots of Gmail / Micros
       providers,
       createContext,
       enqueueSync: (account, reason) => queues.enqueueSync(account, reason),
-      imapSyncEnabled: true,
+      imapSyncEnabled: true, imapOrganizationIds: IMAP_TEST_ORGANIZATION_IDS,
       ...(slots ? { imapSlots: slots } : {})
     };
     const logger = { ...silentLogger, child: () => ({ ...silentLogger, child: () => silentLogger }) };

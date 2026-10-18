@@ -24,6 +24,8 @@ import type { ChangeSet, ProviderAdapter, WorkerAccount } from "../providers/typ
 
 export const ORG = "11111111-1111-4111-8111-111111111111";
 export const OTHER_ORG = "22222222-2222-4222-8222-222222222222";
+/** Organizations the worker tests that turn IMAP on put in the trial allowlist (production: fixed in code, empty). */
+export const IMAP_TEST_ORGANIZATION_IDS: readonly string[] = [ORG, OTHER_ORG];
 
 export function makeAccount(overrides: Partial<WorkerAccount> = {}): WorkerAccount {
   return {

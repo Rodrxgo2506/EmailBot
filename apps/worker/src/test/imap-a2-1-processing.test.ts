@@ -22,7 +22,7 @@ import { imapMessageScopeStats, rememberImapSource, withImapMessageScope } from 
 import { ImapConnectionPool } from "../providers/imap/pool.js";
 import { ProviderHttpError } from "../providers/http.js";
 import { ProviderTransientError, type ProviderAdapter, type ProviderContext, type WorkerAccount } from "../providers/types.js";
-import { makeAccount, makeAccountStore, makeAdapter, makeAudit, makeEmail, makeProducer, makeRealtime, makeRuleRow, MemoryEmailStore, MemoryRoutingStore, silentLogger } from "./fakes.js";
+import { IMAP_TEST_ORGANIZATION_IDS, makeAccount, makeAccountStore, makeAdapter, makeAudit, makeEmail, makeProducer, makeRealtime, makeRuleRow, MemoryEmailStore, MemoryRoutingStore, silentLogger } from "./fakes.js";
 import { localImapOptions, SLOW_LOGIN, startSlowImapServer, type SlowServer, type SlowServerOptions } from "./slow-imap-server.js";
 
 /*
@@ -158,7 +158,8 @@ async function setup(serverOptions: SlowServerOptions = {}, options: SetupOption
     attachmentsBucket: "email-attachments",
     maxAttachmentBytes: 1_000_000,
     storageRetryDelayMs: 0,
-    imapSyncEnabled: options.imapSyncEnabled ?? true
+    imapSyncEnabled: options.imapSyncEnabled ?? true,
+    imapOrganizationIds: IMAP_TEST_ORGANIZATION_IDS
   };
   const slots = options.slots === null ? undefined : countingSlots(options.slots ?? 1);
   const reportJobFailure = vi.fn();

@@ -18,7 +18,7 @@ import { ImapConnectionPool } from "../providers/imap/pool.js";
 import type { RealtimePublisher } from "../pipeline/ports.js";
 import type { WorkerAccount } from "../providers/types.js";
 import { claimThrowawayValkey, cleanupSteps, releaseClaimedValkey, resetClaimedValkey, type CleanupSteps } from "./a2-bullmq-target.js";
-import { makeAccount, makeAccountStore, makeAdapter, makeAudit, makeEmail, makeRealtime, makeRuleRow, MemoryEmailStore, MemoryRoutingStore, silentLogger } from "./fakes.js";
+import { IMAP_TEST_ORGANIZATION_IDS, makeAccount, makeAccountStore, makeAdapter, makeAudit, makeEmail, makeRealtime, makeRuleRow, MemoryEmailStore, MemoryRoutingStore, silentLogger } from "./fakes.js";
 import { localImapOptions, SLOW_LOGIN, startSlowImapServer } from "./slow-imap-server.js";
 
 /*
@@ -133,7 +133,7 @@ describe.runIf(enabled)("F5.1: bounded shutdown with real BullMQ", () => {
       storage: { exists: vi.fn(async (_b: string, path: string) => objects.has(path)), upload: vi.fn(async (_b: string, path: string) => void (uploads.push(path), objects.add(path))) },
       realtime: options.realtime, producer: queues.producer, providers: { GMAIL: oauth, MICROSOFT: oauth, IMAP: imapAdapter } as never,
       createContext: (account: WorkerAccount) => ({ account, getAccessToken: async () => "t", getImapCredentials: async () => SLOW_LOGIN }),
-      attachmentsBucket: "email-attachments", maxAttachmentBytes: 1_000_000, storageRetryDelayMs: 0, imapSyncEnabled: true
+      attachmentsBucket: "email-attachments", maxAttachmentBytes: 1_000_000, storageRetryDelayMs: 0, imapSyncEnabled: true, imapOrganizationIds: IMAP_TEST_ORGANIZATION_IDS
     };
     const slots = createImapSyncSlots(2);
     const processors = createJobProcessors({ eventDeps: {} as never, processDeps, accounts: store, realtime: makeRealtime(), logger: logger as never, reportJobFailure: vi.fn(), jobType: () => "process-email", imapProcessingSlots: slots });

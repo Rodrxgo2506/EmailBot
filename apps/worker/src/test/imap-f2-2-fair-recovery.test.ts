@@ -60,7 +60,18 @@ async function sweep(emails: MemoryEmailStore, options: { imapSyncEnabled?: bool
   emails.listIncompleteEmails.mockClear();
   const outcome = await handleEmailEvent(
     { type: "RECOVER_INCOMPLETE" },
-    { accounts, emails, producer, providers: {} as never, createContext: () => ({}) as never, enqueueSync: vi.fn(), logger, imapSyncEnabled: options.imapSyncEnabled ?? true }
+    {
+      accounts,
+      emails,
+      producer,
+      providers: {} as never,
+      createContext: () => ({}) as never,
+      enqueueSync: vi.fn(),
+      logger,
+      imapSyncEnabled: options.imapSyncEnabled ?? true,
+      // Fairness is under test here, not the trial allowlist: every seeded organization is in it.
+      imapOrganizationIds: [...new Set(emails.rows.map((row) => (row as { organization_id: string }).organization_id))]
+    }
   );
   const calls = producer.enqueueProcessing.mock.calls as unknown as Array<[EmailProcessingJob, { jobId: string }]>;
   const jobs = calls.map(([job, opts]) => ({ ...job, jobId: opts.jobId }));

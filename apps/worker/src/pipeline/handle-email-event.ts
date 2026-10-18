@@ -1,6 +1,7 @@
 import {
   generateClientState,
   hashClientState,
+  imapAllowedForOrganization,
   isGraphSubscriptionId,
   MICROSOFT_SUBSCRIPTION_LIFETIME_MS,
   readMicrosoftSubscription,
@@ -74,6 +75,11 @@ export interface HandleEventDeps {
    * Absent / false: IMAP accounts are never polled, synchronized or processed.
    */
   imapSyncEnabled?: boolean;
+  /**
+   * Trial allowlist (worker config, fixed in code): even with imapSyncEnabled, only IMAP accounts of these
+   * organizations are polled, synchronized or recovered. Absent / empty: none (fail closed).
+   */
+  imapOrganizationIds?: readonly string[];
   /**
    * IMAP A2: IMAP synchronization runs allowed at once in this process (a share of the events concurrency, so
    * IMAP never takes every slot Gmail / Microsoft need). Busy: syncAccount throws ImapSlotsBusyError and the
@@ -311,8 +317,9 @@ export async function syncAccount(account: WorkerAccount, deps: HandleEventDeps,
   const empty: SyncResult = { found: 0, processed: 0, skipped: 0, historyGap: false, hasMore: false, cursorAdvanced: false };
   // Inactive account / organization: nothing is listed and the cursor does not move, so no mail is lost or processed.
   if (account.status !== "ACTIVE" || account.organizationStatus !== "ACTIVE") return empty;
-  // IMAP synchronization disabled (worker config): no connection is opened, the cursor does not move.
-  if (account.provider === "IMAP" && deps.imapSyncEnabled !== true) {
+  // IMAP synchronization disabled (worker config) or the organization outside the trial allowlist: no connection is
+  // opened, no credential is decrypted, the cursor does not move.
+  if (account.provider === "IMAP" && !imapAllowedForOrganization(deps.imapSyncEnabled, deps.imapOrganizationIds, account.organizationId)) {
     deps.logger.info({ emailAccountId: account.id, provider: account.provider, reason }, "IMAP synchronization is disabled; account skipped");
     return empty;
   }
@@ -811,8 +818,11 @@ export async function handleEmailEvent(job: EmailEventJob, deps: HandleEventDeps
     case "POLL_ACCOUNTS": {
       // Recovery polling: catches missed / lost pushes, expired watches and accounts without push.
       const oauth = await deps.accounts.listActiveOAuthAccounts(POLL_BATCH);
-      // IMAP has no push: polling is its only ingestion, and only while IMAP synchronization is enabled.
-      const imap = deps.imapSyncEnabled === true && deps.accounts.listActiveImapAccounts ? await deps.accounts.listActiveImapAccounts(POLL_BATCH) : [];
+      // IMAP has no push: polling is its only ingestion, and only while IMAP synchronization is enabled, and only for
+      // the organizations of the trial allowlist (fixed in code).
+      const imap = (deps.imapSyncEnabled === true && deps.accounts.listActiveImapAccounts ? await deps.accounts.listActiveImapAccounts(POLL_BATCH) : []).filter(
+        (account) => imapAllowedForOrganization(deps.imapSyncEnabled, deps.imapOrganizationIds, account.organizationId)
+      );
       const accounts = await withCommercialAccess([...oauth, ...imap], deps.accounts, deps.logger, "poll", job.type);
       for (const account of accounts) await deps.enqueueSync(account, "POLL");
       return { accounts: accounts.length, enqueued: accounts.length };
@@ -886,9 +896,19 @@ async function selectImapRecovery(deps: HandleEventDeps, startedBefore: string, 
     scanned += page.length;
     const unchecked = [...new Set(page.map((email) => email.organizationId).filter((id) => !checked.has(id)))];
     if (unchecked.length > 0) {
-      // The shared commercial-access rule, unchanged (denials logged as before), then IMAP in the organization's plan.
-      const allowed = new Set((await withCommercialAccess(unchecked.map((organizationId) => ({ organizationId })), deps.accounts, deps.logger, "recover_incomplete", jobType)).map((item) => item.organizationId));
+      // Organizations outside the IMAP trial allowlist (fixed in code) are excluded first, without any other lookup.
+      const trial = unchecked.filter((organizationId) => imapAllowedForOrganization(deps.imapSyncEnabled, deps.imapOrganizationIds, organizationId));
       for (const organizationId of unchecked) {
+        if (!trial.includes(organizationId)) {
+          checked.add(organizationId);
+          blocked.add(organizationId);
+        }
+      }
+      // The shared commercial-access rule, unchanged (denials logged as before), then IMAP in the organization's plan.
+      const allowed = trial.length > 0
+        ? new Set((await withCommercialAccess(trial.map((organizationId) => ({ organizationId })), deps.accounts, deps.logger, "recover_incomplete", jobType)).map((item) => item.organizationId))
+        : new Set<string>();
+      for (const organizationId of trial) {
         checked.add(organizationId);
         if (!allowed.has(organizationId) || !(await deps.accounts.imapEntitled(organizationId))) blocked.add(organizationId);
       }

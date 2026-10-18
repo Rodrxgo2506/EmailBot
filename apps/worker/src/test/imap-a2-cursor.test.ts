@@ -8,7 +8,7 @@ import type { ProcessEmailOutcome } from "../pipeline/process-email.js";
 import { formatImapCursor, parseImapCursor, parseImapMessageId } from "../providers/imap/cursor.js";
 import { ImapDeadlineError, resetImapAbortForTests } from "../providers/imap/deadline.js";
 import { ProviderAuthError, ProviderTransientError, type ChangeSet, type ProviderAdapter, type WorkerAccount } from "../providers/types.js";
-import { makeAccount, makeAccountStore, makeAdapter, makeAudit, makeProducer, makeRealtime, silentLogger } from "./fakes.js";
+import { IMAP_TEST_ORGANIZATION_IDS, makeAccount, makeAccountStore, makeAdapter, makeAudit, makeProducer, makeRealtime, silentLogger } from "./fakes.js";
 
 /*
  * IMAP A2: the cursor only moves past the CONTIGUOUS prefix of durably handled messages (never past a
@@ -102,7 +102,7 @@ function harness(account: WorkerAccount, box: Mailbox, behaviours: Record<number
     processMessage,
     audit,
     logger: silentLogger,
-    imapSyncEnabled: true,
+    imapSyncEnabled: true, imapOrganizationIds: IMAP_TEST_ORGANIZATION_IDS,
     ...extra
   };
   return { deps, accounts, audit, stored, started, finished, imap, processMessage };

@@ -90,7 +90,7 @@ const resolver: ImapResolver = vi.fn(async () => [{ address: TEST_IP, family: 4 
 const realOpen: ImapProbeOpen = (options, login, onClient) => openImapClient(options, login, { onClient });
 
 async function setup() {
-  ctx = await createTestApp({ users: [owner], config: { imapAccountsEnabled: true }, imapResolver: resolver, imapProbeOpen: realOpen, rateLimitRedis: new FakeRedis() });
+  ctx = await createTestApp({ users: [owner], config: { imapAccountsEnabled: true, imapOrganizationIds: [ORG_A] }, imapResolver: resolver, imapProbeOpen: realOpen, rateLimitRedis: new FakeRedis() });
   ctx.repos.emailAccounts.list.mockResolvedValue([]);
   return ctx;
 }

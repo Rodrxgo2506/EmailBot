@@ -9,7 +9,7 @@ import { openImapClient, type ImapClient } from "../providers/imap/connection.js
 import { IMAP_MAX_BODY_CHARS, IMAP_MAX_MESSAGE_BYTES } from "../providers/imap/normalize.js";
 import { ImapConnectionPool } from "../providers/imap/pool.js";
 import { ProviderSecurityError, type ProviderContext } from "../providers/types.js";
-import { makeAccount, makeAccountStore, makeAdapter, makeAudit, makeProducer, makeRealtime, makeRuleRow, MemoryEmailStore, MemoryRoutingStore, ORG, silentLogger } from "./fakes.js";
+import { IMAP_TEST_ORGANIZATION_IDS, makeAccount, makeAccountStore, makeAdapter, makeAudit, makeProducer, makeRealtime, makeRuleRow, MemoryEmailStore, MemoryRoutingStore, ORG, silentLogger } from "./fakes.js";
 
 /*
  * E6.3: text of IMAP messages above IMAP_MAX_MESSAGE_BYTES (the "oversized" path:
@@ -349,7 +349,7 @@ describe("IMAP oversized messages (E6.3)", () => {
       maxAttachmentBytes: 1000,
       logger: silentLogger,
       storageRetryDelayMs: 0,
-      imapSyncEnabled: true
+      imapSyncEnabled: true, imapOrganizationIds: IMAP_TEST_ORGANIZATION_IDS
     };
     const job: EmailProcessingJob = { organizationId: ORG, emailAccountId: account.id, provider: "IMAP", providerMessageId: "7:1" };
     expect(await processEmail(job, deps)).toMatchObject({ status: "processed" });

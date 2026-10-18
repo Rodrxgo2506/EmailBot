@@ -10,7 +10,7 @@ import type { ImapClient } from "../providers/imap/connection.js";
 import { ImapConnectionPool } from "../providers/imap/pool.js";
 import { createProviderRegistry } from "../providers/registry.js";
 import { ProviderNotImplementedError, ProviderSecurityError, type ProviderContext, type WorkerAccount } from "../providers/types.js";
-import { makeAccount, makeAccountStore, makeAdapter, makeAudit, makeProducer, makeRealtime, makeRuleRow, MemoryEmailStore, MemoryRoutingStore, ORG, silentLogger } from "./fakes.js";
+import { IMAP_TEST_ORGANIZATION_IDS, makeAccount, makeAccountStore, makeAdapter, makeAudit, makeProducer, makeRealtime, makeRuleRow, MemoryEmailStore, MemoryRoutingStore, ORG, silentLogger } from "./fakes.js";
 
 /*
  * IMAP E2 with the worker pipeline, using an IN-MEMORY fake IMAP server (mock).
@@ -346,7 +346,7 @@ describe("IMAP synchronization disabled (fixed in the worker config)", () => {
   it("PAUSED / DISCONNECTED / ERROR IMAP accounts are never synchronized, even when enabled", async () => {
     for (const status of ["PAUSED", "DISCONNECTED", "ERROR"] as const) {
       const account = imapAccount({ status });
-      const { deps, imap } = eventDeps(account, {}, { imapSyncEnabled: true });
+      const { deps, imap } = eventDeps(account, {}, { imapSyncEnabled: true, imapOrganizationIds: IMAP_TEST_ORGANIZATION_IDS });
       await syncAccount(account, deps, "POLL");
       expect(imap.listNewMessageIds, status).not.toHaveBeenCalled();
     }
@@ -401,7 +401,7 @@ describe("enabled in a test configuration: real adapter + existing pipeline", ()
       maxAttachmentBytes: 1000,
       logger: silentLogger,
       storageRetryDelayMs: 0,
-      imapSyncEnabled: true
+      imapSyncEnabled: true, imapOrganizationIds: IMAP_TEST_ORGANIZATION_IDS
     };
     const deps: HandleEventDeps = {
       accounts,
@@ -413,7 +413,7 @@ describe("enabled in a test configuration: real adapter + existing pipeline", ()
       processMessage: (job) => processEmail(job, processDeps),
       lock: { acquire: vi.fn(async () => "token"), release: vi.fn(async () => undefined) },
       logger: silentLogger,
-      imapSyncEnabled: true
+      imapSyncEnabled: true, imapOrganizationIds: IMAP_TEST_ORGANIZATION_IDS
     };
     return { emails, routing, deps, pool };
   }
@@ -517,7 +517,7 @@ describe("enabled in a test configuration: real adapter + existing pipeline", ()
 
   it("polling includes active IMAP accounts only when enabled", async () => {
     const account = imapAccount();
-    const { deps } = eventDeps(account, {}, { imapSyncEnabled: true });
+    const { deps } = eventDeps(account, {}, { imapSyncEnabled: true, imapOrganizationIds: IMAP_TEST_ORGANIZATION_IDS });
     deps.accounts = { ...deps.accounts, listActiveImapAccounts: vi.fn(async () => [{ id: account.id, organizationId: ORG }]) };
     await handleEmailEvent({ type: "POLL_ACCOUNTS" }, deps);
     expect(deps.enqueueSync).toHaveBeenCalledWith({ id: account.id, organizationId: ORG }, "POLL");
@@ -580,7 +580,7 @@ describe("M1: recovery after a UIDVALIDITY change (adapter, fake server with RFC
       },
       logger: silentLogger,
       now: () => Date.parse("2026-10-14T12:00:00Z"),
-      imapSyncEnabled: true
+      imapSyncEnabled: true, imapOrganizationIds: IMAP_TEST_ORGANIZATION_IDS
     };
     await syncAccount(account, deps, "POLL");
     expect(jobs).toEqual([{ organizationId: ORG, emailAccountId: account.id, provider: "GMAIL", providerMessageId: "g1" }]);

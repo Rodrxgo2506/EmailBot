@@ -1,4 +1,13 @@
-import { CULQI_API_URL, csvEnv, culqiKeyProblem, encryptionKeyEnv, optionalEnv, parseEnv } from "@emailbot/shared";
+import {
+  CULQI_API_URL,
+  csvEnv,
+  culqiKeyProblem,
+  encryptionKeyEnv,
+  IMAP_TRIAL_ORGANIZATION_IDS,
+  imapOrganizationAllowlist,
+  optionalEnv,
+  parseEnv
+} from "@emailbot/shared";
 import { COMPLAINTS_BOOK_PROVIDER } from "@emailbot/types";
 import { normalizeOrigin, productionUrlProblem, PUBLIC_URL, REDIS_URL } from "@emailbot/validation";
 import { z } from "zod";
@@ -281,6 +290,11 @@ export interface ApiConfig {
    */
   imapAccountsEnabled: boolean;
   /**
+   * Organizations allowed to use IMAP when imapAccountsEnabled is true (IMAP_TRIAL_ORGANIZATION_IDS in
+   * @emailbot/shared, validated). Fixed in code, never read from the environment; empty = nobody.
+   */
+  imapOrganizationIds: readonly string[];
+  /**
    * IMAP_RATE_LIMIT_SECRET (base64): HMAC key of the IMAP abuse-limit keys. null = not
    * configured: the IMAP connection test and creation refuse (503), never an unkeyed hash.
    */
@@ -369,6 +383,8 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): ApiConfig {
         : null,
     microsoftGraphPushEnabled: env.MICROSOFT_GRAPH_PUSH_ENABLED,
     imapAccountsEnabled: false,
+    // Not read from the environment on purpose: the trial allowlist lives in code (@emailbot/shared).
+    imapOrganizationIds: imapOrganizationAllowlist(IMAP_TRIAL_ORGANIZATION_IDS),
     imapRateLimitSecret: env.IMAP_RATE_LIMIT_SECRET ?? null,
     transactionalEmail:
       env.RESEND_API_KEY && env.TRANSACTIONAL_EMAIL_FROM

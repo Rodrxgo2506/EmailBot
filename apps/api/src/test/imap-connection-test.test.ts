@@ -92,7 +92,7 @@ async function setup(options: { server?: FakeServer; resolver?: ImapResolver; en
   const resolver = options.resolver ?? publicResolver();
   ctx = await createTestApp({
     users: [owner, admin, viewer, outsider],
-    config: { imapAccountsEnabled: options.enabled ?? true },
+    config: { imapAccountsEnabled: options.enabled ?? true, imapOrganizationIds: [ORG_A, ORG_B] },
     imapResolver: resolver,
     imapProbeOpen: server.open,
     rateLimitRedis: options.redis ?? new FakeRedis()
@@ -345,7 +345,7 @@ describe("abuse limits", () => {
   it("per organization (several users): 429 IMAP_TEST_RATE_LIMITED", async () => {
     const extra = makeUser({ [ORG_A]: "ADMIN" });
     const server = fakeServer();
-    ctx = await createTestApp({ users: [owner, admin, extra], config: { imapAccountsEnabled: true }, imapResolver: publicResolver(), imapProbeOpen: server.open, rateLimitRedis: new FakeRedis() });
+    ctx = await createTestApp({ users: [owner, admin, extra], config: { imapAccountsEnabled: true, imapOrganizationIds: [ORG_A, ORG_B] }, imapResolver: publicResolver(), imapProbeOpen: server.open, rateLimitRedis: new FakeRedis() });
     ctx.repos.emailAccounts.list.mockResolvedValue([]);
     const users = [owner, admin, extra];
     for (let attempt = 0; attempt < IMAP_CONNECTION_LIMITS.perOrganization.max; attempt += 1) {
@@ -481,7 +481,7 @@ describe("B1: every attempt counts BEFORE the destination check", () => {
     const extra = makeUser({ [ORG_A]: "ADMIN" });
     const resolver: ImapResolver = vi.fn(async () => Promise.reject(new Error("ENOTFOUND")));
     const server = fakeServer();
-    ctx = await createTestApp({ users: [owner, admin, extra], config: { imapAccountsEnabled: true }, imapResolver: resolver, imapProbeOpen: server.open, rateLimitRedis: new FakeRedis() });
+    ctx = await createTestApp({ users: [owner, admin, extra], config: { imapAccountsEnabled: true, imapOrganizationIds: [ORG_A, ORG_B] }, imapResolver: resolver, imapProbeOpen: server.open, rateLimitRedis: new FakeRedis() });
     ctx.repos.emailAccounts.list.mockResolvedValue([]);
     const users = [owner, admin, extra];
     for (let attempt = 0; attempt < IMAP_CONNECTION_LIMITS.perOrganization.max; attempt += 1) {
@@ -496,7 +496,7 @@ describe("B1: every attempt counts BEFORE the destination check", () => {
   it("DNS, refused destination, TLS and timeout failures are NOT counted as refused logins (no lockout)", async () => {
     const extra = makeUser({ [ORG_A]: "ADMIN" });
     const server = fakeServer();
-    ctx = await createTestApp({ users: [owner, admin, extra], config: { imapAccountsEnabled: true }, imapResolver: publicResolver(), imapProbeOpen: server.open, rateLimitRedis: new FakeRedis() });
+    ctx = await createTestApp({ users: [owner, admin, extra], config: { imapAccountsEnabled: true, imapOrganizationIds: [ORG_A, ORG_B] }, imapResolver: publicResolver(), imapProbeOpen: server.open, rateLimitRedis: new FakeRedis() });
     ctx.repos.emailAccounts.list.mockResolvedValue([]);
     const failures: Array<[ImapResolver, ImapProbeOpen, string]> = [
       [vi.fn(async () => Promise.reject(new Error("ENOTFOUND"))), server.open, "IMAP_DNS_FAILED"],
@@ -562,7 +562,7 @@ describe("M1: lockout thresholds (mailbox 10, organization 30, 15 min; portal un
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(new Date("2026-10-15T00:00:00Z"));
     const server = fakeServer({ failure: { authenticationFailed: true } });
-    ctx = await createTestApp({ users, config: { imapAccountsEnabled: true }, imapResolver: publicResolver(), imapProbeOpen: server.open, rateLimitRedis: new FakeRedis() });
+    ctx = await createTestApp({ users, config: { imapAccountsEnabled: true, imapOrganizationIds: [ORG_A, ORG_B] }, imapResolver: publicResolver(), imapProbeOpen: server.open, rateLimitRedis: new FakeRedis() });
     ctx.repos.emailAccounts.list.mockResolvedValue([]);
     return { server, users };
   }

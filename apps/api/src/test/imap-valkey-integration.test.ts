@@ -420,7 +420,7 @@ describe.runIf(enabled && PHASE === "up")("Valkey (real): routes with the real c
     });
     const ctx = await createTestApp({
       users: [owner],
-      config: { imapAccountsEnabled: true },
+      config: { imapAccountsEnabled: true, imapOrganizationIds: [ORG_A] },
       rateLimitRedis: redis,
       imapResolver: vi.fn(async () => [{ address: "93.184.216.34", family: 4 as const }]),
       imapProbeOpen: open as never
@@ -472,7 +472,7 @@ describe.runIf(enabled && PHASE === "down")("Valkey stopped: IMAP checks refuse 
     redis.on("error", () => undefined);
     const resolver = vi.fn(async () => [{ address: "93.184.216.34", family: 4 as const }]);
     const open = vi.fn();
-    const ctx = await createTestApp({ users: [owner], config: { imapAccountsEnabled: true }, rateLimitRedis: redis, imapResolver: resolver, imapProbeOpen: open as never });
+    const ctx = await createTestApp({ users: [owner], config: { imapAccountsEnabled: true, imapOrganizationIds: [ORG_A] }, rateLimitRedis: redis, imapResolver: resolver, imapProbeOpen: open as never });
     try {
       ctx.repos.emailAccounts.list.mockResolvedValue([]);
       const spies = ["encrypt", "encryptBound", "decrypt", "decryptBound"].map((m) => vi.spyOn(ctx.deps.secretBox, m as never));

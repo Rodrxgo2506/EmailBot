@@ -76,7 +76,7 @@ afterEach(async () => {
 async function newApp(options: { server?: FakeServer; redis?: RateLimitRedis | null; resolver?: ImapResolver; enabled?: boolean; secret?: string | null; users?: TestUser[] } = {}) {
   const app = await createTestApp({
     users: options.users ?? everyone,
-    config: { imapAccountsEnabled: options.enabled ?? true, ...(options.secret !== undefined ? { imapRateLimitSecret: options.secret } : {}) },
+    config: { imapAccountsEnabled: options.enabled ?? true, imapOrganizationIds: [ORG_A, ORG_B, ORG_C, ORG_D], ...(options.secret !== undefined ? { imapRateLimitSecret: options.secret } : {}) },
     imapResolver: options.resolver ?? publicResolver(),
     imapProbeOpen: (options.server ?? fakeServer()).open,
     ...(options.redis === null ? {} : { rateLimitRedis: options.redis ?? new FakeRedis() })

@@ -1,4 +1,15 @@
-import { CULQI_API_URL, culqiKeyProblem, encryptionKeyEnv, EnvValidationError, graphLifecycleUrl, optionalEnv, parseEnv, type OAuthClientConfig } from "@emailbot/shared";
+import {
+  CULQI_API_URL,
+  culqiKeyProblem,
+  encryptionKeyEnv,
+  EnvValidationError,
+  graphLifecycleUrl,
+  IMAP_TRIAL_ORGANIZATION_IDS,
+  imapOrganizationAllowlist,
+  optionalEnv,
+  parseEnv,
+  type OAuthClientConfig
+} from "@emailbot/shared";
 import { productionUrlProblem, PUBLIC_URL, REDIS_URL } from "@emailbot/validation";
 import { z } from "zod";
 import { DEFAULT_REDIS_COMMAND_TIMEOUT_MS, MAX_REDIS_COMMAND_TIMEOUT_MS, MIN_REDIS_COMMAND_TIMEOUT_MS } from "../infrastructure/app-redis.js";
@@ -215,6 +226,12 @@ export interface WorkerConfig {
    * the IMAP adapter is not even created until IMAP is launched by a code change.
    */
   imapSyncEnabled: boolean;
+  /**
+   * Organizations whose IMAP accounts may be polled, synchronized, processed or recovered when imapSyncEnabled is
+   * true (IMAP_TRIAL_ORGANIZATION_IDS in @emailbot/shared, validated). Fixed in code, never read from the
+   * environment; empty = nobody.
+   */
+  imapOrganizationIds: readonly string[];
   /** Commercial V1 phase 2: Culqi sandbox; null = not configured. */
   culqi: { secretKey: string; apiUrl: string } | null;
 }
@@ -290,6 +307,7 @@ export function loadWorkerConfig(source: NodeJS.ProcessEnv = process.env): Worke
     redisCommandTimeoutMs: env.WORKER_REDIS_COMMAND_TIMEOUT_MS,
     // Not read from the environment on purpose (see WorkerConfig.imapSyncEnabled).
     imapSyncEnabled: false,
+    imapOrganizationIds: imapOrganizationAllowlist(IMAP_TRIAL_ORGANIZATION_IDS),
     culqi: env.CULQI_SECRET_KEY ? { secretKey: env.CULQI_SECRET_KEY, apiUrl: env.CULQI_API_URL ?? CULQI_API_URL } : null
   };
   assertImapWorkerConcurrency(config);

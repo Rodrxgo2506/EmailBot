@@ -1,5 +1,5 @@
 import { evaluateRules, parseRuleRow, type EngineRule, type RuleEvaluationResult } from "@emailbot/rules-engine";
-import { buildAttachmentPath, HttpTimeoutError, serializeError, type EmailProcessingJob } from "@emailbot/shared";
+import { buildAttachmentPath, HttpTimeoutError, imapAllowedForOrganization, serializeError, type EmailProcessingJob } from "@emailbot/shared";
 import type { NormalizedAttachment, NormalizedEmail } from "@emailbot/types";
 import { ResponseTooLargeError } from "../infrastructure/attachment-transfer.js";
 import type { AttachmentContents, AttachmentTransfers } from "../infrastructure/attachment-transfers.js";
@@ -54,6 +54,8 @@ export interface ProcessEmailDeps {
   storageRetryDelayMs?: number;
   /** IMAP synchronization (worker config, fixed false until IMAP is launched). Absent / false: IMAP mail is never fetched. */
   imapSyncEnabled?: boolean;
+  /** Trial allowlist (worker config, fixed in code): only IMAP mail of these organizations is fetched. Absent / empty: none. */
+  imapOrganizationIds?: readonly string[];
 }
 
 export type ProcessEmailOutcome =
@@ -132,8 +134,11 @@ export async function processEmail(
   // SUSPENDED / CANCELLED: data is kept, nothing new is processed or delivered (incomplete emails stay as they are).
   if (account.organizationStatus !== "ACTIVE") return { status: "skipped", reason: "organization_inactive" };
   if (account.status !== "ACTIVE") return { status: "skipped", reason: "account_inactive" };
-  // IMAP synchronization disabled (worker config): nothing is fetched, stored or delivered (also for recovery jobs).
-  if (account.provider === "IMAP" && deps.imapSyncEnabled !== true) return { status: "skipped", reason: "imap_disabled" };
+  // IMAP synchronization disabled (worker config) or the organization outside the trial allowlist: nothing is fetched,
+  // stored or delivered (also for recovery jobs).
+  if (account.provider === "IMAP" && !imapAllowedForOrganization(deps.imapSyncEnabled, deps.imapOrganizationIds, account.organizationId)) {
+    return { status: "skipped", reason: "imap_disabled" };
+  }
   // Commercial V1.2: checked for every message, at processing time (a job queued while the organization had
   // access is skipped once it lost it: no rules, bots, deliveries or notifications; completed, never retried).
   const allowed = await hasCommercialAccess(deps.accounts, log, {
