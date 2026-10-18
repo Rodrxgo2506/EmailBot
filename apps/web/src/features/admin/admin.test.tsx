@@ -413,7 +413,11 @@ describe("organizations table", () => {
   });
 
   it("create: validates, sends name and owner e-mail (no plan), then opens the new organization", async () => {
-    const { api } = renderAdmin("/admin/organizations");
+    // The detail page reads the organization it opens: the created one (ORG_B, "Nueva"), never another one.
+    const { api } = renderAdmin(
+      "/admin/organizations",
+      fakeApi({ getOrganization: vi.fn(async (id: string) => (id === ORG_B ? detail({ id: ORG_B, name: "Nueva" }) : detail())) })
+    );
     await screen.findByRole("table");
     fireEvent.click(screen.getByRole("button", { name: /Nueva organización/ }));
     const dialog = await screen.findByRole("dialog");
@@ -425,8 +429,8 @@ describe("organizations table", () => {
     expect(within(dialog).getByText(/Se crea sin plan ni acceso al producto/)).toBeInTheDocument();
     fireEvent.click(within(dialog).getByRole("button", { name: "Crear organización" }));
     await waitFor(() => expect(api.createOrganization).toHaveBeenCalledWith({ name: "Nueva", ownerEmail: "boss@nueva.test" }));
-    expect(await screen.findByRole("heading", { name: "Acme" })).toBeInTheDocument();
-    expect(api.getOrganization).toHaveBeenCalled();
+    expect(await screen.findByRole("heading", { name: "Nueva" })).toBeInTheDocument();
+    await waitFor(() => expect(api.getOrganization).toHaveBeenCalledWith(ORG_B));
   });
 
   it("create: an unknown owner shows a clear message", async () => {
