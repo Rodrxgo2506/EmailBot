@@ -77,8 +77,14 @@ export function PortalSyncButton({ latestDeliveryId, refreshInbox }: { latestDel
   const last = lastSyncText(status.data?.lastSyncAt);
 
   return (
-    <div className="flex flex-wrap items-center gap-2">
-      <Button variant="outline" size="sm" onClick={() => void start()} disabled={running} aria-busy={running}>
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+      <Button
+        variant="outline"
+        onClick={() => void start()}
+        disabled={running}
+        aria-busy={running}
+        className="h-10 rounded-lg border-primary/30 px-4 font-semibold text-primary hover:border-primary/50 hover:bg-accent hover:text-accent-foreground"
+      >
         <RefreshCw className={running ? "animate-spin" : undefined} /> {running ? "Actualizando..." : "Actualizar"}
       </Button>
       {message ? (
