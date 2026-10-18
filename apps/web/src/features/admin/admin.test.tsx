@@ -429,6 +429,9 @@ describe("organizations table", () => {
     expect(within(dialog).getByText(/Se crea sin plan ni acceso al producto/)).toBeInTheDocument();
     fireEvent.click(within(dialog).getByRole("button", { name: "Crear organización" }));
     await waitFor(() => expect(api.createOrganization).toHaveBeenCalledWith({ name: "Nueva", ownerEmail: "boss@nueva.test" }));
+    // The router renders the navigation as a transition: polling with the cheap h1 query leaves it the thread (polling
+    // getByRole over the whole page could push the commit past findBy's 1 s on loaded CI runners); the role check stays.
+    await screen.findByText("Nueva", { selector: "h1" });
     expect(await screen.findByRole("heading", { name: "Nueva" })).toBeInTheDocument();
     await waitFor(() => expect(api.getOrganization).toHaveBeenCalledWith(ORG_B));
   });
