@@ -1,8 +1,10 @@
-import { Inbox, LogOut, Mail } from "lucide-react";
+import { Inbox, LogOut } from "lucide-react";
 import { Link, NavLink, Outlet, useNavigate } from "react-router-dom";
+import { BrandLogo } from "@/components/brand-logo";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/feedback";
 import { ApiError } from "@/lib/api-client";
+import { cn } from "@/lib/utils";
 import { PORTAL_LOGIN_PATH } from "./portal-context";
 import { usePortalInboxRealtime, usePortalLogout, usePortalMe } from "./portal-queries";
 
@@ -27,43 +29,48 @@ export function PortalLayout() {
   };
 
   return (
-    <div className="flex min-h-screen flex-col bg-muted/20">
-      <header className="sticky top-0 z-10 border-b bg-background/95 backdrop-blur">
-        <div className="mx-auto flex h-14 max-w-5xl items-center gap-3 px-4">
-          <Link to="/portal" className="flex items-center gap-2 font-semibold tracking-tight">
-            <span className="flex size-7 items-center justify-center rounded-md bg-primary text-primary-foreground">
-              <Mail className="size-4" />
-            </span>
-            <span>EmailBot</span>
+    <div className="flex min-h-screen flex-col bg-background">
+      <header data-floating-inset className="sticky top-0 z-30 border-b bg-card/90 shadow-xs backdrop-blur supports-[backdrop-filter]:bg-card/80">
+        <div className="mx-auto flex h-16 max-w-6xl items-center gap-2 px-4 sm:gap-5 sm:px-6">
+          <Link
+            to="/portal"
+            className="shrink-0 rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-card"
+          >
+            <BrandLogo className="h-11 sm:h-12" />
           </Link>
-          <nav className="ml-2 hidden sm:block" aria-label="Portal">
+          <nav aria-label="Portal">
             <NavLink
               to="/portal"
               end
               className={({ isActive }) =>
-                `inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-sm ${isActive ? "bg-accent font-medium" : "text-muted-foreground hover:text-foreground"}`
+                cn(
+                  "inline-flex h-10 items-center gap-2 rounded-lg px-2.5 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:px-3.5",
+                  isActive ? "bg-accent font-semibold text-accent-foreground" : "text-muted-foreground hover:bg-muted hover:text-foreground"
+                )
               }
             >
-              <Inbox className="size-4" /> Bandeja
+              <Inbox aria-hidden className="size-4" /> <span className="sr-only sm:not-sr-only">Bandeja</span>
             </NavLink>
           </nav>
-          <div className="ml-auto flex min-w-0 items-center gap-2">
+          <div className="ml-auto flex min-w-0 items-center gap-2 sm:gap-3">
             {me.isPending ? (
               <Skeleton className="h-4 w-24" />
             ) : me.data ? (
-              <span className="truncate text-sm text-muted-foreground" data-testid="portal-customer-name">
+              <span className="block min-w-0 max-w-[7rem] truncate text-sm text-muted-foreground sm:max-w-[14rem]" data-testid="portal-customer-name">
                 {me.data.customer.displayName}
               </span>
             ) : null}
-            <Button variant="outline" size="sm" onClick={() => void signOut()} disabled={logout.isPending}>
+            <span aria-hidden className="hidden h-6 w-px bg-border sm:block" />
+            <Button variant="outline" onClick={() => void signOut()} disabled={logout.isPending} className="h-10 shrink-0 rounded-lg px-3 sm:px-4">
               <LogOut /> <span className="hidden sm:inline">Cerrar sesión</span>
+              <span className="sr-only sm:hidden">Cerrar sesión</span>
             </Button>
           </div>
         </div>
       </header>
-      <main className="mx-auto w-full max-w-5xl flex-1 px-4 py-6">
+      <main className="mx-auto w-full max-w-6xl flex-1 px-4 py-6 sm:px-6 sm:py-8">
         {me.isError && !(me.error instanceof ApiError && me.error.status === 401) ? (
-          <p role="alert" className="mb-4 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+          <p role="alert" className="mb-4 rounded-xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
             No pudimos cargar tu sesión. Inténtalo nuevamente.
           </p>
         ) : null}

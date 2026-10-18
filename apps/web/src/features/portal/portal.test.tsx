@@ -118,6 +118,57 @@ describe("portal login", () => {
     expect(screen.getByLabelText("Access ID")).toBeInTheDocument(); // stays on login: no redirect loop
   });
 
+  it("Enter in the field, then an error: the field keeps the focus, one request only, and the Access ID can be fixed and sent again", async () => {
+    let reject: (reason: unknown) => void = () => undefined;
+    const login = vi
+      .fn()
+      .mockImplementationOnce(() => new Promise((_resolve, fail) => (reject = fail)))
+      .mockImplementationOnce(async () => ({ customer: { displayName: "Juan Pérez" }, session: profile.session }));
+    renderPortal("/portal/login", fakeApi({ login }));
+    const field = screen.getByLabelText("Access ID") as HTMLInputElement;
+    field.focus();
+    typeAccessId("SP-7KQ9X82MP4Z0");
+    // Enter in a text field submits its form (implicit submission; jsdom does not emulate the key itself).
+    fireEvent.submit(field.form as HTMLFormElement);
+    await waitFor(() => expect(screen.getByRole("button", { name: /ingresando/i })).toBeDisabled());
+    expect(field).toHaveAttribute("readonly");
+    expect(field).not.toBeDisabled();
+    expect(field).toHaveFocus();
+    fireEvent.submit(field.form as HTMLFormElement); // a second Enter while signing in
+    expect(login).toHaveBeenCalledTimes(1);
+
+    await act(async () => reject(new ApiError(401, "INVALID_CREDENTIALS", "nope")));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Access ID o credenciales no válidas.");
+    expect(field).toHaveFocus();
+    expect(field).not.toHaveAttribute("readonly");
+    expect(field).toHaveAttribute("aria-invalid", "true");
+    expect(field).toHaveAccessibleDescription("Access ID o credenciales no válidas.");
+
+    typeAccessId("SP-7KQ9X82MP4Z7");
+    fireEvent.submit(field.form as HTMLFormElement);
+    await screen.findByRole("heading", { name: "Bandeja" });
+    expect(login).toHaveBeenCalledTimes(2);
+    expect(login).toHaveBeenLastCalledWith("SP-7KQ9X82MP4Z7");
+  });
+
+  it("an error after clicking the button moves the focus back to the field", async () => {
+    renderPortal("/portal/login", fakeApi({ login: vi.fn(async () => Promise.reject(new ApiError(401, "INVALID_CREDENTIALS", "nope"))) }));
+    typeAccessId("SP-7KQ9X82MP4Z7");
+    const button = screen.getByRole("button", { name: /ingresar/i });
+    button.focus();
+    fireEvent.click(button);
+    await screen.findByRole("alert");
+    expect(screen.getByLabelText("Access ID")).toHaveFocus();
+  });
+
+  it("empty Access ID: the message and the focus go to the field, nothing is sent", async () => {
+    const { api } = renderPortal("/portal/login");
+    fireEvent.click(screen.getByRole("button", { name: /ingresar/i }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Ingresa tu Access ID.");
+    expect(screen.getByLabelText("Access ID")).toHaveFocus();
+    expect(api.login).not.toHaveBeenCalled();
+  });
+
   it("rate limited login: friendly 429 message", async () => {
     renderPortal("/portal/login", fakeApi({ login: vi.fn(async () => Promise.reject(new ApiError(429, "RATE_LIMITED", "Too many"))) }));
     typeAccessId("SP-7KQ9X82MP4Z7");
@@ -168,16 +219,54 @@ describe("portal inbox", () => {
     await waitFor(() => expect(api.inbox).toHaveBeenLastCalledWith(expect.objectContaining({ unread: true, cursor: undefined })));
     fireEvent.click(screen.getByRole("tab", { name: "Importantes" }));
     await waitFor(() => expect(api.inbox).toHaveBeenLastCalledWith(expect.objectContaining({ important: true, unread: undefined })));
-    await screen.findByRole("option", { name: "Netflix" });
-    fireEvent.change(screen.getByLabelText("Bot"), { target: { value: "netflix" } });
+    // Service and category menus list the real options of GET /api/portal/filters; the slug is sent.
+    fireEvent.click(screen.getByRole("button", { name: /^servicio/i }));
+    fireEvent.click(await screen.findByRole("option", { name: "Netflix" }));
     await waitFor(() => expect(api.inbox).toHaveBeenLastCalledWith(expect.objectContaining({ bot: "netflix" })));
-    fireEvent.change(screen.getByLabelText("Categoría"), { target: { value: "codigos" } });
+    expect(screen.getByRole("button", { name: /^servicio/i })).toHaveAccessibleName("Servicio Netflix");
+    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /^categoría/i }));
+    fireEvent.click(await screen.findByRole("option", { name: "Códigos" }));
     await waitFor(() => expect(api.inbox).toHaveBeenLastCalledWith(expect.objectContaining({ category: "codigos" })));
-    fireEvent.change(screen.getByLabelText("Desde"), { target: { value: "2026-10-01" } });
+    // A day chosen in the calendar becomes the `from` filter; "Eliminar fecha" removes it again.
+    fireEvent.click(screen.getByRole("button", { name: /^desde/i }));
+    const calendar = await screen.findByRole("dialog");
+    fireEvent.click(within(calendar).getAllByRole("button", { name: /\d{4}$/ })[0] as HTMLElement);
     await waitFor(() => expect(api.inbox).toHaveBeenLastCalledWith(expect.objectContaining({ from: expect.any(String) })));
+    fireEvent.click(screen.getByRole("button", { name: /^desde/i }));
+    fireEvent.click(await screen.findByRole("button", { name: "Eliminar fecha" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: /^desde/i })).toHaveAccessibleName("Desde sin fecha"));
+    // (that combination is served from the query cache; the next request carries no `from`)
+    fireEvent.click(screen.getByRole("tab", { name: "Todos" }));
+    await waitFor(() =>
+      expect(api.inbox).toHaveBeenLastCalledWith(expect.objectContaining({ from: undefined, important: undefined, bot: "netflix", category: "codigos" }))
+    );
     for (const [params] of api.inbox.mock.calls as unknown as Array<[Record<string, unknown>]>) {
       expect(Object.keys(params)).not.toEqual(expect.arrayContaining(["customerId", "organizationId", "botId"]));
     }
+  });
+
+  it("date range stays coherent: 'Hasta' cannot be earlier than 'Desde', and 'Desde' not later than 'Hasta'", async () => {
+    const { api } = renderPortal("/portal");
+    await screen.findByText("Tu código de acceso");
+    fireEvent.click(screen.getByRole("button", { name: /^desde/i }));
+    fireEvent.click(within(await screen.findByRole("dialog")).getByRole("button", { name: /, 15 de / }));
+    await waitFor(() => expect(api.inbox).toHaveBeenLastCalledWith(expect.objectContaining({ from: expect.any(String) })));
+    const calls = api.inbox.mock.calls.length;
+
+    fireEvent.click(screen.getByRole("button", { name: /^hasta/i }));
+    const until = await screen.findByRole("dialog");
+    expect(until).toHaveAccessibleDescription(/^«Hasta» no puede ser anterior a «Desde» \(15 \w+ \d{4}\)\.$/);
+    const early = within(until).getByRole("button", { name: /, 10 de / });
+    expect(early).toHaveAttribute("aria-disabled", "true");
+    fireEvent.click(early);
+    expect(api.inbox.mock.calls.length).toBe(calls); // nothing sent, the calendar stays open
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    fireEvent.click(within(until).getByRole("button", { name: /, 20 de / }));
+    await waitFor(() => expect(api.inbox).toHaveBeenLastCalledWith(expect.objectContaining({ from: expect.any(String), to: expect.any(String) })));
+
+    fireEvent.click(screen.getByRole("button", { name: /^desde/i }));
+    expect(within(await screen.findByRole("dialog")).getByRole("button", { name: /, 25 de / })).toHaveAttribute("aria-disabled", "true");
   });
 
   it("search is debounced: one request after the pause, not one per keystroke", async () => {
@@ -213,7 +302,10 @@ describe("portal inbox", () => {
     renderPortal("/portal");
     await screen.findByText("Tu código de acceso");
     const toggle = screen.getByRole("button", { name: /filtros/i });
-    const panel = screen.getByLabelText("Bot").closest("div") as HTMLElement;
+    const panel = document.getElementById(toggle.getAttribute("aria-controls") ?? "") as HTMLElement;
+    expect(within(panel).getByRole("button", { name: /^servicio/i })).toBeInTheDocument();
+    expect(within(panel).getByRole("button", { name: /^hasta/i })).toBeInTheDocument();
+    expect(panel).not.toContainElement(screen.getByPlaceholderText("Buscar por asunto o remitente")); // search always visible
     expect(toggle).toHaveAttribute("aria-expanded", "false");
     expect(panel.className).toMatch(/(^|\s)hidden(\s|$)/);
     expect(panel.className).toMatch(/md:grid/);
