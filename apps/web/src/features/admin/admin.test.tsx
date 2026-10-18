@@ -11,8 +11,8 @@ import type {
 } from "@emailbot/types";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import type { ReactNode } from "react";
-import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { useEffect, type ReactNode } from "react";
+import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { describe, expect, it, vi } from "vitest";
 import { RequirePlatformAdmin } from "@/components/layout/guards";
 import { Sidebar } from "@/components/layout/sidebar";
@@ -186,12 +186,44 @@ function fakeApi(overrides: Partial<Record<keyof AdminApi, unknown>> = {}) {
   return { ...base, ...overrides } as typeof base;
 }
 
-function renderAdmin(path: string, api = fakeApi()) {
+/* ------------------------------------------------------------------ TEMPORARY DIAGNOSTIC (disposable copy only) */
+type AdminDiag = { armed: boolean; t0: number; url: string; log: string[] };
+const adminDiag = (): AdminDiag => ((globalThis as { __adminDiag?: AdminDiag }).__adminDiag ??= { armed: false, t0: 0, url: "", log: [] });
+const diagMark = (message: string) => {
+  const d = adminDiag();
+  if (d.armed) d.log.push(`${Math.round(performance.now() - d.t0)}ms ${message}`);
+};
+const diagId = (id: string) => (id === ORG_B ? "ORG_B" : id === ORG_A ? "ORG_A" : "other");
+vi.mock("react-router-dom", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("react-router-dom")>();
+  return {
+    ...actual,
+    useNavigate: () => {
+      const navigate = actual.useNavigate();
+      return ((to: unknown, options?: unknown) => {
+        const d = (globalThis as { __adminDiag?: { armed: boolean; t0: number; log: string[] } }).__adminDiag;
+        if (d?.armed) d.log.push(`${Math.round(performance.now() - d.t0)}ms navigate(${String(to).replace(/[0-9a-f-]{36}/g, "<id>")}) requested`);
+        return (navigate as (to: unknown, options?: unknown) => unknown)(to, options);
+      }) as ReturnType<typeof actual.useNavigate>;
+    }
+  };
+});
+function DiagLocationProbe() {
+  const location = useLocation();
+  useEffect(() => {
+    adminDiag().url = location.pathname;
+    diagMark(`URL committed: ${location.pathname.replace(ORG_B, "ORG_B").replace(ORG_A, "ORG_A")}`);
+  }, [location.pathname]);
+  return null;
+}
+
+function renderAdmin(path: string, api = fakeApi(), diagProbe = false) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   const onSignOut = vi.fn();
   render(
     <QueryClientProvider client={client}>
       <MemoryRouter initialEntries={[path]}>
+        {diagProbe ? <DiagLocationProbe /> : null}
         <Routes>
           <Route path="/admin/*" element={<AdminApp api={api as unknown as AdminApi} userEmail="root@platform.test" panelAvailable onSignOut={onSignOut} />} />
           <Route path="/" element={<p>Panel</p>} />
@@ -414,10 +446,38 @@ describe("organizations table", () => {
 
   it("create: validates, sends name and owner e-mail (no plan), then opens the new organization", async () => {
     // The detail page reads the organization it opens: the created one (ORG_B, "Nueva"), never another one.
-    const { api } = renderAdmin(
-      "/admin/organizations",
-      fakeApi({ getOrganization: vi.fn(async (id: string) => (id === ORG_B ? detail({ id: ORG_B, name: "Nueva" }) : detail())) })
-    );
+    const d = adminDiag();
+    d.armed = false;
+    d.log = [];
+    d.t0 = performance.now();
+    const diagApi = fakeApi({
+      getOrganization: vi.fn(async (id: string) => {
+        diagMark(`getOrganization(${diagId(id)}) called`);
+        return id === ORG_B ? detail({ id: ORG_B, name: "Nueva" }) : detail();
+      })
+    });
+    const diagCreate = diagApi.createOrganization as unknown as (input: unknown) => Promise<{ id: string; name: string }>;
+    diagApi.createOrganization = vi.fn(async (input: unknown) => {
+      diagMark("createOrganization called");
+      const created = await diagCreate(input);
+      diagMark(`createOrganization resolved id=${diagId(created.id)} name=${created.name}`);
+      return created;
+    }) as unknown as typeof diagApi.createOrganization;
+    const { api } = renderAdmin("/admin/organizations", diagApi, true);
+    let diagLastH1 = "";
+    let diagDialogGone = false;
+    const diagObserver = new MutationObserver(() => {
+      if (!d.armed) return;
+      if (!diagDialogGone && !document.querySelector('[role="dialog"]')) {
+        diagDialogGone = true;
+        diagMark("dialog closed");
+      }
+      const h1 = [...document.querySelectorAll("main h1")].map((h) => h.textContent).join("|");
+      if (h1 !== diagLastH1) {
+        diagLastH1 = h1;
+        diagMark(`main h1 now "${h1}"`);
+      }
+    });
     await screen.findByRole("table");
     fireEvent.click(screen.getByRole("button", { name: /Nueva organización/ }));
     const dialog = await screen.findByRole("dialog");
@@ -427,9 +487,31 @@ describe("organizations table", () => {
     fireEvent.change(within(dialog).getByLabelText("Correo del propietario"), { target: { value: "boss@nueva.test" } });
     expect(within(dialog).queryByLabelText("Plan")).not.toBeInTheDocument();
     expect(within(dialog).getByText(/Se crea sin plan ni acceso al producto/)).toBeInTheDocument();
+    diagObserver.observe(document.body, { subtree: true, childList: true, characterData: true, attributes: true });
+    d.armed = true;
+    diagMark("click Crear (valid form)");
     fireEvent.click(within(dialog).getByRole("button", { name: "Crear organización" }));
     await waitFor(() => expect(api.createOrganization).toHaveBeenCalledWith({ name: "Nueva", ownerEmail: "boss@nueva.test" }));
-    expect(await screen.findByRole("heading", { name: "Nueva" })).toBeInTheDocument();
+    diagMark("findByRole(heading Nueva) starts");
+    try {
+      expect(await screen.findByRole("heading", { name: "Nueva" })).toBeInTheDocument();
+      diagMark("findByRole(heading Nueva) FOUND");
+    } catch (error) {
+      const main = document.querySelector("main");
+      const compact = (html: string) => html.replace(/<svg[\s\S]*?<\/svg>/g, "<svg/>").replace(/\s(class|style)="[^"]*"/g, "");
+      diagMark(
+        `findByRole FAILED; URL ${d.url.replace(ORG_B, "ORG_B")}; main h1 ${JSON.stringify([...(main?.querySelectorAll("h1") ?? [])].map((h) => h.textContent))}; ` +
+          `role headings in main ${JSON.stringify(main ? within(main as HTMLElement).queryAllByRole("heading").map((h) => h.textContent) : [])}; ` +
+          `dialog present ${!!document.querySelector('[role="dialog"]')}; aria-hidden ancestors of main ${main ? [...document.querySelectorAll('[aria-hidden="true"]')].filter((n) => n.contains(main)).length : "n/a"}`
+      );
+      console.log(`ADMIN DIAG MAIN HTML BEGIN\n${main ? compact(main.innerHTML) : "(no main)"}\nADMIN DIAG MAIN HTML END`);
+      if (error instanceof Error) error.message = `ADMIN DIAG: ${d.log.join(" | ")} || MAIN: ${main ? compact(main.innerHTML).slice(0, 1500) : "(no main)"} || ORIGINAL ERROR: ${error.message}`;
+      throw error;
+    } finally {
+      diagObserver.disconnect();
+      d.armed = false;
+      console.log(`ADMIN DIAG SEQUENCE\n${d.log.join("\n")}\nADMIN DIAG END`);
+    }
     await waitFor(() => expect(api.getOrganization).toHaveBeenCalledWith(ORG_B));
   });
 
