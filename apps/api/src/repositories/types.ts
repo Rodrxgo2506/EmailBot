@@ -174,13 +174,26 @@ export interface CustomerWrite {
   notes?: string | null;
 }
 
-/** Customers are suspended, never deleted, by members (no delete method). */
+/** Outcome of a customer deletion (history kept: only the Access ID and open portal sessions are revoked). */
+export interface CustomerDeletion {
+  deletedAt: string;
+  revokedCredentialId: string | null;
+  revokedSessions: number;
+}
+
+/**
+ * Customers are never physically deleted by members: suspension, or a soft
+ * delete (public.delete_customer) that hides them. list / get / update only
+ * see customers that are not deleted.
+ */
 export interface CustomerRepository {
   /** Scoped to the organization; search matches name, external ref or a normalized identifier. */
   list(organizationId: string, query: CustomerListQuery): Promise<Paginated<Customer>>;
   get(organizationId: string, id: string): Promise<Customer | null>;
   create(organizationId: string, userId: string, input: CustomerWrite & { displayName: string }): Promise<Customer>;
   update(organizationId: string, id: string, patch: CustomerWrite): Promise<Customer | null>;
+  /** Soft delete; null when the customer is missing, foreign, already deleted or the caller's role may not delete. */
+  remove(organizationId: string, id: string): Promise<CustomerDeletion | null>;
 }
 
 /** Generation / regeneration of an Access ID (the API computes the hash; the plaintext never leaves it). */

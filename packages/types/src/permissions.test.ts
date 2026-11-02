@@ -43,6 +43,13 @@ describe("hasPermission", () => {
     expect(hasPermission("OWNER", "customers:manage")).toBe(true);
   });
 
+  it("customers: only OWNER/ADMIN delete (same as public.delete_customer)", () => {
+    expect(hasPermission("OWNER", "customers:delete")).toBe(true);
+    expect(hasPermission("ADMIN", "customers:delete")).toBe(true);
+    expect(hasPermission("OPERATOR", "customers:delete")).toBe(false);
+    expect(hasPermission("VIEWER", "customers:delete")).toBe(false);
+  });
+
   it("denies when there is no role", () => {
     expect(hasPermission(null, "emails:read")).toBe(false);
     expect(hasPermission(undefined, "emails:read")).toBe(false);

@@ -129,12 +129,28 @@ efectiva (`corsOrigins`). Base para el portal (fase 5), que usará `credentials:
 ### Customers
 
 - Pertenecen a una organización; no son usuarios de Supabase Auth.
-- **Sin borrado**: `authenticated` no tiene DELETE (ni grant ni política) y la API no expone DELETE. Un cliente
-  sale con `status = SUSPENDED`, que conserva historial, identificadores y asignaciones. Solo borrar la
-  organización entera los elimina (cascada).
+- **Sin borrado físico**: `authenticated` no tiene DELETE (ni grant ni política). Un cliente sale con
+  `status = SUSPENDED`, que conserva historial, identificadores y asignaciones. Solo borrar la organización
+  entera los elimina (cascada).
+- **Eliminación lógica** (migración `20261101120000_customer_soft_delete`): `DELETE /api/customers/:id`
+  (`customers:delete`, OWNER/ADMIN) llama a `public.delete_customer` (SECURITY DEFINER, rol comprobado dentro,
+  atómica): revoca el Access ID ACTIVE y las sesiones abiertas del portal, deja el cliente `SUSPENDED` y marca
+  `deleted_at` / `deleted_by`. No se borra ninguna fila: correos, entregas, identificadores, asignaciones,
+  credenciales, sesiones y auditoría (`customer.deleted`) se conservan. Un cliente eliminado no aparece en
+  `GET /api/customers` ni en la lista de clientes de un bot, toda ruta de cliente responde 404, no recibe
+  entregas nuevas (no es ACTIVE) y es definitivo: triggers impiden cambiarlo, reactivarlo o crear/modificar sus
+  identificadores, asignaciones o Access ID, para cualquier rol.
+  - Las entregas del cliente siguen visibles en el detalle del correo (`GET /api/emails/:id/deliveries`), con
+    el cliente como `SUSPENDED`.
+  - Un bot que conserva la asignación (histórica) de un cliente eliminado no se puede eliminar
+    (`409 BOT_IN_USE`, igual que un bot con correos): se pausa. La asignación no se muestra en el bot y no se
+    puede quitar (sería borrar historial).
+  - Panel de plataforma (`admin.*`, solo lectura): los totales de clientes y `admin.list_customers` incluyen a
+    los eliminados, que se ven como `SUSPENDED` (no se distinguen de un suspendido).
 - Permisos (`@emailbot/types`): `customers:read` todos los roles; `customers:manage` OWNER/ADMIN/OPERATOR
-  (incluye identificadores y asignaciones bot ↔ cliente). Las políticas RLS replican la misma matriz.
-- `external_ref` único por organización (opcional).
+  (incluye identificadores y asignaciones bot ↔ cliente); `customers:delete` OWNER/ADMIN. Las políticas RLS y
+  `public.delete_customer` replican la misma matriz.
+- `external_ref` único por organización (opcional) entre los clientes no eliminados.
 
 ### Normalización de identificadores
 

@@ -27,6 +27,12 @@ export interface ConfirmDialogProps {
   confirmLabel?: string;
   destructive?: boolean;
   onConfirm(): Promise<unknown> | unknown;
+  /**
+   * Where the focus goes when the dialog closes. Opened from state (no
+   * DialogTrigger), Radix has no element to return it to; call
+   * event.preventDefault() and focus the control that opened it.
+   */
+  onCloseAutoFocus?(event: Event): void;
 }
 
 /** Confirmation for destructive actions. Shows the API error inline if it fails. */
@@ -37,7 +43,8 @@ export function ConfirmDialog({
   description,
   confirmLabel = "Confirmar",
   destructive = true,
-  onConfirm
+  onConfirm,
+  onCloseAutoFocus
 }: ConfirmDialogProps) {
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -65,7 +72,7 @@ export function ConfirmDialog({
         }
       }}
     >
-      <DialogContent>
+      <DialogContent onCloseAutoFocus={onCloseAutoFocus}>
         <DialogHeader>
           <DialogTitle>{title}</DialogTitle>
           <DialogDescription>{description}</DialogDescription>

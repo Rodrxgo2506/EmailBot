@@ -1,26 +1,33 @@
-import type { CustomerStatus } from "@emailbot/types";
-import { Contact, Plus, Search } from "lucide-react";
-import { useEffect, useState } from "react";
+import type { Customer, CustomerStatus } from "@emailbot/types";
+import { Contact, Plus, Search, Trash2 } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
+import { ActionsMenu } from "@/components/ui/actions-menu";
 import { Button } from "@/components/ui/button";
 import { Badge, Card, EmptyState, ErrorMessage, PageHeader } from "@/components/ui/display";
-import { Pagination, SkeletonRows } from "@/components/ui/feedback";
+import { ConfirmDialog, Pagination, SkeletonRows } from "@/components/ui/feedback";
 import { Input, Select } from "@/components/ui/form-controls";
 import { getErrorMessage } from "@/lib/errors";
 import { CUSTOMER_STATUS_LABELS } from "@/lib/labels";
 import { useOrganization } from "@/providers/organization-provider";
-import { useCustomers } from "./api";
+import { useCustomerMutations, useCustomers } from "./api";
 import { CustomerDialog } from "./customer-dialog";
 import { CUSTOMER_PAGE_SIZE, toCustomerQuery, type CustomerListParams } from "./customer-form-model";
 
 export function CustomersPage() {
   const { can } = useOrganization();
   const canManage = can("customers:manage");
+  const canDelete = can("customers:delete");
   const navigate = useNavigate();
   const [params, setParams] = useState<CustomerListParams>({ search: "", status: "", page: 1 });
   const [search, setSearch] = useState("");
   const [dialogOpen, setDialogOpen] = useState(false);
+  const [deleting, setDeleting] = useState<Customer | null>(null);
+  // The row's menu button (focused again by ActionsMenu before onSelect) and the search box as a fallback.
+  const returnFocus = useRef<HTMLElement | null>(null);
+  const searchRef = useRef<HTMLInputElement>(null);
   const customers = useCustomers(toCustomerQuery(params));
+  const { remove } = useCustomerMutations();
 
   // Debounced search (name, external reference or identifier, inside the organization).
   useEffect(() => {
@@ -49,6 +56,7 @@ export function CustomersPage() {
         <div className="relative min-w-56 flex-1">
           <Search className="pointer-events-none absolute top-2.5 left-2.5 size-4 text-muted-foreground" />
           <Input
+            ref={searchRef}
             aria-label="Buscar clientes"
             placeholder="Buscar por nombre, referencia o identificador"
             className="pl-8"
@@ -82,13 +90,33 @@ export function CustomersPage() {
       ) : (
         <Card className="divide-y">
           {customers.data.items.map((customer) => (
-            <Link key={customer.id} to={`/customers/${customer.id}`} className="flex items-center gap-3 px-4 py-3 hover:bg-accent/50">
-              <div className="min-w-0 flex-1">
-                <p className="truncate font-medium">{customer.displayName}</p>
-                {customer.externalRef ? <p className="font-mono text-xs text-muted-foreground">{customer.externalRef}</p> : null}
-              </div>
-              <Badge variant={customer.status === "ACTIVE" ? "success" : "secondary"}>{CUSTOMER_STATUS_LABELS[customer.status]}</Badge>
-            </Link>
+            <div key={customer.id} className="flex items-center hover:bg-accent/50">
+              <Link to={`/customers/${customer.id}`} className="flex min-w-0 flex-1 items-center gap-3 px-4 py-3">
+                <div className="min-w-0 flex-1">
+                  <p className="truncate font-medium">{customer.displayName}</p>
+                  {customer.externalRef ? <p className="font-mono text-xs text-muted-foreground">{customer.externalRef}</p> : null}
+                </div>
+                <Badge variant={customer.status === "ACTIVE" ? "success" : "secondary"}>{CUSTOMER_STATUS_LABELS[customer.status]}</Badge>
+              </Link>
+              {/* Outside the link: a menu inside it would also navigate. */}
+              {canDelete ? (
+                <ActionsMenu
+                  label={`Acciones de ${customer.displayName}`}
+                  className="mr-2"
+                  items={[
+                    {
+                      label: "Eliminar cliente",
+                      icon: <Trash2 />,
+                      destructive: true,
+                      onSelect: () => {
+                        returnFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+                        setDeleting(customer);
+                      }
+                    }
+                  ]}
+                />
+              ) : null}
+            </div>
           ))}
         </Card>
       )}
@@ -105,6 +133,30 @@ export function CustomersPage() {
       ) : null}
 
       <CustomerDialog open={dialogOpen} onOpenChange={setDialogOpen} customer={null} onCreated={(customer) => navigate(`/customers/${customer.id}`)} />
+
+      {/* Two steps (menu, then this dialog) and the focus starts on "Cancelar": one stray click or Enter deletes nothing. */}
+      <ConfirmDialog
+        open={deleting !== null}
+        onOpenChange={(open) => {
+          if (!open) setDeleting(null);
+        }}
+        title={deleting ? `¿Eliminar a «${deleting.displayName}»?` : "Eliminar cliente"}
+        description="El cliente dejará de aparecer en Clientes y en las asignaciones de bots, no recibirá correos nuevos y perderá el acceso al portal (se revoca su Access ID). Se conservan sus correos entregados, su historial y la auditoría. Esta acción no se puede deshacer."
+        confirmLabel="Eliminar cliente"
+        onConfirm={async () => {
+          if (!deleting) return;
+          await remove.mutateAsync(deleting.id);
+          // The row is about to leave the list: its menu button can no longer take the focus.
+          returnFocus.current = null;
+        }}
+        onCloseAutoFocus={(event) => {
+          event.preventDefault();
+          // Cancelled: back to the row's menu button. Deleted: back to the search box.
+          const target = returnFocus.current?.isConnected ? returnFocus.current : searchRef.current;
+          target?.focus();
+          returnFocus.current = null;
+        }}
+      />
     </div>
   );
 }

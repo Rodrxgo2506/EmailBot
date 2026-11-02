@@ -54,6 +54,14 @@ export function useCustomerMutations() {
         // Customer summaries embedded in bot assignments.
         void queryClient.invalidateQueries({ queryKey: queryKeys.bots(organizationId) });
       }
+    }),
+    /** Soft delete (OWNER/ADMIN): the customer leaves the lists and the bots' assignment lists; its history stays. */
+    remove: useMutation({
+      mutationFn: (id: string) => api.delete(`/api/customers/${id}`),
+      onSuccess: () => {
+        void invalidate();
+        void queryClient.invalidateQueries({ queryKey: queryKeys.bots(organizationId) });
+      }
     })
   };
 }
