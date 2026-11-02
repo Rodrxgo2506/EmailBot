@@ -424,6 +424,7 @@ describe("enabled in a test configuration: real adapter + existing pipeline", ()
     server.add(message(1));
     server.add(message(2));
     const { emails, routing, deps, pool } = pipeline(server, account);
+    deps.now = () => Date.parse("2026-10-14T12:00:00Z"); // the messages are inside the 7-day IMAP window
 
     await syncAccount(account, deps, "POLL");
     expect(emails.rows).toHaveLength(2);
@@ -444,6 +445,8 @@ describe("enabled in a test configuration: real adapter + existing pipeline", ()
     const account = imapAccount({ syncCursor: "imap:v1:7:0", lastSyncedAt: "2026-10-14T08:30:00.000Z" });
     server.add(message(1));
     const { emails, routing, deps, pool } = pipeline(server, account);
+    // Recovery then starts at 08:30Z (last sync minus the margin): message 1 (09:00Z) is listed again under 99:1.
+    deps.now = () => Date.parse("2026-10-14T09:30:00Z");
     await syncAccount(account, deps, "POLL");
     expect(emails.rows).toHaveLength(1);
 
@@ -483,6 +486,7 @@ describe("enabled in a test configuration: real adapter + existing pipeline", ()
     server.add(message(1), new Date("2026-10-14T09:00:00Z"));
     server.add(message(1), new Date("2026-10-14T09:05:00Z")); // same Message-ID reused by the sender, another code
     const { emails, routing, deps, pool } = pipeline(server, account);
+    deps.now = () => Date.parse("2026-10-14T12:00:00Z");
     await syncAccount(account, deps, "POLL");
     expect(emails.rows.map((row) => [row.provider_message_id, row.received_at])).toEqual([
       ["7:1", "2026-10-14T09:00:00.000Z"],
