@@ -130,11 +130,126 @@ describe("customers API: create / update / no delete", () => {
     expect(events).toEqual(["customer.suspended", "customer.reactivated", "customer.updated"]);
   });
 
-  it("there is no delete: customers are suspended to keep their history", async () => {
-    const owner = makeUser({ [ORG_A]: "OWNER" });
-    const { app } = await createTestApp({ users: [owner] });
+});
+
+describe("customers API: deletion (soft delete)", () => {
+  const deletion = { deletedAt: "2026-11-01T12:00:00.000Z", revokedCredentialId: "66666666-6666-4666-8666-666666666666", revokedSessions: 2 };
+
+  it("OWNER and ADMIN delete a customer of the active organization: 204, soft delete, audited without personal data", async () => {
+    for (const role of ["OWNER", "ADMIN"] as const) {
+      const member = makeUser({ [ORG_A]: role });
+      const { app, repos, privileged } = await createTestApp({ users: [member] });
+      repos.customers.get.mockResolvedValue(customer());
+      repos.customers.remove.mockResolvedValue(deletion);
+
+      const response = await app.inject({ method: "DELETE", url: `/api/customers/${CUSTOMER_ID}`, headers: authHeaders(member, ORG_A) });
+
+      expect(response.statusCode).toBe(204);
+      expect(repos.customers.get).toHaveBeenCalledWith(ORG_A, CUSTOMER_ID);
+      expect(repos.customers.remove).toHaveBeenCalledWith(ORG_A, CUSTOMER_ID);
+      expect(repos.customers.update).not.toHaveBeenCalled();
+      expect(privileged.insertAuditLog).toHaveBeenCalledTimes(1);
+      const [entry] = privileged.insertAuditLog.mock.calls[0] as [Record<string, unknown>];
+      expect(entry).toMatchObject({
+        organizationId: ORG_A,
+        actorUserId: member.id,
+        action: "DELETE",
+        entityType: "customer",
+        entityId: CUSTOMER_ID,
+        metadata: { event: "customer.deleted", deletedAt: deletion.deletedAt, accessRevoked: true, revokedSessions: 2 }
+      });
+      expect(JSON.stringify(entry)).not.toContain("Juan");
+    }
+  });
+
+  it("OPERATOR and VIEWER cannot delete (403 INSUFFICIENT_ROLE), nothing is touched", async () => {
+    for (const role of ["OPERATOR", "VIEWER"] as const) {
+      const member = makeUser({ [ORG_A]: role });
+      const { app, repos, privileged } = await createTestApp({ users: [member] });
+      repos.customers.get.mockResolvedValue(customer());
+
+      const response = await app.inject({ method: "DELETE", url: `/api/customers/${CUSTOMER_ID}`, headers: authHeaders(member, ORG_A) });
+
+      expect(response.statusCode).toBe(403);
+      expect(response.json().error.code).toBe("INSUFFICIENT_ROLE");
+      expect(repos.customers.remove).not.toHaveBeenCalled();
+      expect(privileged.insertAuditLog).not.toHaveBeenCalled();
+    }
+  });
+
+  it("a customer of another organization (or already deleted) is a 404, never deleted", async () => {
+    const owner = makeUser({ [ORG_A]: "OWNER", [ORG_B]: "OWNER" });
+    const { app, repos, privileged } = await createTestApp({ users: [owner] });
+    repos.customers.get.mockResolvedValue(null);
+
     const response = await app.inject({ method: "DELETE", url: `/api/customers/${CUSTOMER_ID}`, headers: authHeaders(owner, ORG_A) });
+
     expect(response.statusCode).toBe(404);
+    expect(repos.customers.get).toHaveBeenCalledWith(ORG_A, CUSTOMER_ID);
+    expect(repos.customers.remove).not.toHaveBeenCalled();
+    expect(privileged.insertAuditLog).not.toHaveBeenCalled();
+  });
+
+  it("a deletion refused by the database (raced, foreign, role) is a 404 and is not audited", async () => {
+    const owner = makeUser({ [ORG_A]: "OWNER" });
+    const { app, repos, privileged } = await createTestApp({ users: [owner] });
+    repos.customers.get.mockResolvedValue(customer());
+    repos.customers.remove.mockResolvedValue(null);
+
+    const response = await app.inject({ method: "DELETE", url: `/api/customers/${CUSTOMER_ID}`, headers: authHeaders(owner, ORG_A) });
+
+    expect(response.statusCode).toBe(404);
+    expect(privileged.insertAuditLog).not.toHaveBeenCalled();
+  });
+
+  it("organizationId in the query or body never selects the tenant", async () => {
+    const owner = makeUser({ [ORG_A]: "OWNER" });
+    const { app, repos } = await createTestApp({ users: [owner] });
+    repos.customers.get.mockResolvedValue(customer());
+    repos.customers.remove.mockResolvedValue(deletion);
+
+    await app.inject({
+      method: "DELETE",
+      url: `/api/customers/${CUSTOMER_ID}?organizationId=${ORG_B}`,
+      headers: authHeaders(owner, ORG_A)
+    });
+
+    expect(repos.customers.remove).toHaveBeenCalledWith(ORG_A, CUSTOMER_ID);
+  });
+
+  it("a deleted customer is hidden everywhere: detail, identifiers, bots, assignments (404 / 422)", async () => {
+    const owner = makeUser({ [ORG_A]: "OWNER" });
+    const { app, repos } = await createTestApp({ users: [owner] });
+    // The repository does not return deleted customers (deleted_at IS NULL filter).
+    repos.customers.get.mockResolvedValue(null);
+    repos.bots.get.mockResolvedValue(bot);
+    const headers = authHeaders(owner, ORG_A);
+
+    const responses = await Promise.all([
+      app.inject({ method: "GET", url: `/api/customers/${CUSTOMER_ID}`, headers }),
+      app.inject({ method: "PATCH", url: `/api/customers/${CUSTOMER_ID}`, headers, payload: { status: "ACTIVE" } }),
+      app.inject({ method: "POST", url: `/api/customers/${CUSTOMER_ID}/identifiers`, headers, payload: { type: "EMAIL", value: "a@b.co" } }),
+      app.inject({ method: "GET", url: `/api/customers/${CUSTOMER_ID}/bots`, headers }),
+      app.inject({ method: "PATCH", url: `/api/bots/${BOT_ID}/customers/${CUSTOMER_ID}`, headers, payload: { active: true } }),
+      app.inject({ method: "DELETE", url: `/api/bots/${BOT_ID}/customers/${CUSTOMER_ID}`, headers })
+    ]);
+    const assign = await app.inject({ method: "POST", url: `/api/bots/${BOT_ID}/customers`, headers, payload: { customerId: CUSTOMER_ID } });
+
+    for (const response of responses) expect(response.statusCode).toBe(404);
+    expect(assign.json().error.code).toBe("INVALID_CUSTOMER");
+    expect(repos.customers.update).not.toHaveBeenCalled();
+    expect(repos.customerIdentifiers.create).not.toHaveBeenCalled();
+    expect(repos.botCustomers.create).not.toHaveBeenCalled();
+    expect(repos.botCustomers.update).not.toHaveBeenCalled();
+    expect(repos.botCustomers.remove).not.toHaveBeenCalled();
+  });
+
+  it("a suspended organization blocks deletion", async () => {
+    const owner = makeUser({ [ORG_A]: "OWNER" });
+    const { app, repos } = await createTestApp({ users: [owner], organizationStatuses: { [ORG_A]: "SUSPENDED" } });
+    const response = await app.inject({ method: "DELETE", url: `/api/customers/${CUSTOMER_ID}`, headers: authHeaders(owner, ORG_A) });
+    expect(response.json().error.code).toBe("ORGANIZATION_INACTIVE");
+    expect(repos.customers.remove).not.toHaveBeenCalled();
   });
 });
 
@@ -317,6 +432,7 @@ describe("bot <-> customer assignments", () => {
     const owner = makeUser({ [ORG_A]: "OWNER" });
     const { app, repos, privileged } = await createTestApp({ users: [owner] });
     repos.bots.get.mockResolvedValue(bot);
+    repos.customers.get.mockResolvedValue(customer());
     repos.botCustomers.update.mockResolvedValue({ botId: BOT_ID, customerId: CUSTOMER_ID, active: false });
     repos.botCustomers.remove.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
     const headers = authHeaders(owner, ORG_A);

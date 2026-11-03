@@ -23,6 +23,8 @@ export const PERMISSIONS = {
   "bots:manage": ["OWNER", "ADMIN"],
   "customers:read": ["OWNER", "ADMIN", "OPERATOR", "VIEWER"],
   "customers:manage": ["OWNER", "ADMIN", "OPERATOR"],
+  /** Soft delete of a customer (public.delete_customer): history is kept, the customer is hidden and final. */
+  "customers:delete": ["OWNER", "ADMIN"],
   /** EmailBot V2 phase 4: generate / regenerate / revoke Access IDs, list and revoke sessions. */
   "customer-access:manage": ["OWNER", "ADMIN", "OPERATOR"],
   /** EmailBot V2 phase 5: create / remove MANUAL deliveries (same rules as automatic ones). */

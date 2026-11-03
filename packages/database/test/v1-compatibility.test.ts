@@ -72,6 +72,8 @@ const AUTHENTICATED_DEFINER_ALLOWLIST = [
   // V2 phase 5: manual deliveries (role checked inside, organization from the email).
   "public.add_manual_delivery",
   "public.create_organization",
+  // Customer soft delete (OWNER/ADMIN checked inside, atomic, history kept).
+  "public.delete_customer",
   // V2 phase 4: customer Access ID administration (role checked inside, atomic).
   "public.issue_customer_access",
   "public.remove_manual_delivery",

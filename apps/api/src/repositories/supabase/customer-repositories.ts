@@ -65,7 +65,11 @@ export function customerRepository(db: SupabaseClient): CustomerRepository {
   return {
     async list(organizationId, query) {
       const from = (query.page - 1) * query.pageSize;
-      let request = db.from("customers").select(CUSTOMER_COLUMNS, { count: "exact" }).eq("organization_id", organizationId);
+      let request = db
+        .from("customers")
+        .select(CUSTOMER_COLUMNS, { count: "exact" })
+        .eq("organization_id", organizationId)
+        .is("deleted_at", null);
       if (query.status) request = request.eq("status", query.status);
 
       const term = query.search ? sanitizeSearchTerm(query.search) : "";
@@ -94,7 +98,13 @@ export function customerRepository(db: SupabaseClient): CustomerRepository {
 
     async get(organizationId, id) {
       const row = unwrap(
-        await db.from("customers").select(CUSTOMER_COLUMNS).eq("organization_id", organizationId).eq("id", id).maybeSingle()
+        await db
+          .from("customers")
+          .select(CUSTOMER_COLUMNS)
+          .eq("organization_id", organizationId)
+          .eq("id", id)
+          .is("deleted_at", null)
+          .maybeSingle()
       ) as Row | null;
       return row ? toCustomer(row) : null;
     },
@@ -117,10 +127,25 @@ export function customerRepository(db: SupabaseClient): CustomerRepository {
           .update(toCustomerColumns(patch))
           .eq("organization_id", organizationId)
           .eq("id", id)
+          .is("deleted_at", null)
           .select(CUSTOMER_COLUMNS)
           .maybeSingle()
       ) as Row | null;
       return row ? toCustomer(row) : null;
+    },
+
+    async remove(organizationId, id) {
+      // Soft delete in one transaction (public.delete_customer). Missing, foreign, already deleted
+      // customers and a role that may not delete are the same 42501 there.
+      const result = await db.rpc("delete_customer", { p_customer_id: id });
+      if (result.error?.code === "42501") return null;
+      const row = (unwrap(result) as Row[])[0];
+      if (!row || row.organization_id !== organizationId) return null;
+      return {
+        deletedAt: row.deleted_at as string,
+        revokedCredentialId: (row.revoked_credential_id as string | null) ?? null,
+        revokedSessions: Number(row.revoked_sessions ?? 0)
+      };
     }
   };
 }
@@ -200,6 +225,8 @@ export function customerIdentifierRepository(db: SupabaseClient): CustomerIdenti
 }
 
 const WITH_CUSTOMER = `${ASSIGNMENT_COLUMNS},customer:customers(id,display_name,status,external_ref)`;
+/** Same embed, restricted to customers that are not deleted (inner join). */
+const WITH_LISTED_CUSTOMER = `${ASSIGNMENT_COLUMNS},customer:customers!inner(id,display_name,status,external_ref)`;
 const WITH_BOT = `${ASSIGNMENT_COLUMNS},bot:bots(id,name,slug,status)`;
 
 export function botCustomerRepository(db: SupabaseClient): BotCustomerAssignmentRepository {
@@ -208,9 +235,10 @@ export function botCustomerRepository(db: SupabaseClient): BotCustomerAssignment
       const rows = unwrap(
         await db
           .from("bot_customer_assignments")
-          .select(WITH_CUSTOMER)
+          .select(WITH_LISTED_CUSTOMER)
           .eq("organization_id", organizationId)
           .eq("bot_id", botId)
+          .is("customer.deleted_at", null)
           .order("created_at", { ascending: true })
       ) as Row[];
       return rows.map(toAssignment);

@@ -28,8 +28,10 @@ import { requestEntitlements } from "../plans/entitlements.js";
  * - Every resource id in the path is resolved INSIDE the active organization
  *   (404 otherwise), so ids of other tenants are indistinguishable from
  *   missing ones (IDOR).
- * - Customers are never deleted: suspension (status = SUSPENDED) keeps their
- *   history, identifiers and assignments.
+ * - Customers are never physically deleted: suspension (status = SUSPENDED)
+ *   or a soft delete (OWNER/ADMIN, public.delete_customer) keeps their
+ *   history, deliveries, identifiers and assignments. A deleted customer is
+ *   hidden: every route below answers 404 for it.
  * - Audit: existing actions + metadata.event. Identifier VALUES are personal
  *   data and are never written to the audit log (type and scope only).
  */
@@ -67,6 +69,7 @@ function statusEvent(before: Customer, after: Customer): "customer.suspended" | 
 export async function customerRoutes(app: FastifyInstance) {
   const read = { preHandler: [app.authenticate, app.requireOrganization, requirePermission("customers:read")] };
   const manage = { preHandler: [app.authenticate, app.requireOrganization, requirePermission("customers:manage")] };
+  const remove = { preHandler: [app.authenticate, app.requireOrganization, requirePermission("customers:delete")] };
 
   /* ------------------------------------------------------------ customers */
 
@@ -123,6 +126,28 @@ export async function customerRoutes(app: FastifyInstance) {
       await app.audit(request, { action: "UPDATE", entityType: "customer", entityId: id, metadata: { event: "customer.updated", fields } });
     }
     return { customer };
+  });
+
+  app.delete("/customers/:id", remove, async (request, reply) => {
+    const organizationId = getOrganization(request).id;
+    const { id } = parseWith(idParamsSchema, request.params, "params");
+    await requireCustomer(request, id);
+
+    const deletion = await getAuth(request).repos.customers.remove(organizationId, id);
+    if (!deletion) throw notFound("Customer");
+    // Actor and time are the audit entry's own; the customer's name is personal data and is not copied.
+    await app.audit(request, {
+      action: "DELETE",
+      entityType: "customer",
+      entityId: id,
+      metadata: {
+        event: "customer.deleted",
+        deletedAt: deletion.deletedAt,
+        accessRevoked: deletion.revokedCredentialId !== null,
+        revokedSessions: deletion.revokedSessions
+      }
+    });
+    return reply.status(204).send();
   });
 
   /* ------------------------------------------------------------ identifiers */
@@ -249,6 +274,7 @@ export async function customerRoutes(app: FastifyInstance) {
     const { id, customerId } = parseWith(botCustomerParamsSchema, request.params, "params");
     const { active } = parseWith(botCustomerUpdateSchema, request.body);
     await requireBot(request, id);
+    await requireCustomer(request, customerId);
 
     const assignment = await getAuth(request).repos.botCustomers.update(organizationId, id, customerId, active);
     if (!assignment) throw notFound("Assignment");
@@ -265,6 +291,8 @@ export async function customerRoutes(app: FastifyInstance) {
     const organizationId = getOrganization(request).id;
     const { id, customerId } = parseWith(botCustomerParamsSchema, request.params, "params");
     await requireBot(request, id);
+    // The assignments of a deleted customer are history: neither changed nor removed.
+    await requireCustomer(request, customerId);
 
     const removed = await getAuth(request).repos.botCustomers.remove(organizationId, id, customerId);
     if (!removed) throw notFound("Assignment");

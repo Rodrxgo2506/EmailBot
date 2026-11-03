@@ -74,7 +74,7 @@ export function createFakeRepositories(): DeepMock<Repositories> {
     emailAccounts: ["list", "get", "update", "remove"],
     categories: ["list", "get", "create", "update", "remove"],
     bots: ["list", "get", "create", "update", "remove", "hasEmails", "hasCustomerLinks"],
-    customers: ["list", "get", "create", "update"],
+    customers: ["list", "get", "create", "update", "remove"],
     customerIdentifiers: ["list", "get", "create", "update", "remove"],
     botCustomers: ["listForBot", "listForCustomer", "get", "create", "update", "remove"],
     customerAccess: ["getActive", "listSessions", "issue", "revoke", "revokeSessions"],
